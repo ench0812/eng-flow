@@ -1,0 +1,10 @@
+{
+  "name": "eng-flow",
+  "description": "Streamlined engineering workflow skills — merged from superpowers + agent-skills, optimized for token efficiency",
+  "version": "1.0.0",
+  "author": {
+    "name": "Mark Huang"
+  },
+  "license": "MIT",
+  "skills": "./skills"
+}
