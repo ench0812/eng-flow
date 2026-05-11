@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ench0812-plugins",
+  "description": "Custom engineering workflow plugins by Mark Huang",
+  "owner": {
+    "name": "Mark Huang",
+    "url": "https://github.com/ench0812"
+  },
+  "plugins": [
+    {
+      "name": "eng-flow",
+      "description": "Streamlined engineering workflow skills — merged from superpowers + agent-skills, optimized for token efficiency (~93% reduction). 10 skills: brainstorm, plan, execute, debug, tdd, review, ship, secure, optimize.",
+      "category": "development",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/ench0812/eng-flow.git"
+      },
+      "homepage": "https://github.com/ench0812/eng-flow"
+    }
+  ]
+}

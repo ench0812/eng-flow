@@ -19,12 +19,47 @@ Streamlined engineering workflow skills for Claude Code — merged from [superpo
 
 ## Install
 
-```bash
-# In Claude Code
-/plugin install from local path: C:\Users\markh\.claude\plugins\local\eng-flow
+### Method 1: Add marketplace + install (recommended)
+
+First, add the marketplace source (one-time setup):
+
+```
+/plugin marketplace add https://github.com/ench0812/eng-flow.git
 ```
 
-Or add to `~/.claude/plugins/installed_plugins.json` manually.
+Then install:
+
+```
+/plugin install eng-flow
+```
+
+### Method 2: Direct GitHub URL
+
+```
+/plugin install --url https://github.com/ench0812/eng-flow.git
+```
+
+### Method 3: Manual (edit JSON)
+
+Add to `~/.claude/plugins/installed_plugins.json`:
+
+```json
+"eng-flow@ench0812-plugins": [
+  {
+    "scope": "user",
+    "installPath": "<path-to-cached-clone>",
+    "version": "1.0.0",
+    "installedAt": "2026-05-11T00:00:00.000Z",
+    "lastUpdated": "2026-05-11T00:00:00.000Z"
+  }
+]
+```
+
+## Uninstall
+
+```
+/plugin uninstall eng-flow
+```
 
 ## License
 
