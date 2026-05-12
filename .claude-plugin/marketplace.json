@@ -11,10 +11,7 @@
       "name": "eng-flow",
       "description": "Streamlined engineering workflow skills — merged from superpowers + agent-skills, optimized for token efficiency (~93% reduction). 10 skills: brainstorm, plan, execute, debug, tdd, review, ship, secure, optimize.",
       "category": "development",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/ench0812/eng-flow.git"
-      },
+      "source": ".",
       "homepage": "https://github.com/ench0812/eng-flow"
     }
   ]
