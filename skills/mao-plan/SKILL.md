@@ -1,5 +1,5 @@
 ---
-name: plan
+name: mao-plan
 description: 任務分解 + 實作計劃撰寫。有 spec 需要拆成可執行步驟時使用。
 ---
 
@@ -12,7 +12,7 @@ Write comprehensive implementation plans assuming the engineer has zero codebase
 ```markdown
 # [Feature] Implementation Plan
 
-> **For agentic workers:** Use eng-flow:execute to implement this plan task-by-task.
+> **For agentic workers:** Use eng-flow:mao-execute to implement this plan task-by-task.
 
 **Goal:** [One sentence]
 **Architecture:** [2-3 sentences]
@@ -92,5 +92,5 @@ Save to: `docs/plans/YYYY-MM-DD-<feature>.md`
 ## Execution Handoff
 
 After saving, offer:
-1. **Subagent-Driven** (recommended) — `eng-flow:execute`, fresh subagent per task
+1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task
 2. **Inline** — execute sequentially in current session

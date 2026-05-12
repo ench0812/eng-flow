@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "eng-flow",
-      "description": "Streamlined engineering workflow skills — merged from superpowers + agent-skills, optimized for token efficiency (~93% reduction). 10 skills: brainstorm, plan, execute, debug, tdd, review, ship, secure, optimize.",
+      "description": "Streamlined engineering workflow skills — merged from superpowers + agent-skills, optimized for token efficiency (~93% reduction). 10 skills: mao-brainstorm, mao-plan, mao-execute, mao-debug, mao-tdd, mao-review, mao-ship, mao-secure, mao-optimize.",
       "category": "development",
       "source": ".",
       "homepage": "https://github.com/ench0812/eng-flow"

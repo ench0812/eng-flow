@@ -1,5 +1,5 @@
 ---
-name: secure
+name: mao-secure
 description: 安全加固。處理輸入驗證、認證、資料安全時使用。三層邊界防禦模型。
 ---
 

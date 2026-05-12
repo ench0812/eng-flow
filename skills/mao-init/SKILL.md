@@ -1,5 +1,5 @@
 ---
-name: init
+name: mao-init
 description: 工作流分發器。映射任務類型到對應技能，設定核心行為準則。每次對話開始時自動注入。
 ---
 
@@ -15,15 +15,15 @@ If you were dispatched as a subagent to execute a specific task, skip this skill
 
 | 使用者意圖 | Skill | 說明 |
 |-----------|-------|------|
-| 模糊想法、需求不清、「我想做…」 | `brainstorm` | 設計先行，不寫 code |
-| 有 spec，需要拆任務 | `plan` | 任務分解 + plan 撰寫 |
-| 有 plan，開始實作 | `execute` | Subagent 逐 task 執行 |
-| Bug、測試失敗、非預期行為 | `debug` | 根因調查優先 |
-| 新邏輯、修 bug 的實作 | `tdd` | Red-Green-Refactor |
-| 合併前檢查、PR review | `review` | 五軸審查 |
-| 分支完成、準備合併/發布 | `ship` | 驗證 + 合併流程 |
-| 輸入驗證、認證、資料安全 | `secure` | 安全加固 |
-| 效能問題、響應慢 | `optimize` | 量測優先 |
+| 模糊想法、需求不清、「我想做…」 | `mao-brainstorm` | 設計先行，不寫 code |
+| 有 spec，需要拆任務 | `mao-plan` | 任務分解 + plan 撰寫 |
+| 有 plan，開始實作 | `mao-execute` | Subagent 逐 task 執行 |
+| Bug、測試失敗、非預期行為 | `mao-debug` | 根因調查優先 |
+| 新邏輯、修 bug 的實作 | `mao-tdd` | Red-Green-Refactor |
+| 合併前檢查、PR review | `mao-review` | 五軸審查 |
+| 分支完成、準備合併/發布 | `mao-ship` | 驗證 + 合併流程 |
+| 輸入驗證、認證、資料安全 | `mao-secure` | 安全加固 |
+| 效能問題、響應慢 | `mao-optimize` | 量測優先 |
 
 ## 核心行為準則
 
@@ -35,5 +35,5 @@ If you were dispatched as a subagent to execute a specific task, skip this skill
 
 ## Skill 類型
 
-**剛性** (tdd, debug): 嚴格遵守，不因「太簡單」跳過。
-**柔性** (brainstorm, plan, review): 依情境調整深度。
+**剛性** (mao-tdd, mao-debug): 嚴格遵守，不因「太簡單」跳過。
+**柔性** (mao-brainstorm, mao-plan, mao-review): 依情境調整深度。

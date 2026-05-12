@@ -1,5 +1,5 @@
 ---
-name: review
+name: mao-review
 description: 五軸 code review。合併前檢查、PR review、code quality 審查時使用。
 ---
 

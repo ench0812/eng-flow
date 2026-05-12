@@ -1,5 +1,5 @@
 ---
-name: tdd
+name: mao-tdd
 description: 測試驅動開發。實作新邏輯或修 bug 時使用。Iron Law：沒有失敗的測試就不寫 production code。
 ---
 

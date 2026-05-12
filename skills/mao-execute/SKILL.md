@@ -1,5 +1,5 @@
 ---
-name: execute
+name: mao-execute
 description: Subagent 驅動執行。有 plan 需要逐 task 實作時使用。每 task 一個 subagent + 兩階段 review。
 ---
 

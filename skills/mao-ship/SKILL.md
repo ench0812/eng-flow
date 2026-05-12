@@ -1,5 +1,5 @@
 ---
-name: ship
+name: mao-ship
 description: 分支完成 + 合併流程。準備合併、發布、結束 feature branch 時使用。
 ---
 

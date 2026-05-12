@@ -1,7 +1,7 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_DIR="$(dirname "$SCRIPT_DIR")/skills"
-META_SKILL="$SKILLS_DIR/init/SKILL.md"
+META_SKILL="$SKILLS_DIR/mao-init/SKILL.md"
 
 if [ -f "$META_SKILL" ]; then
   CONTENT=$(cat "$META_SKILL")
@@ -11,5 +11,5 @@ if [ -f "$META_SKILL" ]; then
     echo "{\"priority\": \"IMPORTANT\", \"message\": \"eng-flow loaded. Invoke skills via Skill tool with eng-flow: prefix.\"}"
   fi
 else
-  echo '{"priority": "INFO", "message": "eng-flow: init skill not found."}'
+  echo '{"priority": "INFO", "message": "eng-flow: mao-init skill not found."}'
 fi

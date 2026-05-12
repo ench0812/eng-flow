@@ -6,16 +6,16 @@ Streamlined engineering workflow skills for Claude Code — merged from [superpo
 
 | Skill | Description |
 |-------|-------------|
-| `init` | Meta-dispatcher — maps task types to skills, core behavior rules |
-| `brainstorm` | Design-first exploration with HARD-GATE, 2-3 approaches, spec output |
-| `plan` | Task breakdown with checkboxes, no-placeholder discipline, vertical slicing |
-| `execute` | Subagent-driven execution with two-stage review (spec + quality) |
-| `debug` | Root-cause debugging — Iron Law + 6-step triage |
-| `tdd` | Red-Green-Refactor with DAMP > DRY, mock preference order |
-| `review` | Five-axis code review with severity labels |
-| `ship` | Branch completion — verification iron gate + merge options |
-| `secure` | Three-tier security boundary (Always / Ask First / Never) |
-| `optimize` | Measure-first performance optimization |
+| `mao-init` | Meta-dispatcher — maps task types to skills, core behavior rules |
+| `mao-brainstorm` | Design-first exploration with HARD-GATE, 2-3 approaches, spec output |
+| `mao-plan` | Task breakdown with checkboxes, no-placeholder discipline, vertical slicing |
+| `mao-execute` | Subagent-driven execution with two-stage review (spec + quality) |
+| `mao-debug` | Root-cause debugging — Iron Law + 6-step triage |
+| `mao-tdd` | Red-Green-Refactor with DAMP > DRY, mock preference order |
+| `mao-review` | Five-axis code review with severity labels |
+| `mao-ship` | Branch completion — verification iron gate + merge options |
+| `mao-secure` | Three-tier security boundary (Always / Ask First / Never) |
+| `mao-optimize` | Measure-first performance optimization |
 
 ## Install
 

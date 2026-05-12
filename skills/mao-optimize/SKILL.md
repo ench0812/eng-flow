@@ -1,5 +1,5 @@
 ---
-name: optimize
+name: mao-optimize
 description: 效能優化。量測優先。效能問題、響應慢、記憶體/電量消耗時使用。
 ---
 

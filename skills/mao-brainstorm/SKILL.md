@@ -1,5 +1,5 @@
 ---
-name: brainstorm
+name: mao-brainstorm
 description: 設計先行。新功能、需求不清、「我想做…」時使用。禁止未經設計就寫 code。
 ---
 
@@ -45,7 +45,7 @@ Save to `docs/specs/YYYY-MM-DD-<topic>-design.md`
 Wait for approval. If changes requested, fix and re-review.
 
 ### 7. Transition
-After user approves → invoke `eng-flow:plan` to create implementation plan.
+After user approves → invoke `eng-flow:mao-plan` to create implementation plan.
 
 ## Anti-Patterns
 - Skipping design for "simple" tasks — they're where assumptions bite hardest

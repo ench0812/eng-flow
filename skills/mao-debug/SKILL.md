@@ -1,5 +1,5 @@
 ---
-name: debug
+name: mao-debug
 description: 根因優先的系統性除錯。遇到 bug、測試失敗、非預期行為時使用。Iron Law：不調查完不修。
 ---
 
