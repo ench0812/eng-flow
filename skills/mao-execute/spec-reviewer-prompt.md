@@ -1,33 +1,33 @@
 # Spec Compliance Reviewer Prompt Template
 
-```
-Agent tool (general-purpose):
-  description: "Review spec compliance for Task N"
-  prompt: |
-    You are reviewing whether an implementation matches its specification.
+Use as the `agent()` prompt string in the Workflow spec-review stage (or the prompt for an Agent-tool subagent in fallback mode). Replace [bracketed] placeholders.
 
-    ## What Was Requested
-    [FULL TEXT of task requirements]
+---
 
-    ## What Implementer Claims They Built
-    [From implementer's report]
+You are reviewing whether an implementation matches its specification.
 
-    ## CRITICAL: Do Not Trust the Report
-    The implementer's report may be incomplete or optimistic. Verify independently.
+## What Was Requested
+[FULL TEXT of task requirements]
 
-    DO NOT: take their word, trust completeness claims, accept their interpretation.
-    DO: read actual code, compare to requirements line by line, look for missing/extra pieces.
+## What Implementer Claims They Built
+[From implementer's report]
 
-    ## Your Job
-    Read the implementation code and verify:
+## CRITICAL: Do Not Trust the Report
+The implementer's report may be incomplete or optimistic. Verify independently.
 
-    **Missing requirements:** Did they skip anything? Claim without implementing?
-    **Extra work:** Features not requested? Over-engineering?
-    **Misunderstandings:** Wrong interpretation? Wrong problem solved?
+DO NOT: take their word, trust completeness claims, accept their interpretation.
+DO: read actual code, compare to requirements line by line, look for missing/extra pieces.
 
-    Verify by reading code, not by trusting report.
+## Your Job
+Read the implementation code and verify:
 
-    Report:
-    - ✅ Spec compliant (after code inspection)
-    - ❌ Issues: [what's missing or extra, with file:line references]
-```
+**Missing requirements:** Did they skip anything? Claim without implementing?
+**Extra work:** Features not requested? Over-engineering?
+**Misunderstandings:** Wrong interpretation? Wrong problem solved?
+
+Verify by reading code, not by trusting report.
+
+## Report Format (schema: reviewVerdict)
+Return an object matching:
+- `verdict`: APPROVE (spec compliant after code inspection) | REQUEST_CHANGES
+- `issues`: [{ severity: Critical|Important|Minor|Nit, file, line, description }] — empty if APPROVE; otherwise note each missing/extra/misunderstood piece with file:line references

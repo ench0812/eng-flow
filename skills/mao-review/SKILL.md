@@ -70,7 +70,7 @@ Approve when the change **definitely improves overall code health**, even if it 
 
 ## Subagent Dispatch
 
-For automated review, dispatch a reviewer subagent using the template at `execute/code-reviewer-prompt.md`:
+For automated review, run a reviewer via Workflow `agent()` (or Agent tool directly for a single-file review) using the template at `mao-execute/code-reviewer-prompt.md`:
 - Provide git SHAs (base and head)
 - Include task/plan requirements
 - List changed files

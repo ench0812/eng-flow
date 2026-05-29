@@ -92,5 +92,5 @@ Save to: `docs/plans/YYYY-MM-DD-<feature>.md`
 ## Execution Handoff
 
 After saving, offer:
-1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task
+1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task. Under ultracode it authors a Workflow to orchestrate the tasks — review the generated script before approving on large plans.
 2. **Inline** — execute sequentially in current session
