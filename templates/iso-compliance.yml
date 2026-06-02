@@ -1,0 +1,36 @@
+name: ISO 27001 Compliance Gate
+# Deployed by eng-flow (mao-comply). Covers what local hooks cannot: every PR/push in CI.
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
+jobs:
+  secret-scan:
+    name: Secret scan (A.8.24)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+  dependency-audit:
+    name: Dependency audit (A.8.8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Node audit
+        if: hashFiles('package.json') != ''
+        run: npm audit --audit-level=high
+      - name: Composer audit
+        if: hashFiles('composer.lock') != ''
+        run: |
+          composer install --no-interaction --no-progress --prefer-dist || true
+          composer audit
+      # SAST gate (A.8.28/A.8.29): wire in Semgrep or CodeQL per stack, e.g.
+      # - uses: returntocorp/semgrep-action@v1   # or github/codeql-action

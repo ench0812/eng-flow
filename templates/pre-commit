@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# ISO 27001 pre-commit gate - deployed by eng-flow (mao-comply / deploy-iso-gate.sh).
+# Covers commits made by humans or terminal that Claude's PreToolUse hooks cannot see.
+# Edit freely; commit this file so the whole team gets the gate.
+set -uo pipefail
+
+fail=0
+staged="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)"
+[ -z "$staged" ] && exit 0
+
+# 1) Secret scan (A.8.24). gitleaks if installed, else high-precision regex fallback.
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --redact >/dev/null 2>&1 || { echo "[ISO A.8.24] gitleaks: secret detected in staged changes." >&2; fail=1; }
+else
+  Q='["'"'"']'; NQ='[^"'"'"']'
+  KEYMAT='-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[0-9A-Za-z]{36,}|xox[baprs]-[0-9A-Za-z-]{10,}|[sr]k_(live|test)_[0-9A-Za-z]{16,}'
+  GEN="(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)[[:space:]]*[:=][[:space:]]*${Q}${NQ}{8,}${Q}"
+  ALLOW='process\.env|os\.environ|getenv|ENV\[|\$\{|<[^>]+>|example|placeholder|changeme|your[_-]|xxxx|\*\*\*|dummy|sample|fake|iso-scan:[[:space:]]*ignore'
+  for f in $staged; do
+    case "$f" in *.md|*.txt|*.lock|*.example|*.sample|*test*|*fixture*|*mock*) continue ;; esac
+    blob="$(git show ":$f" 2>/dev/null || true)"
+    [ -z "$blob" ] && continue
+    if printf '%s' "$blob" | grep -qE -- "$KEYMAT"; then
+      echo "[ISO A.8.24] key material detected in $f (install gitleaks for deeper scanning)" >&2; fail=1; continue
+    fi
+    if printf '%s' "$blob" | grep -iE "$GEN" | grep -ivqE "$ALLOW"; then
+      echo "[ISO A.8.24] hardcoded credential in $f (install gitleaks for deeper scanning)" >&2; fail=1
+    fi
+  done
+fi
+
+# 2) Dependency audit (A.8.8) - blocks on high/critical, best-effort per ecosystem.
+if [ -f package.json ] && command -v npm >/dev/null 2>&1; then
+  npm audit --audit-level=high >/dev/null 2>&1 || { echo "[ISO A.8.8] npm audit: high/critical vulnerability." >&2; fail=1; }
+fi
+if [ -f composer.lock ] && command -v composer >/dev/null 2>&1; then
+  composer audit >/dev/null 2>&1 || { echo "[ISO A.8.8] composer audit: vulnerability found." >&2; fail=1; }
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "Pre-commit ISO 27001 gate FAILED. Resolve the findings above." >&2
+  echo "(Do NOT use --no-verify to bypass; fix the cause.)" >&2
+  exit 1
+fi
+exit 0

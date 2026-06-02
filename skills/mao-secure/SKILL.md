@@ -8,12 +8,12 @@ description: 安全加固。處理輸入驗證、認證、資料安全時使用�
 ## Three-Tier Boundary System
 
 ### Always Do (Non-negotiable)
-- **Parameterize queries** — never concatenate user input into SQL/queries
-- **Validate at boundaries** — all external input (user, API, file) validated on entry
-- **Secrets in environment** — never in code, logs, or version control
-- **Encode output** — prevent injection when rendering user-provided data
-- **Use framework auth** — don't roll your own authentication/encryption
-- **Least privilege** — request minimum permissions needed
+- **Parameterize queries** — never concatenate user input into SQL/queries [A.8.28]
+- **Validate at boundaries** — all external input (user, API, file) validated on entry [A.8.26]
+- **Secrets in environment** — never in code, logs, or version control [A.8.24/A.8.28]
+- **Encode output** — prevent injection when rendering user-provided data [A.8.28]
+- **Use framework auth** — don't roll your own authentication/encryption [A.8.5/A.8.24]
+- **Least privilege** — request minimum permissions needed [A.5.15/A.8.2]
 
 ### Ask First (Context-dependent)
 - Rate limiting on public endpoints
@@ -23,12 +23,19 @@ description: 安全加固。處理輸入驗證、認證、資料安全時使用�
 - Session timeout policies
 
 ### Never Do
-- Store plaintext passwords
-- Log sensitive data (tokens, passwords, PII)
-- Trust client-side validation alone
-- Disable security features for convenience
-- Hardcode credentials or API keys
-- Use deprecated crypto algorithms
+- Store plaintext passwords (use bcrypt/Argon2id/scrypt) [A.8.5]
+- Log sensitive data (tokens, passwords, PII) [A.8.15/A.8.11]
+- Trust client-side validation alone [A.8.3]
+- Disable security features for convenience (no `--no-verify`) [A.8.32]
+- Hardcode credentials or API keys [A.8.24]
+- Use deprecated crypto algorithms (MD5/SHA-1/DES/3DES/RC4; require TLS 1.2+) [A.8.24]
+
+### ISO 27001 additions (load `mao-comply` for full self-check + gate deploy)
+- **Env separation** — dev/test/prod isolated; no shared secrets; no unmasked prod data in non-prod [A.8.31/A.8.33]
+- **Dependency hygiene** — pin versions + lockfile; SCA on every PR; no high/critical CVE unreviewed [A.8.7/A.8.8/A.5.21]
+- **Source control** — branch protection: required review + green CI; only CI/CD pushes to prod [A.8.4]
+- **Audit trail** — security-event logs immutable, not deletable by app accounts [A.5.33/A.8.15]
+- **Change control** — prod change via CI/CD + change record, no manual console [A.8.9/A.8.32]
 
 ## Input Validation Principles
 

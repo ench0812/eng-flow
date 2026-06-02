@@ -30,11 +30,14 @@ Approve when the change **definitely improves overall code health**, even if it 
 - Code duplication that should be shared?
 - Dependencies flowing correctly (no circular)?
 
-### 4. Security
-- User input validated and sanitized?
-- Secrets out of code, logs, version control?
-- Auth/authz checked where needed?
-- Queries parameterized? Outputs encoded?
+### 4. Security & ISO 27001 Compliance
+- User input validated and sanitized? Queries parameterized? Outputs encoded? [A.8.28]
+- Secrets out of code, logs, version control? No PII/secrets in logs? [A.8.24/A.8.15]
+- Auth/authz checked server-side where needed (not UI-only)? [A.8.3/A.8.5]
+- TLS 1.2+ / AES-256, no banned crypto? [A.8.24]
+- New/changed deps pinned + SCA-clean (no high/critical CVE)? [A.8.7/A.8.8]
+- No `--no-verify`, no unmasked prod data in tests, no manual prod change? [A.8.32/A.8.33]
+- Deeper pass → invoke `mao-comply` self-check.
 
 ### 5. Performance
 - N+1 query patterns?
