@@ -1,0 +1,8 @@
+# Scripts and git-hook/CI templates are executed by bash / git directly on every OS.
+# Force LF so CRLF (from core.autocrlf=true on Windows) never breaks the shebang.
+*.sh               text eol=lf
+*.json             text eol=lf
+*.yml              text eol=lf
+*.yaml             text eol=lf
+*.md               text eol=lf
+templates/pre-commit text eol=lf
