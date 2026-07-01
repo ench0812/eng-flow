@@ -13,6 +13,7 @@ Do NOT write any code, scaffold, or take implementation actions until you have p
 
 ### 1. Explore Context
 - Read relevant code, docs, recent commits
+- 不熟 / 大型 codebase → `repomix --compress`（或 `--include "<相關模組 glob>"` 打包子集）一次取得全庫上下文，勝過逐檔盲讀。見 `references/repomix.md`
 - If request spans multiple independent subsystems → suggest decomposition first
 - Each sub-project gets its own spec → plan → implementation cycle
 

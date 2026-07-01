@@ -40,6 +40,8 @@ Narrow down WHERE:
 
 **For regressions:** `git bisect start` → `git bisect bad` → `git bisect good <sha>` → `git bisect run <test-command>`
 
+**溯源「最近改了什麼」:** `repomix --include-logs --include-diffs --include "<疑似區域 glob>"` 把近期 commit + diff 打成單檔餵給 LLM 分析，快速定位 regression。見 `references/repomix.md`
+
 ### Step 3: Reduce
 Create the minimal failing case. Remove unrelated code/config until only the bug remains. A minimal reproduction makes root cause obvious.
 

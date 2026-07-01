@@ -51,6 +51,8 @@ Expected: FAIL with "specific message"
 
 ## Planning Process
 
+> 零上下文規劃前，先 `repomix --include "<要動的模組 glob>"` 打包相關模組，建立全庫理解再拆任務——避免 plan 引用不存在的檔/簽章。見 `references/repomix.md`
+
 ### 1. Map Dependencies
 Identify what depends on what. Implementation order follows the graph bottom-up.
 

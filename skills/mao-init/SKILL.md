@@ -26,6 +26,10 @@ If you are executing a specific task with defined inputs and expected outputs (r
 | ISO 27001 合規查核、稽核、部署合規 gate | `mao-comply` | ISO 27001 自檢 + 專案 gate |
 | 效能問題、響應慢 | `mao-optimize` | 量測優先 |
 
+## 情境工具
+
+需要把「一批既有程式碼」當上下文餵給 LLM/subagent（探索不熟 codebase、打包 diff 給 reviewer、給除錯溯源）→ 用 `repomix` 打包成單一檔，別逐檔手貼或讓 subagent 盲讀。指令與 ISO 注意事項見 `${CLAUDE_PLUGIN_ROOT}/references/repomix.md`。單檔小改、已知精確位置不用它。
+
 ## 核心行為準則
 
 1. **假設先表面化** — 非 trivial 工作前，列出你的假設讓使用者確認

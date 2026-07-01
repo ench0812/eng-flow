@@ -17,6 +17,10 @@ Streamlined engineering workflow skills for Claude Code — merged from [superpo
 | `mao-secure` | Three-tier security boundary (Always / Ask First / Never) |
 | `mao-optimize` | Measure-first performance optimization |
 
+## References
+
+`references/repomix.md` — when to use [repomix](https://github.com/yamadashy/repomix) to pack codebase context for an LLM/subagent (explore unfamiliar code, bundle a diff for a reviewer, trace a regression), the common commands, and the ISO 27001 / privacy rules. `mao-init`, `mao-brainstorm`, `mao-plan`, `mao-review`, and `mao-debug` point here. Requires the `repomix` CLI (`npm i -g repomix`).
+
 ## Install
 
 ### Method 1: Add marketplace + install (recommended)

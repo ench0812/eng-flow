@@ -1,7 +1,7 @@
 {
   "name": "eng-flow",
   "description": "Streamlined engineering workflow skills — merged from superpowers + agent-skills, optimized for token efficiency. Includes ISO 27001 compliance skill + secret/supply-chain enforcement hooks.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "Mark Huang"
   },

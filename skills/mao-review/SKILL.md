@@ -77,6 +77,7 @@ For automated review, run a reviewer via Workflow `agent()` (or Agent tool direc
 - Provide git SHAs (base and head)
 - Include task/plan requirements
 - List changed files
+- 大型 / 跨檔改動：`repomix --include-diffs --include "<相關檔 glob>"` 把 diff + 周邊上下文打成單檔餵給 reviewer agent()，勝過只給 SHA 讓它逐檔撈。見 `references/repomix.md`
 
 ## Dead Code Hygiene
 
