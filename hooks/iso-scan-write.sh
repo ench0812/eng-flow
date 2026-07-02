@@ -34,4 +34,15 @@ if reason="$(printf '%s' "$content" | find_secret)"; then
   }'
   exit 0
 fi
+
+if reason="$(printf '%s' "$content" | find_banned_crypto)"; then
+  "$JQ" -cn --arg r "$reason" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: ("[ISO 27001 A.8.24] Banned crypto blocked (" + $r + "). Use SHA-256+/bcrypt/argon2 for hashing, AES-256-GCM for encryption. Non-security checksum? Add an \"iso-scan:ignore\" comment with justification.")
+    }
+  }'
+  exit 0
+fi
 exit 0

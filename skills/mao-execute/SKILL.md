@@ -23,7 +23,7 @@ REQUEST_CHANGES → back to implement → re-review (conditional branch in the s
 All tasks done → final review of the whole implementation
 ```
 
-Omit `model` in `agent()` → inherits the session (main-loop) model. Only set `model:"haiku"` for genuinely mechanical high-volume stages.
+Model routing (shared rules: `references/model-routing.md`): implement / spec-review / code-review stages default to `model:"sonnet"`. Omit `model` (inherit the session model) only for tasks flagged architecture-level or high-uncertainty. Set `model:"haiku"` for genuinely mechanical high-volume stages.
 
 **Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool per task.
 

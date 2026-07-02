@@ -32,5 +32,7 @@ jobs:
         run: |
           composer install --no-interaction --no-progress --prefer-dist || true
           composer audit
-      # SAST gate (A.8.28/A.8.29): wire in Semgrep or CodeQL per stack, e.g.
+      # NOTE: SAST is NOT enabled by default — this gate only covers secret scan +
+      # dependency audit. Injection-class findings (A.8.28/A.8.29) require wiring in
+      # Semgrep or CodeQL per stack yourself, e.g.
       # - uses: returntocorp/semgrep-action@v1   # or github/codeql-action

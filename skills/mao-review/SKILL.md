@@ -5,6 +5,11 @@ description: 五軸 code review。合併前檢查、PR review、code quality 審
 
 # Five-Axis Code Review
 
+## When to Use Which Review
+- Quick working-tree diff review → built-in `/code-review`
+- GitHub PR lifecycle review → built-in `/review` or the code-review plugin command
+- This skill: five axes + ISO 27001 tags + severity taxonomy shared with mao-execute (merge gate)
+
 ## Approval Standard
 
 Approve when the change **definitely improves overall code health**, even if it isn't perfect. Don't block because it isn't how you'd have written it.
@@ -74,6 +79,7 @@ Approve when the change **definitely improves overall code health**, even if it 
 ## Subagent Dispatch
 
 For automated review, run a reviewer via Workflow `agent()` (or Agent tool directly for a single-file review) using the template at `mao-execute/code-reviewer-prompt.md`:
+- Model: default `model:"sonnet"` (same routing as mao-execute; see `references/model-routing.md`). High-risk changes (security/auth/data) → omit `model` to inherit the session model
 - Provide git SHAs (base and head)
 - Include task/plan requirements
 - List changed files

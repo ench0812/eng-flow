@@ -5,6 +5,10 @@ description: 測試驅動開發。實作新邏輯或修 bug 時使用。Iron Law
 
 # Test-Driven Development
 
+<SUBAGENT-STOP>
+If you are a subagent executing a specific task dispatched by mao-execute (via Agent tool OR a Workflow agent()), your prompt template already embeds the TDD requirements — do NOT re-invoke this skill; follow your prompt.
+</SUBAGENT-STOP>
+
 ## Iron Law
 
 **NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST.** No exceptions without explicit user approval.

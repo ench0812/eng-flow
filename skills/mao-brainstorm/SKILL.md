@@ -1,6 +1,6 @@
 ---
 name: mao-brainstorm
-description: 設計先行。新功能、需求不清、「我想做…」時使用。禁止未經設計就寫 code。
+description: 設計先行。新功能、跨元件/跨系統設計、需求不清時使用；單檔小改動、機械性修改、明確 bug fix 不適用。禁止未經設計就寫 code。
 ---
 
 # Design Before Code

@@ -2,8 +2,11 @@
 # iso-secret-lib.sh - shared secret detection for eng-flow ISO 27001 hooks.
 # gitleaks-first, regex-fallback. Sourced by iso-scan-write.sh / iso-scan-bash.sh.
 #
-# find_secret  : reads text on stdin. Prints a reason and returns 0 if a likely
-#                secret is found; returns 1 if clean.
+# find_secret        : reads text on stdin. Prints a reason and returns 0 if a
+#                      likely secret is found; returns 1 if clean.
+# find_banned_crypto : reads text on stdin. Prints a reason and returns 0 if a
+#                      banned algorithm (MD5/SHA-1/DES/3DES/RC4) is used for
+#                      security purposes; returns 1 if clean. [A.8.24]
 
 find_secret() {
   local text
@@ -50,6 +53,32 @@ find_secret() {
     | grep -ivE 'process\.env|os\.environ|getenv|ENV\[|System\.getenv|\$\{|\$\(|<[^>]+>|example|placeholder|changeme|your[_-]|xxxx|\*\*\*|dummy|sample|redacted|fake|todo' 2>/dev/null || true)"
   if [ -n "$hits" ]; then
     echo "hardcoded credential assignment"; return 0
+  fi
+
+  return 1
+}
+
+find_banned_crypto() {
+  local text
+  text="$(cat)"
+
+  # Inline bypass for confirmed false positives (e.g. non-security checksums with
+  # documented justification).
+  if printf '%s' "$text" | grep -qiE 'iso-scan:[[:space:]]*ignore'; then
+    return 1
+  fi
+
+  # Hash constructors / hash-name arguments across the user's stacks
+  # (PHP md5()/sha1(), Node createHash, Python hashlib, Java/Kotlin getInstance).
+  if printf '%s' "$text" | grep -qE '\b(md5|sha1)\s*\(' ; then
+    echo "weak hash md5/sha1 call"; return 0
+  fi
+  if printf '%s' "$text" | grep -qiE "createHash\s*\(\s*['\"](md5|sha-?1)['\"]|hashlib\.(md5|sha1)\b|MessageDigest\.getInstance\s*\(\s*['\"](MD5|SHA-?1)['\"]"; then
+    echo "weak hash md5/sha1 API"; return 0
+  fi
+  # Broken ciphers: DES/3DES/RC4 in cipher-selection contexts.
+  if printf '%s' "$text" | grep -qiE "Cipher\.getInstance\s*\(\s*['\"](DES|DESede|RC4|ARCFOUR)|createCipheriv\s*\(\s*['\"](des|des3|des-ede3|rc4)|openssl_encrypt\s*\([^)]*['\"](des|des-ede3|rc4)"; then
+    echo "banned cipher DES/3DES/RC4"; return 0
   fi
 
   return 1
