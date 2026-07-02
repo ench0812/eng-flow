@@ -23,7 +23,7 @@ REQUEST_CHANGES → back to implement → re-review (conditional branch in the s
 All tasks done → final review of the whole implementation
 ```
 
-Omit `model` in `agent()` → inherits Opus 4.8. Only set `model:"haiku"` for genuinely mechanical high-volume stages.
+Omit `model` in `agent()` → inherits the session (main-loop) model. Only set `model:"haiku"` for genuinely mechanical high-volume stages.
 
 **Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool per task.
 
