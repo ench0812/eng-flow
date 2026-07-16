@@ -76,6 +76,18 @@ Approve when the change **definitely improves overall code health**, even if it 
 4. **Categorize findings** — label severity on every comment
 5. **Verify verification** — what tests ran? Build pass? Manual check?
 
+## Closing Cross-Check (Codex second opinion)
+
+After the five axes are complete AND the author has fixed all Required/Critical findings — **once per review round**, not per file or per fix — run one cross-family second opinion:
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
+```
+
+Set `<level>` to the **highest original severity this review assigned** to the change (Critical/Required/Optional/Nit/FYI — even if now fixed; the risk area remains). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input from this review — never let the script re-triage it. Over-estimate when unsure.
+
+Treat the output as a **pure second opinion**: present findings by severity, do **not** auto-fix, the user decides. If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay the reason in one line, do not install anything.
+
 ## Subagent Dispatch
 
 For automated review, run a reviewer via Workflow `agent()` (or Agent tool directly for a single-file review) using the template at `mao-execute/code-reviewer-prompt.md`:

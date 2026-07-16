@@ -47,6 +47,16 @@ All templates in this directory (use as the `agent()` prompt string; replace [br
 - `spec-reviewer-prompt.md` — spec compliance check
 - `code-reviewer-prompt.md` — quality review (five-axis)
 
+## Closing Cross-Check (Codex second opinion)
+
+After the **final review of the whole implementation** passes (all tasks done, all Required/Critical fixed) — **once**, not per task — run one cross-family second opinion:
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
+```
+
+Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure. Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized.
+
 ## Red Flags
 - Dispatching multiple agents on overlapping files without worktree isolation
 - Skipping spec review ("it looks fine")
