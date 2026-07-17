@@ -26,13 +26,14 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 ```
 - Only enough code to make the test pass
 - No extra features, no "while I'm here" improvements
-- Run all tests — new one passes, existing ones still pass
+- Run the affected test file(s) — new one passes, existing ones still pass
 ```
 
 ### 3. REFACTOR — Clean up (tests still pass)
 ```
 - Improve code quality without changing behavior
-- Run tests after every change
+- Run the affected test file(s) after every change
+- Run the full suite once before committing
 - Commit when clean
 ```
 
@@ -45,6 +46,8 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 **Mock Preference Order:** Real implementations > Fakes > Stubs > Mocks. Use the least fake thing that makes the test fast and reliable.
 
 **Name tests by behavior:** `should reject expired tokens` not `testValidateToken3`.
+
+**No Tautological Assertions:** Expected values must come from an independent source of truth — a known-good literal, a worked example, or the spec. Never recompute the expected value using the same logic as the code under test — it then passes by construction and proves nothing.
 
 ## The Prove-It Pattern (Bug Fixes)
 
@@ -81,3 +84,4 @@ Prefer more unit tests, fewer integration tests, fewest E2E tests.
 - Testing implementation details instead of behavior
 - Mocking everything (tests prove nothing)
 - Skipping the RED step ("I know it'll fail")
+- Tautological assertions — expected value recomputed via the same logic as the code

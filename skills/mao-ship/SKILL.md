@@ -15,6 +15,7 @@ description: 分支完成 + 合併流程。準備合併、發布、結束 featur
 2. Lint:         project-specific lint command
 3. Tests:        project-specific test command
 4. Git status:   git status + git log --oneline main..HEAD
+5. Debug residue (optional, cheap): grep -rn '\[DEBUG-' <changed files>
 ```
 
 If ANY verification fails → fix before proceeding. Do not present merge options with failing tests.
@@ -29,6 +30,18 @@ After verification passes, present these options:
 | **Push + Create PR** | Need review from others, or want CI to run |
 | **Keep as-is** | Not ready yet, will continue later |
 | **Discard** | Experiment that didn't work out |
+
+## Merge Conflict Resolution
+
+When a merge or rebase produces conflicts:
+
+1. **Survey** — run `git status` to see every conflicted file. Don't resolve blind.
+2. **Recover intent** — for each conflict, read the commit message, PR description, or linked issue behind both sides before touching the hunk. Diff text alone doesn't tell you *why* a change was made.
+3. **Resolve hunk by hunk** — preserve both sides' intent where they're compatible. Where they're not, pick the side that matches the merge's goal and note the trade-off in the commit/PR body. Do not invent new behaviour neither side asked for.
+4. **Re-verify** — re-run the same checks as the Verification Iron Gate above; a clean-looking merge can still break the build or tests.
+5. **Finish** — commit (merge) or run `git rebase --continue` through to completion (rebase).
+
+Do not use `--abort` to escape a conflict — that's a decision, not a shortcut. Abandoning the merge/rebase requires explicit user confirmation.
 
 ## Git Discipline
 

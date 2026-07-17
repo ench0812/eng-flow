@@ -22,13 +22,32 @@ When anything unexpected happens:
 ## 6-Step Triage Checklist
 
 ### Step 1: Reproduce
-Make the failure happen reliably. Can't reproduce → can't fix with confidence.
+**Done when:** you can name a command you actually ran and paste its invocation + output. "Should reproduce it" doesn't count.
 
-**Non-reproducible?**
+**Repro must be:**
+- **Red-capable** — asserts the symptom the user described, not just "didn't crash"
+- **Deterministic** — same result every run
+- **Fast** — seconds, not minutes
+- **Agent-runnable** — no manual click-through
+- **Nondeterministic-bug exception** — for races/flaky failures where strict determinism is infeasible, a measured repro rate (e.g. fails 30/100 runs) with preserved failing output satisfies this gate
+
+**Anti-skip rule:** reading code and building theories while this command still doesn't exist? Stop — go back to Step 1.
+
+**Repro ladder** (try in order):
+1. Failing test
+2. HTTP/CLI call + fixture
+3. Headless browser
+4. Replay a captured payload
+5. Throwaway harness script
+6. Fuzz
+7. Bisect (see Step 2)
+8. Differential diff (working vs broken input/config)
+
+**Still non-reproducible?**
 - Timing-dependent → add timestamps, try artificial delays, run under load
 - Environment-dependent → compare versions, env vars, data differences
 - State-dependent → check leaked state, globals, singletons, shared caches
-- Truly random → add defensive logging, set alert, document conditions
+- Truly random → raise the repro rate first: loop 100x, run in parallel, add load, narrow the timing window. Fall back to defensive logging + alert only if still infeasible.
 
 ### Step 2: Localize
 Narrow down WHERE:
@@ -61,7 +80,15 @@ Write a test that:
 - **Passes** with the fix
 
 ### Step 6: Verify End-to-End
-Run the specific test → full test suite → build → manual check if applicable.
+- [ ] Run the specific test
+- [ ] Run the full test suite
+- [ ] Build
+- [ ] `grep -rnE '\[DEBUG-[0-9a-f]+\]' .` → no matches (clears temporary tracing tags, not legitimate `DEBUG`-level structured logs)
+- [ ] Manual check if applicable
+
+## Instrumentation Discipline
+- Tool preference: debugger/REPL > targeted logs > never log-everything-and-grep
+- Tag every temporary debug log with a unique prefix, e.g. `[DEBUG-a4f2]`
 
 ## If 3+ Fixes Failed
 

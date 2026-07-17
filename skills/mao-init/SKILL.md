@@ -22,6 +22,7 @@ If you are executing a specific task with defined inputs and expected outputs (r
 | 新邏輯、修 bug 的實作 | `mao-tdd` | Red-Green-Refactor |
 | 合併前檢查、PR review | `mao-review` | 五軸審查 |
 | 分支完成、準備合併/發布 | `mao-ship` | 驗證 + 合併流程 |
+| merge/rebase 衝突 | `mao-ship` | 合併衝突處理流程 |
 | 輸入驗證、認證、資料安全 | `mao-secure` | 安全加固 |
 | ISO 27001 合規查核、稽核、部署合規 gate | `mao-comply` | ISO 27001 自檢 + 專案 gate |
 | 效能問題、響應慢 | `mao-optimize` | 量測優先 |

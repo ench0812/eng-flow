@@ -13,6 +13,8 @@ One fresh subagent per task. Two-stage review after each: spec compliance first,
 
 ## Process
 
+Before dispatching: if the plan contains a `## Not yet specified` section, confirm scope with the user before proceeding — do not dispatch against it.
+
 Default (ultracode): author a Workflow that runs each task through a three-stage pipeline. Each stage is one `agent()` call; prompts come from the three templates in this directory; returns are schema-validated.
 
 ```

@@ -61,6 +61,12 @@ Build complete feature paths, not horizontal layers.
 - **Bad:** all DB → all API → all UI → connect everything
 - **Good:** feature A (DB+API+UI) → feature B (DB+API+UI)
 
+**Wide refactor exception:** Mechanical but codebase-wide changes (rename a shared column, retype a shared symbol) can't be sliced vertically — no slice can go green on its own. Split into three task types instead:
+- **Expand** — old and new forms coexist, no caller breaks. Stays a single sequential task.
+- **Migrate** — split by blast radius (per package/directory), one task per batch, depends on expand. Batches touch disjoint files, so each goes green independently and already qualifies as parallel under mao-execute's existing independent-files rule — no extra tagging needed. (Doesn't conflict with mao-execute's "database migrations must be sequential" rule — that covers the expand step's schema change itself, not these caller-side migration batches.)
+- **Contract** — remove the old form, depends on all migrate batches finishing.
+- If batches can't each go green independently, fall back to a shared integration branch with one final integrate-and-verify task gating all of them.
+
 ### 3. Size Tasks
 
 | Size | Files | Scope |
@@ -82,14 +88,25 @@ These are plan failures:
 - "Similar to Task N" (repeat the code)
 - Steps describing what to do without showing how
 
+## Fog Rule
+
+No Placeholders bans guessing, but a task can legitimately be blocked on a decision that isn't made yet. The test is whether the question **can be stated precisely** right now — not whether it can be answered right now, and not whether you'd simply rather not decide yet.
+
+- Can't state it precisely (e.g. blocked on a third-party API result, load-test numbers) → don't invent a task for it — that's worse than a placeholder, it burns a full implement→review cycle on a guess
+- Add a `## Not yet specified` section at the end of the plan: list what's unresolved and what decision it's blocked on
+- mao-execute must not dispatch against that section — it should prompt to return to mao-brainstorm instead
+
 ## Self-Review
 
 After writing, check:
 1. **Spec coverage** — every requirement has a task?
 2. **Placeholder scan** — any vague steps?
 3. **Type consistency** — names/signatures match across tasks?
+4. **Undecided decisions** — any task built on a decision that isn't made yet?
 
 Save to: `docs/plans/YYYY-MM-DD-<feature>.md`
+
+Start the plan with a `Spec:` line citing the source design doc path (`docs/specs/...-design.md`), if one exists — downstream spec reviews need it to locate the Out of Scope section.
 
 ## Execution Handoff
 

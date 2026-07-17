@@ -17,8 +17,10 @@ Do NOT write any code, scaffold, or take implementation actions until you have p
 - If request spans multiple independent subsystems → suggest decomposition first
 - Each sub-project gets its own spec → plan → implementation cycle
 
-### 2. Clarify (One Question at a Time)
-- Prefer multiple choice questions
+### 2. Clarify (Batch by Dependency, Not One at a Time)
+- Build a dependency tree of open questions. Each round, ask via AskUserQuestion every question whose prerequisites are already resolved (in chunks of ≤4 per call — the tool's limit), each with a suggested default. Questions depending on an unresolved answer wait for the next round.
+- Facts you can check yourself (codebase/tools) — check them; only ask the user about decisions. Dispatch a subagent for lookups only when the volume is large.
+- For critical requirement boundaries, construct a concrete edge-case scenario and let the user resolve it — don't self-select an interpretation.
 - Focus on: purpose, constraints, success criteria
 - Surface your assumptions before writing anything
 
@@ -28,7 +30,7 @@ Do NOT write any code, scaffold, or take implementation actions until you have p
 
 ### 4. Present Design
 - Scale each section to its complexity
-- Cover: architecture, components, data flow, error handling, testing
+- Cover: architecture, components, data flow, error handling, testing, out of scope (explicitly list what's deliberately not being done)
 - Ask after each section if it looks right
 
 ### 5. Write Design Doc
@@ -38,7 +40,8 @@ Save to `docs/specs/YYYY-MM-DD-<topic>-design.md`
 1. Placeholder scan — any TBD, TODO, vague requirements? Fix them.
 2. Internal consistency — sections contradict each other?
 3. Scope check — focused enough for one plan?
-4. Ambiguity check — any requirement interpretable two ways? Pick one.
+4. Ambiguity check — any requirement interpretable two ways? Construct a concrete scenario and put it to the user via the User Review Gate — don't self-select an interpretation.
+5. Out of Scope check — explicitly lists what's deliberately not being done, disjoint from (no overlap with) the covered requirements?
 
 ### 6. User Review Gate
 > "Spec written to `<path>`. Please review before we proceed."
@@ -50,7 +53,9 @@ After user approves → invoke `eng-flow:mao-plan` to create implementation plan
 
 ## Anti-Patterns
 - Skipping design for "simple" tasks — they're where assumptions bite hardest
-- Asking 5 questions at once — one at a time
+- Cramming interdependent questions into the same round before their prerequisites are answered
+- Splitting independent questions across multiple rounds when they could be batched
+- Asking the user a fact they could have looked up themselves
 - Proposing only one approach — always at least 2
 - Starting code before user approves design
 

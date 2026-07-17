@@ -21,6 +21,7 @@ Approve when the change **definitely improves overall code health**, even if it 
 - Edge cases handled (null, empty, boundary)?
 - Error paths handled (not just happy path)?
 - Tests cover the change adequately?
+- Tests avoid tautological assertions (expected values from an independent source, not recomputed by the same logic)?
 
 ### 2. Readability & Simplicity
 - Names descriptive and consistent?
@@ -34,6 +35,8 @@ Approve when the change **definitely improves overall code health**, even if it 
 - Clean module boundaries maintained?
 - Code duplication that should be shared?
 - Dependencies flowing correctly (no circular)?
+- Deletion test — imagine deleting this module/function entirely. Complexity vanishes → it was just a pass-through, cut it. Complexity reappears at each call site → it was earning its keep.
+- Single-implementation interfaces/wrappers are premature abstraction — don't extract yet. Only introduce one once two real, behaviorally-different implementations/cases exist.
 
 ### 4. Security & ISO 27001 Compliance
 - User input validated and sanitized? Queries parameterized? Outputs encoded? [A.8.28]
@@ -60,6 +63,8 @@ Approve when the change **definitely improves overall code health**, even if it 
 | **Optional:** | Suggestion | Worth considering |
 | **FYI** | Informational | No action needed |
 
+Deprecated: `Important`/`Minor` — do not reintroduce these words when editing any reviewer prompt.
+
 ## Change Sizing
 
 - ~100 lines → Good
@@ -70,7 +75,7 @@ Approve when the change **definitely improves overall code health**, even if it 
 
 ## Review Process
 
-1. **Understand context** — what is this change trying to accomplish?
+1. **Understand context** — what is this change trying to accomplish? Find the spec, in order: commit message references → user-provided path → `docs/specs/*-design.md` → `docs/plans/*.md` → ask the user. If none found, state upfront "no spec available — Correctness axis reviewed against the code's own logic only."
 2. **Review tests first** — tests reveal intent and coverage
 3. **Review implementation** — walk through each file with 5 axes
 4. **Categorize findings** — label severity on every comment
@@ -90,11 +95,17 @@ Treat the output as a **pure second opinion**: present findings by severity, do 
 
 ## Subagent Dispatch
 
+**Pre-dispatch check (orchestrator runs this, before spawning the reviewer):**
+- `git rev-parse <base>` and `git rev-parse HEAD` — invalid ref → stop, report to the user, do not dispatch
+- Compute `git merge-base <base> HEAD` — this is BASE_SHA (the true comparison point, not the base branch tip)
+- `git diff <BASE_SHA>..HEAD --stat` — empty diff → stop, report to the user, do not dispatch
+
 For automated review, run a reviewer via Workflow `agent()` (or Agent tool directly for a single-file review) using the template at `mao-execute/code-reviewer-prompt.md`:
 - Model: default `model:"sonnet"` (same routing as mao-execute; see `references/model-routing.md`). High-risk changes (security/auth/data) → omit `model` to inherit the session model
-- Provide git SHAs (base and head)
+- Provide git SHAs (BASE_SHA from the merge-base above, and HEAD)
 - Include task/plan requirements
 - List changed files
+- List the repo's documented standards file paths (CONTRIBUTING / CODING_STANDARDS / CLAUDE.md), if present
 - 大型 / 跨檔改動：`repomix --include-diffs --include "<相關檔 glob>"` 把 diff + 周邊上下文打成單檔餵給 reviewer agent()，勝過只給 SHA 讓它逐檔撈。見 `references/repomix.md`
 
 ## Dead Code Hygiene

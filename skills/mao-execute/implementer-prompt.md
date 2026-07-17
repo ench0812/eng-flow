@@ -18,7 +18,7 @@ If anything is unclear about requirements, approach, or dependencies — ask now
 ## Your Job
 1. Implement exactly what the task specifies
 2. Write tests (TDD if task requires)
-3. Verify implementation works
+3. Verify implementation works — run affected test file(s) as you go; run the full suite once before committing
 4. Commit your work
 5. Self-review (see below)
 6. Report back
@@ -43,7 +43,7 @@ It is always OK to say "this is too hard for me." STOP and escalate when:
 - Completeness: all requirements implemented? Edge cases?
 - Quality: names clear? Code clean?
 - Discipline: YAGNI? Only what was requested?
-- Testing: tests verify behavior, not mocks?
+- Testing: tests verify behavior, not mocks? Expected values from an independent source, not recomputed by the same logic?
 Fix issues found during self-review before reporting.
 
 ## Report Format (schema: implementerStatus)
