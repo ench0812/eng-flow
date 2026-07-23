@@ -119,7 +119,7 @@ The plan handed off must be the **converged result of Claude and Codex co-planni
    `<level>` = your risk assessment of what this plan implements, set once for all rounds (cross-system / security-sensitive / data migration / irreversible → `critical`; normal feature → `required`; small local change → `optional`) — your input, never re-triaged; over-estimate when unsure. The plan prompt directs Codex to follow the leading `Spec:` line and cross-check coverage against the design doc — keep that line accurate.
 2. **Triage** each item: adopt (revise the plan) / reject (record why) / user call. Never silently drop.
 3. **Log** the round in `## Cross-Check Log` at the very end of the plan, after `## Not yet specified` if present (same table format as brainstorm). The log is process record — mao-execute ignores it.
-4. **Converge**: repeat only if the round adopted any Critical/Required change; stop on「無重大補充」, nothing above Optional adopted, or 3 rounds.
+4. **Converge**: repeat only if the round adopted any Critical/Required change; stop on「無重大補充」, nothing above Optional adopted, or 3 rounds (**hard cap**, script-enforced via the Cross-Check Log — a 4th consultation gets `[codex-review] STOP:`). At the cap Claude takes over solo: remaining disagreements go to the user at handoff, no further codex calls in this flow.
 
 If codex is absent/unauthorized the script self-skips — relay in one line and hand off the solo plan.
 

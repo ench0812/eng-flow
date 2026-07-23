@@ -10,6 +10,11 @@
 #        狀態由呼叫端維護在文件尾端「## Cross-Check Log」小節,腳本本身無狀態。
 #   兩者皆唯讀,腳本不改任何檔。
 #
+# 共議輪數硬上限([claude]->[codex]->[claude] 來回,兩種模式皆為 3 輪):
+#   doc 模式由本腳本強制——數 Cross-Check Log 的「### Round」數,已達上限即印 STOP 並
+#   exit 0(不再諮詢 codex,由 Claude 接手續行);diff 模式無狀態可查,上限由呼叫端
+#   skill(mao-review / mao-execute)遵守。
+#
 # 依「來源嚴重度」選模型(嚴重度由呼叫端提供,腳本不自行分診):
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
@@ -28,6 +33,7 @@
 #        否則 gpt-5.6-* slug 會被 server 回 400 invalid_request。
 #
 # 結束碼: 環境缺失(codex 未裝/未授權、diff 模式不在 repo) → 印提示並 exit 0(不阻斷);
+#          共議輪數已達上限(doc 模式) → 印 STOP 並 exit 0(由 Claude 接手,不阻斷);
 #          呼叫端合約錯誤(--doc 檔不存在、參數矛盾) → exit 2(顯錯,不可靜默)。
 set -uo pipefail
 
@@ -36,6 +42,7 @@ CRIT_MODEL="gpt-5.6-sol";      CRIT_EFFORT="max"        # critical
 REQ_MODEL="gpt-5.6-sol";       REQ_EFFORT="high"        # required
 LOW_MODEL="gpt-5.6-terra";     LOW_EFFORT="medium"      # optional / nit / fyi
 FALLBACK_MODEL="gpt-5.6-sol";  FALLBACK_EFFORT="high"   # --severity 未傳/未知時的保底
+MAX_CODESIGN_ROUNDS=3          # doc 模式 claude<->codex 共議硬上限(數 Cross-Check Log 的 ### Round)
 
 SEVERITY=""
 BASE=""
@@ -73,6 +80,16 @@ if [ -n "$DOC" ] || [ -n "$KIND" ]; then
   esac
   [ -f "$DOC" ] || { echo "[codex-review] 錯誤: 找不到文件 '$DOC'(呼叫端應傳存在的檔案路徑)。" >&2; exit 2; }
   DOC_MODE=1
+fi
+
+# --- doc 模式共議輪數上限: 已滿即不再諮詢,由 Claude 接手(放在環境 gate 之前,離線可測) ---
+# 迴圈狀態本來就由呼叫端記在文件的「## Cross-Check Log」小節,腳本只讀不寫,仍屬無狀態。
+if [ "$DOC_MODE" -eq 1 ]; then
+  ROUNDS="$(awk '/^## Cross-Check Log/{f=1} f && /^### Round /{n++} END{print n+0}' "$DOC")"
+  if [ "$ROUNDS" -ge "$MAX_CODESIGN_ROUNDS" ]; then
+    echo "[codex-review] STOP: '$DOC' 的 Cross-Check Log 已記錄 $ROUNDS 輪(上限 $MAX_CODESIGN_ROUNDS)。共議迴圈到此為止——由 Claude 接手續行,剩餘分歧交使用者仲裁,不再諮詢 codex。"
+    exit 0
+  fi
 fi
 
 # --- 依來源嚴重度決定模型/effort ---

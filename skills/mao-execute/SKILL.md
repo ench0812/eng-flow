@@ -57,7 +57,7 @@ After the **final review of the whole implementation** passes (all tasks done, a
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
 ```
 
-Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure. Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized.
+Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure. Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized. If findings trigger further fix-and-review cycles, the [Claude]→[Codex]→[Claude] loop is capped at **3 consultations for the whole flow** — past the cap, Claude closes out alone with no further codex-review calls (diff mode is stateless; you enforce this count).
 
 ## Red Flags
 - Dispatching multiple agents on overlapping files without worktree isolation

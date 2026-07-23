@@ -21,9 +21,11 @@ Three tiers — chosen per `agent()` / Agent-tool dispatch, not per skill:
 
 | Mode | Semantics / caller | Invocation | Severity source |
 |------|--------------------|------------|-----------------|
-| diff (default) | One-shot **second opinion** at mao-review / mao-execute closing, after all Required/Critical fixed — once per review round | `--severity <level> [--base <branch>]` | Highest original severity from the first-pass five-axis review (even if already fixed) |
+| diff (default) | One-shot **second opinion** at mao-review / mao-execute closing, after all Required/Critical fixed — once per review round, ≤3 per flow | `--severity <level> [--base <branch>]` | Highest original severity from the first-pass five-axis review (even if already fixed) |
 | spec | **Co-design loop** in mao-brainstorm, after Spec Self-Review, before the User Review Gate (≤3 rounds; loop state lives in the doc's `## Cross-Check Log`) | `--doc <spec.md> --kind spec --severity <level>` | Claude's design-risk self-assessment: cross-system / security / data migration / irreversible → critical; normal feature → required; small local → optional |
 | plan | **Co-design loop** in mao-plan, after Self-Review, before Execution Handoff; Codex follows the plan's `Spec:` line to cross-check coverage against the design doc | `--doc <plan.md> --kind plan --severity <level>` | Same design-risk self-assessment |
+
+**Hard loop cap — 3 rounds, all modes.** The [Claude]→[Codex]→[Claude] cycle never exceeds 3 rounds per flow; at the cap Claude takes over and continues solo, with no further codex calls. Doc mode is script-enforced: the script counts `### Round` entries in the doc's `## Cross-Check Log` and answers the 4th call with `[codex-review] STOP:` + exit 0. Diff mode is stateless, so the caller (mao-review / mao-execute) enforces the cap.
 
 Severity is an **input decided by the source** — never re-triaged by a weaker model. When in doubt, over-estimate — under-calling sends work that deserves deep review to a fast terra scan. Model mapping (all modes):
 

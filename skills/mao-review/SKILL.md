@@ -93,6 +93,8 @@ Set `<level>` to the **highest original severity this review assigned** to the c
 
 Treat the output as a **pure second opinion**: present findings by severity, do **not** auto-fix, the user decides. If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay the reason in one line, do not install anything.
 
+**Loop cap:** the [Claude]→[Codex]→[Claude] cycle runs **at most 3 rounds per review flow**. If the 3rd consultation's findings trigger yet another fix-and-review round, Claude closes that round — and everything after it — alone, with no further codex-review calls. (Diff mode is stateless, so this cap is yours to enforce; track the count in the review flow.)
+
 ## Subagent Dispatch
 
 **Pre-dispatch check (orchestrator runs this, before spawning the reviewer):**
