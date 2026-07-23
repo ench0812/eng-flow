@@ -108,8 +108,23 @@ Save to: `docs/plans/YYYY-MM-DD-<feature>.md`
 
 Start the plan with a `Spec:` line citing the source design doc path (`docs/specs/...-design.md`), if one exists — downstream spec reviews need it to locate the Out of Scope section.
 
+## Codex Co-Design Loop
+
+The plan handed off must be the **converged result of Claude and Codex co-planning**. After the Self-Review passes and the plan file is saved, run the same loop protocol as mao-brainstorm's Co-Design Loop:
+
+1. **Consult**:
+   ```bash
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --doc docs/plans/YYYY-MM-DD-<feature>.md --kind plan --severity <level>
+   ```
+   `<level>` = your risk assessment of what this plan implements, set once for all rounds (cross-system / security-sensitive / data migration / irreversible → `critical`; normal feature → `required`; small local change → `optional`) — your input, never re-triaged; over-estimate when unsure. The plan prompt directs Codex to follow the leading `Spec:` line and cross-check coverage against the design doc — keep that line accurate.
+2. **Triage** each item: adopt (revise the plan) / reject (record why) / user call. Never silently drop.
+3. **Log** the round in `## Cross-Check Log` at the very end of the plan, after `## Not yet specified` if present (same table format as brainstorm). The log is process record — mao-execute ignores it.
+4. **Converge**: repeat only if the round adopted any Critical/Required change; stop on「無重大補充」, nothing above Optional adopted, or 3 rounds.
+
+If codex is absent/unauthorized the script self-skips — relay in one line and hand off the solo plan.
+
 ## Execution Handoff
 
-After saving, offer:
+After the co-design loop converges — summarize it first (rounds, adopted/rejected counts, each *user call* item with both positions; the user arbitrates) — then offer:
 1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task. Under ultracode it authors a Workflow to orchestrate the tasks — review the generated script before approving on large plans.
 2. **Inline** — execute sequentially in current session

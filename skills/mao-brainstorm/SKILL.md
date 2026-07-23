@@ -43,12 +43,32 @@ Save to `docs/specs/YYYY-MM-DD-<topic>-design.md`
 4. Ambiguity check — any requirement interpretable two ways? Construct a concrete scenario and put it to the user via the User Review Gate — don't self-select an interpretation.
 5. Out of Scope check — explicitly lists what's deliberately not being done, disjoint from (no overlap with) the covered requirements?
 
-### 6. User Review Gate
-> "Spec written to `<path>`. Please review before we proceed."
+### 6. Codex Co-Design Loop
 
-Wait for approval. If changes requested, fix and re-review.
+The spec the user reviews must be the **converged result of Claude and Codex co-designing** — not Claude's solo draft. After the Spec Self-Review passes, loop (each script call is one stateless consultation):
 
-### 7. Transition
+1. **Consult** — one cross-family co-design pass on the saved doc:
+   ```bash
+   bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --doc docs/specs/YYYY-MM-DD-<topic>-design.md --kind spec --severity <level>
+   ```
+   Set `<level>` **once** by your own risk assessment of this design and keep it for every round (severity is your input — never let the script re-triage it; over-estimate when unsure): cross-system / security-sensitive / data migration / irreversible operations → `critical`; normal feature → `required`; small local design → `optional`.
+2. **Triage** — for each Codex item decide: **adopt** (revise the spec), **reject** (record why), or **user call** (genuine judgment call you can't settle). Never silently drop an item.
+3. **Log** — append the round to a `## Cross-Check Log` section at the very end of the spec, one table per round:
+   ```markdown
+   ### Round 1 — YYYY-MM-DD（<model>/<effort>）
+   | # | Codex 提議（嚴重度） | 處置 | 理由 |
+   ```
+   The log is the loop's only state: Codex reads it next round, won't re-raise settled items, and may dissent once on a rejection (marked `[異議]`) — a dissent you can't resolve becomes *user call*. Keep the log after approval (decision record).
+4. **Converge** — repeat from step 1 only if this round adopted any Critical/Required change. Stop when Codex replies「無重大補充」, a round adopts nothing above Optional, or after 3 rounds (remaining disagreements become *user call*).
+
+If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay in one line and go to the Gate with the solo spec.
+
+### 7. User Review Gate
+> "Spec written to `<path>` — co-designed with Codex over N round(s): X adopted, Y rejected (reasons in Cross-Check Log), Z for your call. Please review."
+
+Present each *user call* item with both positions — the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting.
+
+### 8. Transition
 After user approves → invoke `eng-flow:mao-plan` to create implementation plan.
 
 ## Anti-Patterns
@@ -58,6 +78,7 @@ After user approves → invoke `eng-flow:mao-plan` to create implementation plan
 - Asking the user a fact they could have looked up themselves
 - Proposing only one approach — always at least 2
 - Starting code before user approves design
+- Auto-adopting Codex suggestions without dispositioning them in the Cross-Check Log — every item gets adopt / reject / user call
 
 ## Scope Decomposition
 If spec covers multiple independent subsystems:
