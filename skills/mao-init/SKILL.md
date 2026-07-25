@@ -1,6 +1,6 @@
 ---
 name: mao-init
-description: 工作流分發器。映射任務類型到對應技能，設定核心行為準則。每次對話開始時自動注入。
+description: 工作流分發器。不確定該用哪個 eng-flow 技能、或想一次看完任務類型與技能的對應時使用。
 ---
 
 <SUBAGENT-STOP>
