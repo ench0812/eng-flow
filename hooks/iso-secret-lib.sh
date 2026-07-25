@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # iso-secret-lib.sh - shared secret detection for eng-flow ISO 27001 hooks.
-# gitleaks-first, regex-fallback. Sourced by iso-scan-write.sh / iso-scan-bash.sh.
+# Two layers, both always run: gitleaks (when installed) then the regex set.
+# Sourced by iso-scan-write.sh / iso-scan-bash.sh.
 #
 # find_secret        : reads text on stdin. Prints a reason and returns 0 if a
 #                      likely secret is found; returns 1 if clean.
@@ -17,7 +18,7 @@ find_secret() {
     return 1
   fi
 
-  # Prefer gitleaks when installed (broad, low-FP rule set).
+  # Layer 1 — gitleaks when installed (broad, low-FP rule set).
   if command -v gitleaks >/dev/null 2>&1; then
     local tmp rc=0
     tmp="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/iso-$$.tmp")"
@@ -28,10 +29,12 @@ find_secret() {
       echo "gitleaks: secret detected"
       return 0
     fi
-    return 1
   fi
 
-  # Regex fallback (high-precision, value-oriented).
+  # Layer 2 — high-precision, value-oriented regex. Runs even when gitleaks
+  # reported clean: gitleaks allowlists documentation-style sample keys and
+  # misses truncated key blocks, so a clean gitleaks result is not a clean bill
+  # of health. Both layers must pass before the write is allowed through.
   if printf '%s' "$text" | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
     echo "private key block"; return 0
   fi
