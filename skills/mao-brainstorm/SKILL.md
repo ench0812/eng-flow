@@ -30,22 +30,17 @@ Do NOT write any code, scaffold, or take implementation actions until you have p
 
 ### 4. Present Design
 - Scale each section to its complexity
-- Cover: architecture, components, data flow, error handling, testing, out of scope (explicitly list what's deliberately not being done)
+- Cover: architecture, components, data flow, error handling, testing, out of scope (explicitly list what's deliberately not being done; it must be disjoint from the covered requirements)
 - Ask after each section if it looks right
 
 ### 5. Write Design Doc
 Save to `docs/specs/YYYY-MM-DD-<topic>-design.md`
 
-**Spec Self-Review** (before asking user to review):
-1. Placeholder scan — any TBD, TODO, vague requirements? Fix them.
-2. Internal consistency — sections contradict each other?
-3. Scope check — focused enough for one plan?
-4. Ambiguity check — any requirement interpretable two ways? Construct a concrete scenario and put it to the user via the User Review Gate — don't self-select an interpretation.
-5. Out of Scope check — explicitly lists what's deliberately not being done, disjoint from (no overlap with) the covered requirements?
+Write it complete and self-consistent in one pass — no TBD, TODO, or vague requirements, and no section contradicting another. Keep it focused enough for one plan. Match length to the design's complexity; do not pad with filler sections, redundant summaries, or boilerplate.
 
 ### 6. Codex Co-Design Loop
 
-The spec the user reviews must be the **converged result of Claude and Codex co-designing** — not Claude's solo draft. After the Spec Self-Review passes, loop (each script call is one stateless consultation):
+The spec the user reviews must be the **converged result of Claude and Codex co-designing** — not Claude's solo draft. Once the doc is saved, loop (each script call is one stateless consultation):
 
 1. **Consult** — one cross-family co-design pass on the saved doc:
    ```bash

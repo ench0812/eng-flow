@@ -17,11 +17,10 @@ If anything is unclear about requirements, approach, or dependencies — ask now
 
 ## Your Job
 1. Implement exactly what the task specifies
-2. Write tests (TDD if task requires)
-3. Verify implementation works — run affected test file(s) as you go; run the full suite once before committing
+2. Write tests (TDD if task requires) — expected values must come from an independent source, never recomputed by the implementation's own logic
+3. Verify implementation works — run the affected test file(s) as you go and the full suite before committing; paste the actual command output into `testResults`. A pass claim without output is not a verification.
 4. Commit your work
-5. Self-review (see below)
-6. Report back
+5. Report back
 
 Work from: [directory]
 While working: if anything unexpected, ask — don't guess.
@@ -39,18 +38,11 @@ It is always OK to say "this is too hard for me." STOP and escalate when:
 - You feel uncertain about correctness
 - Task involves restructuring the plan didn't anticipate
 
-## Self-Review Before Reporting
-- Completeness: all requirements implemented? Edge cases?
-- Quality: names clear? Code clean?
-- Discipline: YAGNI? Only what was requested?
-- Testing: tests verify behavior, not mocks? Expected values from an independent source, not recomputed by the same logic?
-Fix issues found during self-review before reporting.
-
 ## Report Format (schema: implementerStatus)
 Return an object matching:
 - `status`: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED
 - `summary`: what you implemented (or attempted)
 - `testResults`: test output / pass-fail
 - `filesChanged`: string[]
-- `concerns`: string (required if DONE_WITH_CONCERNS — self-review findings or issues)
+- `concerns`: string (required if DONE_WITH_CONCERNS — what you are unsure about, or what turned out to fall outside the task's intent)
 - `blockerDescription`: string (required if BLOCKED or NEEDS_CONTEXT — what is missing)

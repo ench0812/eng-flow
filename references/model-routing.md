@@ -1,6 +1,8 @@
 # Model Routing (eng-flow shared rules)
 
-Three tiers — chosen per `agent()` / Agent-tool dispatch, not per skill:
+Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能力）與 **effort**（推理預算）。`ultracode` 把 session effort 釘在 xhigh，任何沒指定 effort 的 stage 都繼承 xhigh；省成本先動 effort，model 只在任務確實機械化時才降。
+
+Model tiers:
 
 | Tier | When | How |
 |------|------|-----|
@@ -13,7 +15,8 @@ Three tiers — chosen per `agent()` / Agent-tool dispatch, not per skill:
 - **mao-execute pipeline** (implement / spec-review / code-review): default `model:"sonnet"` on all three stages. Escalate a stage to inherit (omit `model`) only when its task is flagged architecture-level or high-uncertainty in the plan.
 - **mao-review reviewer dispatch**: default `model:"sonnet"`. High-risk changes (security, auth, data integrity) → omit `model` to escalate.
 - **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=opus, root-cause-debugger=opus, implementer=sonnet, mechanical-scanner=haiku. These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
-- When unsure: `sonnet` for execution, inherit for judgment.
+- **Effort**（Workflow `agent()` 用 `opts.effort`；`~/.claude/agents/*.md` 用 frontmatter `effort:`）：機械高量 stage → `effort:'low'`；spec-review / code-review → `effort:'medium'`（官方實測 Opus 5 review 準確度在低 effort 仍維持）；implement 與架構級判斷 → omit，繼承 session。安全 / 認證 / 資料完整性相關的 review 一律 omit。這組值是依官方指引訂的第一版起點，跑過一輪真實 plan 後再校。
+- When unsure: omit `model`（harness 的預設就是繼承主線，不確定時降能力是反向操作）；要省成本就把 effort 降一階，不要用降模型來省。已經確定機械化的 stage 才明寫 `model:"sonnet"` / `"haiku"`。
 
 ## Codex Cross-Family Consultation (gpt-5.6)
 
@@ -22,8 +25,8 @@ Three tiers — chosen per `agent()` / Agent-tool dispatch, not per skill:
 | Mode | Semantics / caller | Invocation | Severity source |
 |------|--------------------|------------|-----------------|
 | diff (default) | One-shot **second opinion** at mao-review / mao-execute closing, after all Required/Critical fixed — once per review round, ≤3 per flow | `--severity <level> [--base <branch>]` | Highest original severity from the first-pass five-axis review (even if already fixed) |
-| spec | **Co-design loop** in mao-brainstorm, after Spec Self-Review, before the User Review Gate (≤3 rounds; loop state lives in the doc's `## Cross-Check Log`) | `--doc <spec.md> --kind spec --severity <level>` | Claude's design-risk self-assessment: cross-system / security / data migration / irreversible → critical; normal feature → required; small local → optional |
-| plan | **Co-design loop** in mao-plan, after Self-Review, before Execution Handoff; Codex follows the plan's `Spec:` line to cross-check coverage against the design doc | `--doc <plan.md> --kind plan --severity <level>` | Same design-risk self-assessment |
+| spec | **Co-design loop** in mao-brainstorm, once the design doc is saved, before the User Review Gate (≤3 rounds; loop state lives in the doc's `## Cross-Check Log`) | `--doc <spec.md> --kind spec --severity <level>` | Claude's design-risk self-assessment: cross-system / security / data migration / irreversible → critical; normal feature → required; small local → optional |
+| plan | **Co-design loop** in mao-plan, once the plan file is saved, before Execution Handoff; Codex follows the plan's `Spec:` line to cross-check coverage against the design doc | `--doc <plan.md> --kind plan --severity <level>` | Same design-risk self-assessment |
 
 **Hard loop cap — 3 rounds, all modes.** The [Claude]→[Codex]→[Claude] cycle never exceeds 3 rounds per flow; at the cap Claude takes over and continues solo, with no further codex calls. Doc mode is script-enforced: the script counts `### Round` entries in the doc's `## Cross-Check Log` and answers the 4th call with `[codex-review] STOP:` + exit 0. Diff mode is stateless, so the caller (mao-review / mao-execute) enforces the cap.
 

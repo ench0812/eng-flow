@@ -9,7 +9,7 @@ description: Subagent 驅動執行。有 plan 需要逐 task 實作時使用。�
 If you are executing a specific task with defined inputs and expected outputs (dispatched via Agent tool OR a Workflow agent()), do NOT author a nested Workflow — nesting is not allowed. Run implement → spec-review → code-review sequentially via Agent tool instead.
 </SUBAGENT-STOP>
 
-One fresh subagent per task. Two-stage review after each: spec compliance first, then code quality. Continuous execution — do not pause between tasks. Provide full task text to subagents — never make them read plan files.
+One fresh subagent per task. Two-stage review after each: spec compliance first, then code quality. Continuous execution — do not pause between tasks; this binds within a single turn / a single Workflow run. A completion condition that spans turns is the user's `/goal` (see mao-plan's Execution Handoff). Provide full task text to subagents — never make them read plan files.
 
 ## Process
 
@@ -22,7 +22,9 @@ implement    (implementer-prompt.md,   schema: implementerStatus)
   → spec-review  (spec-reviewer-prompt.md, schema: reviewVerdict)
     → code-review (code-reviewer-prompt.md, schema: reviewVerdict)
 REQUEST_CHANGES → back to implement → re-review (conditional branch in the same stage)
-All tasks done → final review of the whole implementation
+All tasks done → final integration review: cross-task seams, shared interfaces,
+                 and anything no single task's diff could show. Do not re-review
+                 internals each task's spec-review and code-review already approved.
 ```
 
 Model routing (shared rules: `references/model-routing.md`): implement / spec-review / code-review stages default to `model:"sonnet"`. Omit `model` (inherit the session model) only for tasks flagged architecture-level or high-uncertainty. Set `model:"haiku"` for genuinely mechanical high-volume stages.
@@ -51,7 +53,7 @@ All templates in this directory (use as the `agent()` prompt string; replace [br
 
 ## Closing Cross-Check (Codex second opinion)
 
-After the **final review of the whole implementation** passes (all tasks done, all Required/Critical fixed) — **once**, not per task — run one cross-family second opinion:
+After the **final integration review** passes (all tasks done, all Required/Critical fixed) — **once**, not per task — run one cross-family second opinion:
 
 ```bash
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
@@ -64,5 +66,5 @@ Set `<level>` to the **highest original severity** surfaced across this implemen
 - Skipping spec review ("it looks fine")
 - Skipping code review ("spec passed, good enough")
 - Ignoring BLOCKED/NEEDS_CONTEXT escalations
-- Letting implementer self-review replace actual review
+- Treating the implementer's DONE report as a substitute for actual review
 - Moving to next task while review has open issues

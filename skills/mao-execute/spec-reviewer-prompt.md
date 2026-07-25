@@ -32,5 +32,5 @@ Verify by reading code, not by trusting report.
 
 ## Report Format (schema: reviewVerdict)
 Return an object matching:
-- `verdict`: APPROVE (spec compliant after code inspection) | REQUEST_CHANGES
-- `issues`: [{ severity: Critical|Required|Optional|Nit, file, line, description }] — empty if APPROVE; otherwise note each missing/extra/misunderstood piece with file:line references
+- `verdict`: APPROVE (spec compliant after code inspection) | REQUEST_CHANGES — REQUEST_CHANGES only when at least one issue is Critical or Required
+- `issues`: [{ severity: Critical|Required|Optional|Nit, file, line, description }] — every missing / extra / misunderstood piece you found, with file:line references. Report the small ones too, labelled Optional/Nit; a non-empty list with verdict APPROVE is normal.

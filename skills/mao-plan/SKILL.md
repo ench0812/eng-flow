@@ -7,6 +7,8 @@ description: 任務分解 + 實作計劃撰寫。有 spec 需要拆成可執行�
 
 Write comprehensive implementation plans assuming the engineer has zero codebase context. Every step must contain actual code — no placeholders.
 
+**Length calibration:** Match the plan's length to what it needs. The code blocks *are* the specification — keep them complete and literal. The prose around them is not: no per-task architecture recap, no restating in words what a code block already shows, no closing summary. State each fact once, in the task that owns it.
+
 ## Plan Document Format
 
 ```markdown
@@ -48,6 +50,8 @@ Expected: FAIL with "specific message"
 - [ ] **Step 4: Run test, verify it passes**
 - [ ] **Step 5: Commit**
 ````
+
+Names and signatures introduced by one task must match verbatim in every later task that consumes them.
 
 ## Planning Process
 
@@ -96,21 +100,13 @@ No Placeholders bans guessing, but a task can legitimately be blocked on a decis
 - Add a `## Not yet specified` section at the end of the plan: list what's unresolved and what decision it's blocked on
 - mao-execute must not dispatch against that section — it should prompt to return to mao-brainstorm instead
 
-## Self-Review
-
-After writing, check:
-1. **Spec coverage** — every requirement has a task?
-2. **Placeholder scan** — any vague steps?
-3. **Type consistency** — names/signatures match across tasks?
-4. **Undecided decisions** — any task built on a decision that isn't made yet?
-
 Save to: `docs/plans/YYYY-MM-DD-<feature>.md`
 
 Start the plan with a `Spec:` line citing the source design doc path (`docs/specs/...-design.md`), if one exists — downstream spec reviews need it to locate the Out of Scope section.
 
 ## Codex Co-Design Loop
 
-The plan handed off must be the **converged result of Claude and Codex co-planning**. After the Self-Review passes and the plan file is saved, run the same loop protocol as mao-brainstorm's Co-Design Loop:
+The plan handed off must be the **converged result of Claude and Codex co-planning**. Once the plan file is saved, run the same loop protocol as mao-brainstorm's Co-Design Loop:
 
 1. **Consult**:
    ```bash
@@ -127,4 +123,6 @@ If codex is absent/unauthorized the script self-skips — relay in one line and 
 
 After the co-design loop converges — summarize it first (rounds, adopted/rejected counts, each *user call* item with both positions; the user arbitrates) — then offer:
 1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task. Under ultracode it authors a Workflow to orchestrate the tasks — review the generated script before approving on large plans.
+   - To run the whole plan unattended, hand the user a `/goal` condition to paste. `/goal` is user-invocable only (Claude cannot set it), and needs auto mode to actually run without interruption. The condition must be **provable from the transcript** — the evaluator does not read files or run commands — and must keep an escape hatch and a turn cap. Template:
+     `/goal 依序實作 docs/plans/<file>.md 的每個 task，每完成一個就貼出該 task 驗收指令的實際輸出；全部驗收指令都 exit 0 才算達成。遇到 BLOCKED、「## Not yet specified」、或需要我裁決的項目就停下來問我，或跑滿 30 turns 停。`
 2. **Inline** — execute sequentially in current session
