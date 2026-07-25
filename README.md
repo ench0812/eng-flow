@@ -22,7 +22,7 @@ Streamlined engineering workflow skills for Claude Code — merged from [superpo
 
 `references/repomix.md` — when to use [repomix](https://github.com/yamadashy/repomix) to pack codebase context for an LLM/subagent (explore unfamiliar code, bundle a diff for a reviewer, trace a regression), the common commands, and the ISO 27001 / privacy rules. `mao-init`, `mao-brainstorm`, `mao-plan`, `mao-review`, and `mao-debug` point here. Requires the `repomix` CLI (`npm i -g repomix`).
 
-`references/model-routing.md` — shared model-routing rules (opus for judgment, sonnet for execution stages, haiku for mechanical volume), plus the Codex cross-family consultation routing (`scripts/codex-review.sh`): diff second opinion at mao-review / mao-execute closing, spec/plan co-design loops in mao-brainstorm / mao-plan. All modes hard-cap the Claude↔Codex loop at 3 rounds — past the cap Claude continues solo (doc mode script-enforced via the Cross-Check Log). `mao-execute` and `mao-review` point here.
+`references/model-routing.md` — shared model-routing rules (opus for judgment, sonnet for execution stages, haiku for mechanical volume), plus the Codex cross-family consultation routing (`scripts/codex-review.sh`): diff second opinion at mao-review / mao-execute closing, spec/plan co-design loops in mao-brainstorm / mao-plan. Caps are per stage with no cross-flow total: spec and plan co-design get 4 consultations each, every code review gets 2 — past the cap Claude continues solo (doc mode script-enforced via the Cross-Check Log). A `RATE_LIMITED` reply is not a consultation: no retry, no cap consumed, carry on. `mao-execute` and `mao-review` point here.
 
 ## Install
 

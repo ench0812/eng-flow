@@ -10,10 +10,15 @@
 #        狀態由呼叫端維護在文件尾端「## Cross-Check Log」小節,腳本本身無狀態。
 #   兩者皆唯讀,腳本不改任何檔。
 #
-# 共議輪數硬上限([claude]->[codex]->[claude] 來回,兩種模式皆為 3 輪):
-#   doc 模式由本腳本強制——數 Cross-Check Log 的「### Round」數,已達上限即印 STOP 並
-#   exit 0(不再諮詢 codex,由 Claude 接手續行);diff 模式無狀態可查,上限由呼叫端
-#   skill(mao-review / mao-execute)遵守。
+# 諮詢次數上限([claude]->[codex] 的來回次數,依階段而異,無全流程總量上限):
+#   doc 模式(spec / plan 共議): 4 次。由本腳本強制——數 Cross-Check Log 的「### Round」
+#        數,已達上限即印 STOP 並 exit 0(不再諮詢 codex,由 Claude 接手續行)。
+#   diff 模式(code review 第二意見): 每次發動的 code review 各 2 次。腳本無狀態可查,
+#        由呼叫端 skill(mao-review / mao-execute)自行計數遵守。
+#
+# Rate limit: 若 codex 回報用量/額度上限,印 RATE_LIMITED 並 exit 0。該次諮詢視為未發生
+#   ——呼叫端不得重試、不計入該階段的次數,直接繼續後續動作;下次需要諮詢時照常再呼叫
+#   本腳本。腳本無狀態,不會因為被擋過就永久跳過。
 #
 # 依「來源嚴重度」選模型(嚴重度由呼叫端提供,腳本不自行分診):
 #   複查深度應與風險相稱。嚴重度是【輸入】——
@@ -33,7 +38,8 @@
 #        否則 gpt-5.6-* slug 會被 server 回 400 invalid_request。
 #
 # 結束碼: 環境缺失(codex 未裝/未授權、diff 模式不在 repo) → 印提示並 exit 0(不阻斷);
-#          共議輪數已達上限(doc 模式) → 印 STOP 並 exit 0(由 Claude 接手,不阻斷);
+#          諮詢次數已達上限(doc 模式) → 印 STOP 並 exit 0(由 Claude 接手,不阻斷);
+#          用量/額度上限 → 印 RATE_LIMITED 並 exit 0(不阻斷、不重試、不計次);
 #          呼叫端合約錯誤(--doc 檔不存在、參數矛盾) → exit 2(顯錯,不可靜默)。
 set -uo pipefail
 
@@ -42,7 +48,24 @@ CRIT_MODEL="gpt-5.6-sol";      CRIT_EFFORT="max"        # critical
 REQ_MODEL="gpt-5.6-sol";       REQ_EFFORT="high"        # required
 LOW_MODEL="gpt-5.6-terra";     LOW_EFFORT="medium"      # optional / nit / fyi
 FALLBACK_MODEL="gpt-5.6-sol";  FALLBACK_EFFORT="high"   # --severity 未傳/未知時的保底
-MAX_CODESIGN_ROUNDS=3          # doc 模式 claude<->codex 共議硬上限(數 Cross-Check Log 的 ### Round)
+MAX_CODESIGN_ROUNDS=4          # doc 模式(spec/plan 共議)上限(數 Cross-Check Log 的 ### Round)
+MAX_DIFF_CONSULTS=2            # diff 模式每次 code review 的上限。腳本無狀態、無從強制,
+                               # 由 mao-review / mao-execute 自行計數;此處僅供訊息引用。
+
+# --- Rate limit 判定 ---
+# pattern 取自 codex 0.144.x binary 內實際的使用者可見字串。刻意不涵蓋「接近但仍可用」
+# 的字樣: "Approaching rate limits"、"Remaining usage on the ... usage limit"(額度查詢)、
+# "Hide future rate limit reminders"(偏好設定)——那些不代表本次被擋。
+# 429 / too many requests 只在 stderr 且 codex 非正常結束時採信: review 內容(stdout)
+# 本來就可能提到這些字或剛好有行號 429,拿來當訊號會誤判。
+RATE_PAT_STRICT="you'?ve (hit|reached) your usage limit|you have (hit|reached) your usage limit|reached your workspace credit limit|out of credits|quota exceeded|rate limit reached"
+RATE_PAT_ERR_ONLY='too many requests|(^|[^0-9.])429([^0-9]|$)'
+
+is_rate_limited() {  # $1=codex exit code  $2=stderr 檔  $3=stdout 檔
+  grep -qiE "$RATE_PAT_STRICT" "$2" "$3" 2>/dev/null && return 0
+  [ "$1" -ne 0 ] || return 1
+  grep -qiE "$RATE_PAT_ERR_ONLY" "$2" 2>/dev/null
+}
 
 SEVERITY=""
 BASE=""
@@ -87,7 +110,7 @@ fi
 if [ "$DOC_MODE" -eq 1 ]; then
   ROUNDS="$(awk '/^## Cross-Check Log/{f=1} f && /^### Round /{n++} END{print n+0}' "$DOC")"
   if [ "$ROUNDS" -ge "$MAX_CODESIGN_ROUNDS" ]; then
-    echo "[codex-review] STOP: '$DOC' 的 Cross-Check Log 已記錄 $ROUNDS 輪(上限 $MAX_CODESIGN_ROUNDS)。共議迴圈到此為止——由 Claude 接手續行,剩餘分歧交使用者仲裁,不再諮詢 codex。"
+    echo "[codex-review] STOP: '$DOC' 的 Cross-Check Log 已記錄 $ROUNDS 次(上限 $MAX_CODESIGN_ROUNDS)。共議到此為止——由 Claude 接手續行,剩餘分歧交使用者仲裁,不再諮詢 codex。"
     exit 0
   fi
 fi
@@ -245,9 +268,25 @@ fi
 
 # --- 單次 codex 諮詢: 模型由來源嚴重度決定,唯讀,--ephemeral 不落地 session 檔 ---
 echo "[codex-review] $SRC_INFO | 來源嚴重度=$SEV_SHOWN → $MODEL / $EFFORT" >&2
+# 輸出邊串流給使用者、邊留存一份,供事後判斷是否被用量上限擋下。
+# stderr 另存不與 review 內容混流,才能只對 stderr 套用較寬鬆的 429 判定。
+OUT_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-out-$$.txt")"
+ERR_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-err-$$.txt")"
 # $SKIP_GIT_FLAG 刻意不加引號: 空值展開為零個參數,非空時為單一 flag
 printf '%s\n' "$PAYLOAD" | "$CODEX_BIN" exec --sandbox read-only --ephemeral $SKIP_GIT_FLAG \
-  -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT"
-RC=$?
+  -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT" \
+  2>"$ERR_FILE" | tee "$OUT_FILE"
+RC="${PIPESTATUS[1]}"
+cat "$ERR_FILE" >&2
+
+if is_rate_limited "$RC" "$ERR_FILE" "$OUT_FILE"; then
+  rm -f "$OUT_FILE" "$ERR_FILE"
+  echo "[codex-review] RATE_LIMITED: codex 回報用量/額度上限,本次諮詢沒有取得結果(codex exit=$RC)。" >&2
+  echo "  處置: 不要重試、不要計入本階段的諮詢次數,直接繼續後續動作。" >&2
+  echo "  下次需要諮詢時照常再呼叫本腳本——不會因為這次被擋就永久跳過。" >&2
+  exit 0
+fi
+
+rm -f "$OUT_FILE" "$ERR_FILE"
 echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT, codex exit=$RC)。唯讀諮詢,腳本未改任何檔。" >&2
 exit 0

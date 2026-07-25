@@ -54,14 +54,16 @@ The spec the user reviews must be the **converged result of Claude and Codex co-
    | # | Codex 提議（嚴重度） | 處置 | 理由 |
    ```
    The log is the loop's only state: Codex reads it next round, won't re-raise settled items, and may dissent once on a rejection (marked `[異議]`) — a dissent you can't resolve becomes *user call*. Keep the log after approval (decision record).
-4. **Converge** — repeat from step 1 only if this round adopted any Critical/Required change. Stop when Codex replies「無重大補充」, a round adopts nothing above Optional, or after 3 rounds — a **hard cap**: the script counts `### Round` entries in the Cross-Check Log and answers a 4th consultation with `[codex-review] STOP:` (exit 0). At the cap Claude takes over solo — remaining disagreements become *user call* and **no further codex-review calls** happen in this flow.
+4. **Converge** — repeat from step 1 only if this round adopted any Critical/Required change. Stop when Codex replies「無重大補充」, a round adopts nothing above Optional, or after **4 consultations** — a **hard cap**: the script counts `### Round` entries in the Cross-Check Log and answers a 5th consultation with `[codex-review] STOP:` (exit 0). At the cap Claude takes over solo — remaining disagreements become *user call* and **no further codex-review calls** happen in this flow.
+
+If the script answers `[codex-review] RATE_LIMITED:` the consultation did not happen: do not retry it, do not log a `### Round` for it (it must not consume the cap), and go straight to the Gate with the spec as it stands. Say so in one line. A later flow calls codex again as normal.
 
 If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay in one line and go to the Gate with the solo spec.
 
 ### 7. User Review Gate
 > "Spec written to `<path>` — co-designed with Codex over N round(s): X adopted, Y rejected (reasons in Cross-Check Log), Z for your call. Please review."
 
-Present each *user call* item with both positions — the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — only while under the 3-round cap. Once the cap is spent, Claude revises solo and re-presents without consulting codex again.
+Present each *user call* item with both positions — the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — only while under the 4-consultation cap. Once the cap is spent, Claude revises solo and re-presents without consulting codex again.
 
 ### 8. Transition
 After user approves → invoke `eng-flow:mao-plan` to create implementation plan.

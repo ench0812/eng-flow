@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Table-driven tests for scripts/codex-review.sh doc mode.
-# 測兩類離線可驗證的行為(皆在 Gate 1 之前觸發,不需要 codex、不會真的跑 review):
+# 測三類離線可驗證的行為(不需要 codex、不會真的跑 review):
 #   1. exit-2 呼叫端合約
-#   2. 共議輪數上限 gate(Cross-Check Log 滿 3 輪 → STOP + exit 0)
+#   2. doc 模式次數上限 gate(Cross-Check Log 滿 4 次 → STOP + exit 0)
+#   3. rate limit 判定(直接抽腳本裡的 pattern 與函式來測,不另抄一份以免 drift)
 # 合法呼叫的正向路徑由人工 E2E 覆蓋(stub 測不出 codex flag 錯誤——歷史教訓)。
 # Run: bash tests/codex-review-args.test.sh   (exit 0 = all pass)
 set -u
@@ -50,14 +51,87 @@ check "--kind 缺值"         2 --doc "$DOC" --kind
 check "--severity 缺值"     2 --severity
 check "help"                0 -h
 
+make_doc "$FIX/r5.md" 5
 make_doc "$FIX/r4.md" 4
 make_doc "$FIX/r3.md" 3
-make_doc "$FIX/r2.md" 2
 make_doc "$FIX/r0.md" 0
-check_out "3 輪達上限 → STOP"      0 "STOP:"  --doc "$FIX/r3.md" --kind spec --severity required
-check_out "4 輪超上限 → STOP"      0 "STOP:"  --doc "$FIX/r4.md" --kind plan --severity critical
-check_out "2 輪未達上限 → 續跑"    0 "SKIP:"  --doc "$FIX/r2.md" --kind spec --severity required
+check_out "4 次達上限 → STOP"      0 "STOP:"  --doc "$FIX/r4.md" --kind spec --severity required
+check_out "5 次超上限 → STOP"      0 "STOP:"  --doc "$FIX/r5.md" --kind plan --severity critical
+check_out "3 次未達上限 → 續跑"    0 "SKIP:"  --doc "$FIX/r3.md" --kind spec --severity required
 check_out "無 Round 紀錄 → 續跑"   0 "SKIP:"  --doc "$FIX/r0.md" --kind plan --severity required
+
+# --- rate limit 判定 ---
+# 從腳本抽出 pattern 常數與 is_rate_limited 本體,測的是實際生效的邏輯。
+eval "$(sed -n '/^RATE_PAT_STRICT=/,/^}$/p' "$SCRIPT")"
+if ! declare -f is_rate_limited >/dev/null; then
+  echo "FAIL [抽取 is_rate_limited] sed 範圍失效,腳本結構可能已改"; fail=$((fail+1))
+fi
+
+check_rl() { # $1=desc $2=expect(yes|no) $3=rc $4=stderr內容 $5=stdout內容
+  local desc="$1" expect="$2" rc="$3"
+  printf '%s\n' "$4" > "$FIX/e.txt"; printf '%s\n' "$5" > "$FIX/o.txt"
+  local got="no"
+  is_rate_limited "$rc" "$FIX/e.txt" "$FIX/o.txt" && got="yes"
+  if [ "$got" = "$expect" ]; then pass=$((pass+1))
+  else echo "FAIL [rl/$desc] expected=$expect got=$got"; fail=$((fail+1)); fi
+}
+
+# 命中: codex 0.144.x binary 內實際的使用者可見字串
+check_rl "hit usage limit (stderr)"    yes 1 "You've hit your usage limit." ""
+check_rl "reached usage limit"         yes 1 "You've reached your usage limit." ""
+check_rl "upgrade 變體"                yes 1 "You've hit your usage limit. Upgrade to Pro" ""
+check_rl "workspace 沒額度"            yes 1 "Your workspace is out of credits." ""
+check_rl "quota exceeded"              yes 1 "Quota exceeded" ""
+check_rl "429 in stderr + 非零 rc"     yes 1 "HTTP 429 Too Many Requests" ""
+check_rl "限制訊息落在 stdout"         yes 0 "" "You've hit your usage limit."
+
+# 不命中: 接近上限、額度查詢、偏好設定,以及 review 內容裡的數字
+check_rl "approaching(仍可用)"          no  0 "Approaching rate limits" ""
+check_rl "額度查詢字樣"                 no  0 "Remaining usage on the daily usage limit" ""
+check_rl "提醒偏好設定"                 no  0 "Hide future rate limit reminders" ""
+check_rl "review 提到行號 429"          no  0 "" "src/app.php:429 needs a null check"
+check_rl "stdout 有 429 且 rc 非零"     no  1 "" "line 429: too many requests handled here"
+check_rl "429 但 codex 正常結束"        no  0 "429" ""
+check_rl "一般失敗非 rate limit"        no  1 "connection refused" ""
+check_rl "正常完成"                     no  0 "" "無重大遺漏"
+
+# --- rate limit 端到端(stub codex) ---
+# 這裡的 stub 只驗「腳本收到 rate limit 訊息後怎麼分流」,不驗 codex flag 是否正確
+# ——後者 stub 永遠測不出來(歷史教訓),仍由人工 E2E 覆蓋。
+STUB="$(mktemp -d)"
+STUB_DOC="$STUB/spec.md"; printf '# Fixture\n\ncontent\n' > "$STUB_DOC"
+mk_stub() { # $1 = exec 分支要跑的 shell 片段
+  { echo '#!/usr/bin/env bash'
+    echo 'case "$1" in'
+    echo '  login) exit 0 ;;'
+    echo "  exec)  $1 ;;"
+    echo 'esac'
+    echo 'exit 0'
+  } > "$STUB/codex"
+  chmod +x "$STUB/codex"
+}
+check_e2e() { # $1=desc $2=期望出現的字樣 $3=不該出現的字樣
+  local desc="$1" want="$2" unwanted="$3" out rc
+  out="$(PATH="$STUB:$PATH" bash "$SCRIPT" --doc "$STUB_DOC" --kind spec --severity required 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "$want" \
+     && ! printf '%s' "$out" | grep -q "$unwanted"; then
+    pass=$((pass+1))
+  else
+    echo "FAIL [e2e/$desc] rc=$rc out=$out"; fail=$((fail+1))
+  fi
+}
+
+mk_stub 'echo "You'"'"'ve hit your usage limit. Upgrade to Pro" >&2; exit 1'
+check_e2e "用量上限 → RATE_LIMITED" "RATE_LIMITED" "完成("
+mk_stub 'echo "Your workspace is out of credits." >&2; exit 1'
+check_e2e "工作區沒額度 → RATE_LIMITED" "RATE_LIMITED" "完成("
+mk_stub 'echo "無重大補充"; exit 0'
+check_e2e "正常回覆 → 完成且輸出有串流" "無重大補充" "RATE_LIMITED"
+mk_stub 'echo "src/app.php:429 too many requests handled here"; exit 0'
+check_e2e "review 提到 429 → 不誤判" "完成(" "RATE_LIMITED"
+mk_stub 'echo "Approaching rate limits" >&2; echo "無重大補充"; exit 0'
+check_e2e "接近上限提醒 → 不誤判" "完成(" "RATE_LIMITED"
+rm -rf "$STUB"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

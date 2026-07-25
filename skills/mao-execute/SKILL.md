@@ -59,7 +59,9 @@ After the **final integration review** passes (all tasks done, all Required/Crit
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
 ```
 
-Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure. Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized. If findings trigger further fix-and-review cycles, the [Claude]→[Codex]→[Claude] loop is capped at **3 consultations for the whole flow** — past the cap, Claude closes out alone with no further codex-review calls (diff mode is stateless; you enforce this count).
+Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure. Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized. If findings trigger further fix-and-review cycles, this closing cross-check is capped at **2 consultations** — the same per-code-review cap as mao-review, counted independently of the spec/plan stages. Past the cap, Claude closes out alone with no further codex-review calls (diff mode is stateless; you enforce this count).
+
+If the script answers `[codex-review] RATE_LIMITED:`, that consultation did not happen: do not retry it, do not count it against the 2, and close out with what you have, saying so in one line.
 
 ## Red Flags
 - Dispatching multiple agents on overlapping files without worktree isolation
