@@ -81,6 +81,13 @@ check_secret "short value"     'pwd = "abc"' clean
 # --- inline bypass ---
 check_secret "iso-scan:ignore bypass" \
   '$password = "hunter2hunter2"; // iso-scan:ignore fixture' clean
+check_secret "iso-scan: ignore spaced" \
+  '$password = "hunter2hunter2"; // iso-scan:   ignore fixture' clean
+# The bypass is line-scoped: grep matched per line, and the built-in match must not
+# widen that by letting [[:space:]] swallow a newline.
+check_secret "bypass must not straddle lines" \
+  '$password = "hunter2hunter2"; // iso-scan:
+ignore' found
 
 # --- banned crypto (unchanged behaviour, guard against regression) ---
 check_crypto "php md5"          '$h = md5($password);' found
@@ -90,9 +97,24 @@ check_crypto "node createHash"  "crypto.createHash('md5')" found
 check_crypto "sha256 ok"        "hash('sha256', \$x)" clean
 check_crypto "aes-256-gcm ok"   "createCipheriv('aes-256-gcm', k, iv)" clean
 check_crypto "crypto bypass"    '$h = md5($x); // iso-scan:ignore non-security checksum' clean
+check_crypto "crypto bypass must not straddle lines" \
+  '$h = md5($x); // iso-scan:
+ignore' found
+
+# The keyword gate in front of the crypto greps lists call sites, not algorithm
+# names. These pin the coverage of each gated grep branch.
+check_crypto "java 3DES"        'Cipher.getInstance("DESede/CBC/PKCS5Padding")' found
+check_crypto "java RC4"         'Cipher.getInstance("RC4")' found
+check_crypto "node rc4"         "createCipheriv('rc4', key, iv)" found
+check_crypto "php des-ede3"     "openssl_encrypt(\$d, 'des-ede3', \$k)" found
+check_crypto "java SHA-1"       'MessageDigest.getInstance("SHA-1")' found
+# Ordinary prose containing "des"/"nodes" must not be enough to reach the greps,
+# and must certainly not be blocked.
+check_crypto "prose with des-substrings" \
+  'function describe(nodes) { return nodes.map(String) }' clean
 
 # --- layer 1 hanging must not take layer 2 down with it ---
-# A stubbed gitleaks that never returns should hit find_secret's own 8s cap and
+# A stubbed gitleaks that never returns should hit find_secret's own 3s cap and
 # fall through to the regex layer, rather than blocking until the hook is killed.
 if command -v timeout >/dev/null 2>&1; then
   STUB="$(mktemp -d)"

@@ -8,21 +8,47 @@
 # find_banned_crypto : reads text on stdin. Prints a reason and returns 0 if a
 #                      banned algorithm (MD5/SHA-1/DES/3DES/RC4) is used for
 #                      security purposes; returns 1 if clean. [A.8.24]
+#
+# PERFORMANCE NOTE (2026-07-25): the literal-pattern checks below use bash's
+# built-in =~ instead of `printf | grep -qE`. Each grep form cost a pipe plus a
+# process spawn; on Windows/Git Bash that is ~15-20ms each and this library ran
+# 12+ of them per write. The patterns are byte-identical POSIX ERE, which bash's
+# =~ implements, with one deliberate difference: grep matched per line, =~ matches
+# the whole buffer, so any pattern that must stay line-scoped uses [[:blank:]]
+# rather than [[:space:]] (which would match a newline and let a match straddle
+# two lines). The remaining grep pipelines (generic credential assignment, banned
+# crypto) keep grep because they need per-line filtering / GNU regex extensions,
+# but they are now gated behind a zero-cost built-in keyword test so they only
+# spawn when the text plausibly contains a match. Every gate is a strict superset
+# of the greps it guards — it decides whether to run them, never whether to block.
+
+# Case-insensitive built-in match, with the caller's nocasematch setting restored.
+_ci_match() {
+  local subject="$1" re="$2" rc=1 had_ci=1
+  shopt -q nocasematch && had_ci=0
+  shopt -s nocasematch
+  [[ $subject =~ $re ]] && rc=0
+  [ "$had_ci" -eq 0 ] || shopt -u nocasematch
+  return $rc
+}
 
 find_secret() {
-  local text
+  local text re
   text="$(cat)"
 
   # Inline bypass for confirmed false positives.
-  if printf '%s' "$text" | grep -qiE 'iso-scan:[[:space:]]*ignore'; then
+  if _ci_match "$text" 'iso-scan:[[:blank:]]*ignore'; then
     return 1
   fi
 
   # Layer 1 — gitleaks when installed (broad, low-FP rule set).
-  # Bounded by its own timeout: cost is process startup (~0.8s, flat regardless of
-  # input size), but under load it has been observed blowing past the hook's own
+  # Bounded by its own timeout: cost is process startup, flat regardless of input
+  # size — measured 2026-07-25 on this machine at 0.80-0.87s for inputs from 13B to
+  # 40KB. Under parallel load it has been observed blowing past the hook's own 30s
   # timeout, which kills the whole hook — taking the millisecond-cheap layer 2 down
-  # with it and leaving the write unscanned. Capping layer 1 keeps layer 2 reachable.
+  # with it and leaving the write UNSCANNED. The cap is 3s (was 8s): ~3.5x the
+  # measured runtime, so a healthy gitleaks always finishes, while a wedged one can
+  # never push the hook near its 30s wall and layer 2 still runs.
   # Exit codes: 1 = secret found; 124 = our timeout fired (inconclusive, fall through
   # to layer 2); any other non-zero = gitleaks error, treated as found (fail closed).
   if command -v gitleaks >/dev/null 2>&1; then
@@ -30,7 +56,7 @@ find_secret() {
     tmp="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/iso-$$.tmp")"
     printf '%s' "$text" > "$tmp"
     if command -v timeout >/dev/null 2>&1; then
-      timeout 8 gitleaks detect --no-git --redact -s "$tmp" >/dev/null 2>&1 || rc=$?
+      timeout 3 gitleaks detect --no-git --redact -s "$tmp" >/dev/null 2>&1 || rc=$?
     else
       gitleaks detect --no-git --redact -s "$tmp" >/dev/null 2>&1 || rc=$?
     fi
@@ -45,17 +71,29 @@ find_secret() {
   # reported clean: gitleaks allowlists documentation-style sample keys and
   # misses truncated key blocks, so a clean gitleaks result is not a clean bill
   # of health. Both layers must pass before the write is allowed through.
-  if printf '%s' "$text" | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
-    echo "private key block"; return 0
-  fi
-  if printf '%s' "$text" | grep -qE 'AKIA[0-9A-Z]{16}'; then echo "AWS access key id"; return 0; fi
-  if printf '%s' "$text" | grep -qE 'AIza[0-9A-Za-z_-]{35}'; then echo "Google API key"; return 0; fi
-  if printf '%s' "$text" | grep -qE 'xox[baprs]-[0-9A-Za-z-]{10,}'; then echo "Slack token"; return 0; fi
-  if printf '%s' "$text" | grep -qE 'gh[pousr]_[0-9A-Za-z]{36,}'; then echo "GitHub token"; return 0; fi
-  if printf '%s' "$text" | grep -qE 'github_pat_[0-9A-Za-z_]{60,}'; then echo "GitHub PAT"; return 0; fi
-  if printf '%s' "$text" | grep -qE '[sr]k_(live|test)_[0-9A-Za-z]{16,}'; then echo "Stripe secret key"; return 0; fi
+  re='-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  if [[ $text =~ $re ]]; then echo "private key block"; return 0; fi
+  re='AKIA[0-9A-Z]{16}'
+  if [[ $text =~ $re ]]; then echo "AWS access key id"; return 0; fi
+  re='AIza[0-9A-Za-z_-]{35}'
+  if [[ $text =~ $re ]]; then echo "Google API key"; return 0; fi
+  re='xox[baprs]-[0-9A-Za-z-]{10,}'
+  if [[ $text =~ $re ]]; then echo "Slack token"; return 0; fi
+  re='gh[pousr]_[0-9A-Za-z]{36,}'
+  if [[ $text =~ $re ]]; then echo "GitHub token"; return 0; fi
+  re='github_pat_[0-9A-Za-z_]{60,}'
+  if [[ $text =~ $re ]]; then echo "GitHub PAT"; return 0; fi
+  re='[sr]k_(live|test)_[0-9A-Za-z]{16,}'
+  if [[ $text =~ $re ]]; then echo "Stripe secret key"; return 0; fi
 
   # Generic "<secret-keyword> = <quoted value>" assignment, minus obvious placeholders.
+  # Gate first with a built-in keyword test: text without any of these keywords can
+  # never match the full pattern, so the two greps below stay unspawned for the
+  # overwhelming majority of writes.
+  if ! _ci_match "$text" '(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)'; then
+    return 1
+  fi
+
   local Q NQ PREFIX pat hits
   Q='["'"'"']'        # ["']
   NQ='[^"'"'"']'      # [^"']
@@ -77,7 +115,19 @@ find_banned_crypto() {
 
   # Inline bypass for confirmed false positives (e.g. non-security checksums with
   # documented justification).
-  if printf '%s' "$text" | grep -qiE 'iso-scan:[[:space:]]*ignore'; then
+  if _ci_match "$text" 'iso-scan:[[:blank:]]*ignore'; then
+    return 1
+  fi
+
+  # Built-in gate: every alternative in the three greps below requires one of these
+  # literals, so text without any of them cannot match and their spawns are skipped.
+  # Superset check, grep by grep: md5|sha1 covers the bare-call grep; createHash,
+  # hashlib and MessageDigest cover the hash-API grep; Cipher.getInstance,
+  # createCipheriv and openssl_encrypt cover the broken-cipher grep. The algorithm
+  # names alone (des, rc4, ...) are deliberately NOT listed: they are only ever
+  # matched inside one of those call sites, and a bare "des" would match ordinary
+  # words like "describe" or "nodes", leaving the gate permanently open.
+  if ! _ci_match "$text" '(md5|sha1|createhash|hashlib|messagedigest|cipher\.getinstance|createcipheriv|openssl_encrypt)'; then
     return 1
   fi
 
