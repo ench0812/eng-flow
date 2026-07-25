@@ -19,13 +19,23 @@ find_secret() {
   fi
 
   # Layer 1 — gitleaks when installed (broad, low-FP rule set).
+  # Bounded by its own timeout: cost is process startup (~0.8s, flat regardless of
+  # input size), but under load it has been observed blowing past the hook's own
+  # timeout, which kills the whole hook — taking the millisecond-cheap layer 2 down
+  # with it and leaving the write unscanned. Capping layer 1 keeps layer 2 reachable.
+  # Exit codes: 1 = secret found; 124 = our timeout fired (inconclusive, fall through
+  # to layer 2); any other non-zero = gitleaks error, treated as found (fail closed).
   if command -v gitleaks >/dev/null 2>&1; then
     local tmp rc=0
     tmp="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/iso-$$.tmp")"
     printf '%s' "$text" > "$tmp"
-    gitleaks detect --no-git --redact -s "$tmp" >/dev/null 2>&1 || rc=1
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 8 gitleaks detect --no-git --redact -s "$tmp" >/dev/null 2>&1 || rc=$?
+    else
+      gitleaks detect --no-git --redact -s "$tmp" >/dev/null 2>&1 || rc=$?
+    fi
     rm -f "$tmp"
-    if [ "$rc" -eq 1 ]; then
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
       echo "gitleaks: secret detected"
       return 0
     fi

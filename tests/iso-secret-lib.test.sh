@@ -91,5 +91,29 @@ check_crypto "sha256 ok"        "hash('sha256', \$x)" clean
 check_crypto "aes-256-gcm ok"   "createCipheriv('aes-256-gcm', k, iv)" clean
 check_crypto "crypto bypass"    '$h = md5($x); // iso-scan:ignore non-security checksum' clean
 
+# --- layer 1 hanging must not take layer 2 down with it ---
+# A stubbed gitleaks that never returns should hit find_secret's own 8s cap and
+# fall through to the regex layer, rather than blocking until the hook is killed.
+if command -v timeout >/dev/null 2>&1; then
+  STUB="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$STUB/gitleaks"
+  chmod +x "$STUB/gitleaks"
+  start=$(date +%s)
+  if PATH="$STUB:$PATH" find_secret >/dev/null <<< 'k = "AKIAZ3XK7QW9RTLM2BVD"'; then got=found; else got=clean; fi
+  elapsed=$(( $(date +%s) - start ))
+  if [ "$got" = "found" ] && [ "$elapsed" -lt 20 ]; then
+    pass=$((pass+1))
+  else
+    echo "FAIL [layer1 hang] got=$got elapsed=${elapsed}s (want found, <20s)"; fail=$((fail+1))
+  fi
+  # And a clean payload must stay clean rather than failing closed on the timeout.
+  if PATH="$STUB:$PATH" find_secret >/dev/null <<< '$k = getenv("AWS_KEY");'; then got=found; else got=clean; fi
+  if [ "$got" = "clean" ]; then pass=$((pass+1))
+  else echo "FAIL [layer1 hang, clean payload] expected clean got=$got"; fail=$((fail+1)); fi
+  rm -rf "$STUB"
+else
+  echo "SKIP: no timeout(1) available — layer-1 cap untested"
+fi
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
