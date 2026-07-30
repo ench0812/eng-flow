@@ -29,6 +29,8 @@ All tasks done → final integration review: cross-task seams, shared interfaces
 
 Model routing (shared rules: `references/model-routing.md`): implement / spec-review / code-review stages default to `model:"sonnet"`. Omit `model` (inherit the session model) only for tasks flagged architecture-level or high-uncertainty. Set `model:"haiku"` for genuinely mechanical high-volume stages.
 
+Effort routing (same reference): spec-review / code-review stages set `effort:'medium'`; genuinely mechanical stages `effort:'low'`; implement and anything architecture-level or security-related omit `effort` (inherits session). Under ultracode an omitted effort inherits xhigh — set it explicitly on review stages or they run at full reasoning cost.
+
 **Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool per task.
 
 ## Parallel vs Sequential
