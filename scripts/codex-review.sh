@@ -40,7 +40,14 @@
 # 結束碼: 環境缺失(codex 未裝/未授權、diff 模式不在 repo) → 印提示並 exit 0(不阻斷);
 #          諮詢次數已達上限(doc 模式) → 印 STOP 並 exit 0(由 Claude 接手,不阻斷);
 #          用量/額度上限 → 印 RATE_LIMITED 並 exit 0(不阻斷、不重試、不計次);
+#          諮詢失敗(codex 非正常結束,或跑了但零輸出) → 印 FAILED 並 exit 1;
 #          呼叫端合約錯誤(--doc 檔不存在、參數矛盾) → exit 2(顯錯,不可靜默)。
+#
+# FAILED 與其他 exit 0 分支的差別(刻意): 前面幾種都是「已知且已判定的狀況」,呼叫端照著
+#   訊息處置即可;FAILED 是「複查根本沒發生」。舊版無論 codex 回什麼都印「完成」,呼叫端
+#   因此以為複查過了——假成功比直接報錯危險得多,所以這一種給非零結束碼。
+#   實測(codex 0.144.5): 非信任目錄 → exit 1、stdout 0 bytes、stderr 只有
+#   "Not inside a trusted directory and --skip-git-repo-check was not specified."
 set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
@@ -272,21 +279,52 @@ echo "[codex-review] $SRC_INFO | 來源嚴重度=$SEV_SHOWN → $MODEL / $EFFORT
 # stderr 另存不與 review 內容混流,才能只對 stderr 套用較寬鬆的 429 判定。
 OUT_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-out-$$.txt")"
 ERR_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-err-$$.txt")"
+RC_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-rc-$$.txt")"
+
+trap 'rm -f "$OUT_FILE" "$ERR_FILE" "$RC_FILE"' EXIT
+
+# stderr 改為「即時可見 + 同時留存」: 舊版 2>"$ERR_FILE" 只在整段結束後才 cat,中途被
+# Windows 背景 shell killer 砍掉就什麼都看不到(症狀: 印完 header 就沒了)。實測 codex
+# 0.144.5 一開跑就往 stderr 寫 "Reading additional input from stdin...",所以只要即時
+# 露出 stderr,就能分辨「還在跑」與「開頭就死了」——不需要另外做心跳。
+#
+# 下面的 fd 調度是標準做法: 內層 group 的 stderr 走 tee 到 ERR_FILE 並轉回終端,stdout
+# 經 fd 3 走外層 tee 到 OUT_FILE。兩個 tee 都是同步 pipeline 成員,結束時兩個檔必定完整,
+# 所以 rate limit 判定照舊能只對 stderr 套較寬鬆的 429 規則。
+# codex 的結束碼經 RC_FILE 帶出(內層在 subshell 裡,變數傳不回來)。
 # $SKIP_GIT_FLAG 刻意不加引號: 空值展開為零個參數,非空時為單一 flag
-printf '%s\n' "$PAYLOAD" | "$CODEX_BIN" exec --sandbox read-only --ephemeral $SKIP_GIT_FLAG \
-  -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT" \
-  2>"$ERR_FILE" | tee "$OUT_FILE"
-RC="${PIPESTATUS[1]}"
-cat "$ERR_FILE" >&2
+{ { printf '%s\n' "$PAYLOAD" | "$CODEX_BIN" exec --sandbox read-only --ephemeral $SKIP_GIT_FLAG \
+      -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT"
+    echo "${PIPESTATUS[1]}" > "$RC_FILE"
+  } 2>&1 1>&3 | tee "$ERR_FILE" >&2 ; } 3>&1 | tee "$OUT_FILE"
+RC="$(cat "$RC_FILE" 2>/dev/null)"
+case "$RC" in ''|*[!0-9]*) RC=1 ;; esac   # RC_FILE 沒寫成(內層整個被砍)一律當失敗
 
 if is_rate_limited "$RC" "$ERR_FILE" "$OUT_FILE"; then
-  rm -f "$OUT_FILE" "$ERR_FILE"
   echo "[codex-review] RATE_LIMITED: codex 回報用量/額度上限,本次諮詢沒有取得結果(codex exit=$RC)。" >&2
   echo "  處置: 不要重試、不要計入本階段的諮詢次數,直接繼續後續動作。" >&2
   echo "  下次需要諮詢時照常再呼叫本腳本——不會因為這次被擋就永久跳過。" >&2
   exit 0
 fi
 
-rm -f "$OUT_FILE" "$ERR_FILE"
+# --- 諮詢是否真的取得結果(順序在 rate limit 之後: 被擋下也是零輸出,但那有專屬處置) ---
+# codex 可能跑都沒跑就拒絕(實測: 非信任目錄),或非正常結束而輸出截斷。舊版兩種都印「完成」。
+OUT_TRIMMED="$(tr -d '[:space:]' < "$OUT_FILE" 2>/dev/null)"
+if [ -z "$OUT_TRIMMED" ] || [ "$RC" -ne 0 ]; then
+  if [ -z "$OUT_TRIMMED" ]; then
+    echo "[codex-review] FAILED: codex 沒有產出任何 review 內容(exit=$RC, stdout 零個非空白字元)。" >&2
+    echo "  這不是「無重大遺漏」,是複查根本沒有發生——呼叫端不得視為已複查、不得據此放行。" >&2
+  else
+    echo "[codex-review] FAILED: codex 非正常結束(exit=$RC),已產出的 ${#OUT_TRIMMED} 個字元可能是截斷的半份 review。" >&2
+    echo "  不可當成完整的第二意見;要嘛重跑,要嘛明講這一輪複查未完成。" >&2
+  fi
+  if grep -qi 'trusted directory' "$ERR_FILE" 2>/dev/null; then
+    echo "  已知原因: codex 拒絕在非信任目錄執行。改在 git repo 內呼叫本腳本,或讓 codex 信任該目錄。" >&2
+  fi
+  echo "  codex stderr(末 20 行):" >&2
+  tail -n 20 "$ERR_FILE" >&2
+  exit 1
+fi
+
 echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT, codex exit=$RC)。唯讀諮詢,腳本未改任何檔。" >&2
 exit 0

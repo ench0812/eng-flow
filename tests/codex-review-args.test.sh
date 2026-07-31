@@ -110,27 +110,47 @@ mk_stub() { # $1 = exec 分支要跑的 shell 片段
   } > "$STUB/codex"
   chmod +x "$STUB/codex"
 }
-check_e2e() { # $1=desc $2=期望出現的字樣 $3=不該出現的字樣
-  local desc="$1" want="$2" unwanted="$3" out rc
+check_e2e() { # $1=desc $2=期望結束碼 $3=期望出現的字樣 $4=不該出現的字樣
+  local desc="$1" expect_rc="$2" want="$3" unwanted="$4" out rc
   out="$(PATH="$STUB:$PATH" bash "$SCRIPT" --doc "$STUB_DOC" --kind spec --severity required 2>&1)"; rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "$want" \
+  if [ "$rc" -eq "$expect_rc" ] && printf '%s' "$out" | grep -q "$want" \
      && ! printf '%s' "$out" | grep -q "$unwanted"; then
     pass=$((pass+1))
   else
-    echo "FAIL [e2e/$desc] rc=$rc out=$out"; fail=$((fail+1))
+    echo "FAIL [e2e/$desc] rc=$rc(expect $expect_rc) out=$out"; fail=$((fail+1))
   fi
 }
 
 mk_stub 'echo "You'"'"'ve hit your usage limit. Upgrade to Pro" >&2; exit 1'
-check_e2e "用量上限 → RATE_LIMITED" "RATE_LIMITED" "完成("
+check_e2e "用量上限 → RATE_LIMITED" 0 "RATE_LIMITED" "完成("
 mk_stub 'echo "Your workspace is out of credits." >&2; exit 1'
-check_e2e "工作區沒額度 → RATE_LIMITED" "RATE_LIMITED" "完成("
+check_e2e "工作區沒額度 → RATE_LIMITED" 0 "RATE_LIMITED" "完成("
 mk_stub 'echo "無重大補充"; exit 0'
-check_e2e "正常回覆 → 完成且輸出有串流" "無重大補充" "RATE_LIMITED"
+check_e2e "正常回覆 → 完成且輸出有串流" 0 "無重大補充" "RATE_LIMITED"
 mk_stub 'echo "src/app.php:429 too many requests handled here"; exit 0'
-check_e2e "review 提到 429 → 不誤判" "完成(" "RATE_LIMITED"
+check_e2e "review 提到 429 → 不誤判" 0 "完成(" "RATE_LIMITED"
 mk_stub 'echo "Approaching rate limits" >&2; echo "無重大補充"; exit 0'
-check_e2e "接近上限提醒 → 不誤判" "完成(" "RATE_LIMITED"
+check_e2e "接近上限提醒 → 不誤判" 0 "完成(" "RATE_LIMITED"
+
+# --- 靜默失效: 諮詢沒發生卻印「完成」(本組是本腳本最重要的斷言) ---
+# 這四種舊版全部會印「完成(...)」並 exit 0,呼叫端因此以為第二意見已經取得。
+# 第一種取自 codex 0.144.5 實測輸出(非信任目錄),不是想像的情境。
+mk_stub 'echo "Not inside a trusted directory and --skip-git-repo-check was not specified." >&2; exit 1'
+check_e2e "拒跑(非信任目錄) → FAILED" 1 "FAILED:" "完成("
+mk_stub 'exit 0'
+check_e2e "exit 0 但零輸出 → FAILED"   1 "FAILED:" "完成("
+mk_stub 'printf "  \n \n"; exit 0'
+check_e2e "只有空白輸出 → FAILED"       1 "FAILED:" "完成("
+mk_stub 'echo "半份 review"; exit 3'
+check_e2e "有輸出但非正常結束 → FAILED" 1 "FAILED:" "完成("
+
+# 非信任目錄要給出針對性提示,不能只丟一句 FAILED
+mk_stub 'echo "Not inside a trusted directory and --skip-git-repo-check was not specified." >&2; exit 1'
+check_e2e "非信任目錄附具體處置" 1 "非信任目錄" "完成("
+
+# 串流留存仍完整: stderr 內容要能被 rate limit 判定看到(fd 調度改寫後的回歸點)
+mk_stub 'echo "progress line" >&2; echo "You'"'"'ve hit your usage limit." >&2; exit 1'
+check_e2e "stderr 多行仍能判定 RATE_LIMITED" 0 "RATE_LIMITED" "FAILED:"
 rm -rf "$STUB"
 
 echo "pass=$pass fail=$fail"
