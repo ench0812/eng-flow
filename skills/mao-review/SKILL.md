@@ -79,7 +79,7 @@ Deprecated: `Important`/`Minor` — do not reintroduce these words when editing 
 2. **Review tests first** — tests reveal intent and coverage
 3. **Review implementation** — walk through each file with 5 axes
 4. **Categorize findings** — label severity on every comment
-5. **Verify verification** — what tests ran? Build pass? Manual check?
+5. **Verify verification** — what tests ran? Build pass? Manual check? Evidence scales with the checkpoint: per-task/dev-loop changes need targeted results (affected test file(s) + directly dependent modules, output pasted) — do not demand a full-suite run per commit. Full-suite evidence is required only at integration points (final integration review, merge/push/release gate).
 
 ## Closing Cross-Check (Codex second opinion)
 

@@ -33,7 +33,7 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 ```
 - Improve code quality without changing behavior
 - Run the affected test file(s) after every change
-- Run the full suite once before committing
+- Before committing, run the targeted scope: affected test file(s) plus tests of modules directly depending on the change. The full suite is deferred to the integration point (mao-execute final integration review / mao-ship gate) — run it now only if you cannot confidently bound the affected scope
 - Commit when clean
 ```
 
@@ -54,7 +54,7 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 1. Write a test that reproduces the bug (RED)
 2. Verify it fails for the right reason
 3. Fix the bug (GREEN)
-4. Verify all tests pass
+4. Verify the targeted scope passes — the new test plus affected test file(s); the full suite runs at the integration/ship gate
 
 This guarantees the bug is actually fixed and won't recur.
 

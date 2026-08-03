@@ -37,7 +37,7 @@ If you are executing a specific task with defined inputs and expected outputs (r
 2. **困惑就停下問** — 不猜測，不假裝理解
 3. **有問題就推回** — 方案有明確缺陷時直說，不迎合
 4. **只動要求的範圍** — scope discipline，不加料
-5. **驗證才算完成** — 跑完指令、看到輸出，才能宣稱結果
+5. **驗證才算完成** — 跑完指令、看到輸出，才能宣稱結果。測試範圍分層：開發迴圈（每個 task/commit）跑 targeted（受影響測試檔＋直接相依模組）；full suite 留給整合節點（mao-execute 整合 review、mao-ship 的 merge/push/release gate）；影響範圍判不準時就地升級跑 full
 
 ## Skill 類型
 

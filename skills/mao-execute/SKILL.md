@@ -22,9 +22,14 @@ implement    (implementer-prompt.md,   schema: implementerStatus)
   → spec-review  (spec-reviewer-prompt.md, schema: reviewVerdict)
     → code-review (code-reviewer-prompt.md, schema: reviewVerdict)
 REQUEST_CHANGES → back to implement → re-review (conditional branch in the same stage)
-All tasks done → final integration review: cross-task seams, shared interfaces,
-                 and anything no single task's diff could show. Do not re-review
-                 internals each task's spec-review and code-review already approved.
+All tasks done → final integration review: run the FULL test suite first
+                 (per-task commits only ran targeted scopes — this is the one
+                 place cross-task regressions surface), then review cross-task
+                 seams, shared interfaces, and anything no single task's diff
+                 could show. A failing full suite is a REQUEST_CHANGES back to
+                 the owning task; re-run the full suite after the fix. Do not
+                 re-review internals each task's spec-review and code-review
+                 already approved.
 ```
 
 Model routing (shared rules: `references/model-routing.md`): implement / spec-review / code-review stages default to `model:"sonnet"`. Omit `model` (inherit the session model) only for tasks flagged architecture-level or high-uncertainty. Set `model:"haiku"` for genuinely mechanical high-volume stages.

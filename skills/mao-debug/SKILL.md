@@ -81,7 +81,7 @@ Write a test that:
 
 ### Step 6: Verify End-to-End
 - [ ] Run the specific test
-- [ ] Run the full test suite
+- [ ] Run the affected test file(s) plus tests of modules directly depending on the fix (the full suite is deferred to the push/ship gate; run it now only if you cannot bound the affected scope)
 - [ ] Build
 - [ ] `grep -rnE '\[DEBUG-[0-9a-f]+\]' .` → no matches (clears temporary tracing tags, not legitimate `DEBUG`-level structured logs)
 - [ ] Manual check if applicable
