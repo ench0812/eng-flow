@@ -48,22 +48,28 @@ The spec the user reviews must be the **converged result of Claude and Codex co-
    ```
    Set `<level>` **once** by your own risk assessment of this design and keep it for every round (severity is your input — never let the script re-triage it; over-estimate when unsure): cross-system / security-sensitive / data migration / irreversible operations → `critical`; normal feature → `required`; small local design → `optional`.
 2. **Triage** — for each Codex item decide: **adopt** (revise the spec), **reject** (record why), or **user call** (genuine judgment call you can't settle). Never silently drop an item.
-3. **Log** — append the round to a `## Cross-Check Log` section at the very end of the spec, one table per round:
+3. **Log** — append the round to a `## Cross-Check Log` section at the very end of the spec, one table per round, closed by the round's convergence line:
    ```markdown
    ### Round 1 — YYYY-MM-DD（<model>/<effort>）
    | # | Codex 提議（嚴重度） | 處置 | 理由 |
+   |---|---------------------|------|------|
+
+   > 收斂問句:<Codex 的問句> → 續輪 / 收斂（一句理由）
    ```
    The log is the loop's only state: Codex reads it next round, won't re-raise settled items, and may dissent once on a rejection (marked `[異議]`) — a dissent you can't resolve becomes *user call*. Keep the log after approval (decision record).
-4. **Converge** — repeat from step 1 only if this round adopted any Critical/Required change. Stop when Codex replies「無重大補充」, a round adopts nothing above Optional, or after **4 consultations** — a **hard cap**: the script counts `### Round` entries in the Cross-Check Log and answers a 5th consultation with `[codex-review] STOP:` (exit 0). At the cap Claude takes over solo — remaining disagreements become *user call* and **no further codex-review calls** happen in this flow.
+4. **Converge** — **no consultation cap.** Codex ends every reply with one line, `收斂問句:<its single most important open question>` (or `無`). That question plus this round's adoptions drive your continue/stop call each round — and the loop's default is to stop:
+   - **Continue** another round only if (a) this round adopted a Critical/Required change Codex hasn't seen yet, or (b) the 收斂問句 is substantive (answering it would change this spec), in scope, and not already dispositioned in the Cross-Check Log.
+   - **Stop** in every other case: Codex replies「無重大補充」or 收斂問句 is 無; the question repeats a settled item; it expands scope beyond the spec's goal (record it as *user call* or out-of-scope — don't chase it); or answering it wouldn't change the doc.
+   - **Convergence duty is yours, not Codex's:** every extra round must shrink the open-question set, never widen it. If Codex opens a new front unrelated to prior rounds, don't follow — log it, force-converge, hand the remainder to the user. The script prints a non-blocking `警示` once the Cross-Check Log holds ≥6 `### Round` entries; treat it as "force-converge now".
 
-If the script answers `[codex-review] RATE_LIMITED:` the consultation did not happen: do not retry it, do not log a `### Round` for it (it must not consume the cap), and go straight to the Gate with the spec as it stands. Say so in one line. A later flow calls codex again as normal.
+If the script answers `[codex-review] RATE_LIMITED:` the consultation did not happen: do not retry it, do not log a `### Round` for it, and go straight to the Gate with the spec as it stands. Say so in one line. A later flow calls codex again as normal.
 
 If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay in one line and go to the Gate with the solo spec.
 
 ### 7. User Review Gate
 > "Spec written to `<path>` — co-designed with Codex over N round(s): X adopted, Y rejected (reasons in Cross-Check Log), Z for your call. Please review."
 
-Present each *user call* item with both positions — the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — only while under the 4-consultation cap. Once the cap is spent, Claude revises solo and re-presents without consulting codex again.
+Present each *user call* item with both positions — the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — it counts as a Critical/Required-level change Codex hasn't seen, and the same continue/stop rules govern any rounds after it.
 
 ### 8. Transition
 After user approves → invoke `eng-flow:mao-plan` to create implementation plan.
@@ -76,6 +82,7 @@ After user approves → invoke `eng-flow:mao-plan` to create implementation plan
 - Proposing only one approach — always at least 2
 - Starting code before user approves design
 - Auto-adopting Codex suggestions without dispositioning them in the Cross-Check Log — every item gets adopt / reject / user call
+- Following a scope-expanding 收斂問句 into another round — new fronts are *user call* material, not a reason to keep consulting
 
 ## Scope Decomposition
 If spec covers multiple independent subsystems:

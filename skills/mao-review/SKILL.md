@@ -22,6 +22,7 @@ Approve when the change **definitely improves overall code health**, even if it 
 - Error paths handled (not just happy path)?
 - Tests cover the change adequately?
 - Tests avoid tautological assertions (expected values from an independent source, not recomputed by the same logic)?
+- New tests at the lowest pyramid level that expresses them — no duplicate coverage of what an existing/lower-level test already asserts, no obsolete tests left behind?
 
 ### 2. Readability & Simplicity
 - Names descriptive and consistent?
@@ -93,9 +94,9 @@ Set `<level>` to the **highest original severity this review assigned** to the c
 
 Treat the output as a **pure second opinion**: present findings by severity, do **not** auto-fix, the user decides. If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay the reason in one line, do not install anything.
 
-**Consultation cap:** each code review you kick off gets **at most 2** consultations — [Claude]→[Codex]→[Claude]→[Codex]→[Claude]. If the 2nd consultation's findings trigger yet another fix-and-review round, Claude closes that round — and everything after it — alone, with no further codex-review calls. The count is per code review, not shared with the spec/plan stages or with a later review. (Diff mode is stateless, so this cap is yours to enforce; track the count within this review.)
+**Convergence (no consultation cap):** codex ends each reply with a single line, `收斂問句:<its most important open question>` (or `無`). One consultation per review round is the default; consult **again** only if a fix-and-review round produced Critical/Required-level fixes codex hasn't seen, or that question is substantive (answering it would change this change), in scope, and not already settled in this review. Otherwise close the review: 收斂問句 of `無`, a repeated/settled question, or a scope-expanding one (report it to the user as an open question instead of chasing it) all end the loop. Every extra consultation must shrink the open-question set, never widen it.
 
-**Rate limit:** if the script answers `[codex-review] RATE_LIMITED:`, that consultation did not happen — do not retry it, do not count it against the 2, and close the review with the findings you already have, saying so in one line. The next review calls codex again as normal.
+**Rate limit:** if the script answers `[codex-review] RATE_LIMITED:`, that consultation did not happen — do not retry it, and close the review with the findings you already have, saying so in one line. The next review calls codex again as normal.
 
 ## Subagent Dispatch
 

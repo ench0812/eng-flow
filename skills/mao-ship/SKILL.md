@@ -13,7 +13,8 @@ description: 分支完成 + 合併流程。準備合併、發布、結束 featur
 # Run these FIRST — no exceptions
 1. Build:        project-specific build command
 2. Lint:         project-specific lint command
-3. Tests:        FULL test suite (project-specific command) — dev-loop commits only ran targeted scopes; this gate is the full-suite checkpoint
+3. Tests:        FULL test suite (project-specific command) — dev-loop commits only ran targeted scopes; this gate is the full-suite checkpoint.
+                 Check runtime against the mao-tdd budget (plus the project's runtime ledger where kept — update it inside the merge commit); over → file a test-debt item (debt never blocks this gate)
 4. Git status:   git status + git log --oneline main..HEAD
 5. Debug residue (optional, cheap): grep -rn '\[DEBUG-' <changed files>
 ```

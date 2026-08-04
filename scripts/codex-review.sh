@@ -10,15 +10,16 @@
 #        狀態由呼叫端維護在文件尾端「## Cross-Check Log」小節,腳本本身無狀態。
 #   兩者皆唯讀,腳本不改任何檔。
 #
-# 諮詢次數上限([claude]->[codex] 的來回次數,依階段而異,無全流程總量上限):
-#   doc 模式(spec / plan 共議): 4 次。由本腳本強制——數 Cross-Check Log 的「### Round」
-#        數,已達上限即印 STOP 並 exit 0(不再諮詢 codex,由 Claude 接手續行)。
-#   diff 模式(code review 第二意見): 每次發動的 code review 各 2 次。腳本無狀態可查,
-#        由呼叫端 skill(mao-review / mao-execute)自行計數遵守。
+# 收斂機制(2026-08-04 起取代舊版的諮詢次數上限,所有模式皆無次數上限):
+#   每次諮詢的 prompt 都要求 codex 在回覆末尾附單獨一行「收斂問句:<最關鍵的一個未決問題>」
+#   (已無足以改變產出的問題則「收斂問句:無」)。是否續輪由呼叫端(Claude)每輪判斷——
+#   問句重複已處置議題、超出文件/變更範圍、或回答後不會改變產出,就收斂停止;續輪必須讓
+#   未決集合變小。細則見 mao-brainstorm / mao-plan / mao-review / mao-execute skill。
+#   doc 模式輪數 >= CONVERGE_WARN_ROUNDS 時本腳本印警示(不阻斷、照常諮詢),提醒強制收斂。
 #
 # Rate limit: 若 codex 回報用量/額度上限,印 RATE_LIMITED 並 exit 0。該次諮詢視為未發生
-#   ——呼叫端不得重試、不計入該階段的次數,直接繼續後續動作;下次需要諮詢時照常再呼叫
-#   本腳本。腳本無狀態,不會因為被擋過就永久跳過。
+#   ——呼叫端不得重試、不為它補記 Cross-Check Log 的「### Round」(doc 模式),直接繼續
+#   後續動作;下次需要諮詢時照常再呼叫本腳本。腳本無狀態,不會因為被擋過就永久跳過。
 #
 # 依「來源嚴重度」選模型(嚴重度由呼叫端提供,腳本不自行分診):
 #   複查深度應與風險相稱。嚴重度是【輸入】——
@@ -38,8 +39,7 @@
 #        否則 gpt-5.6-* slug 會被 server 回 400 invalid_request。
 #
 # 結束碼: 環境缺失(codex 未裝/未授權、diff 模式不在 repo) → 印提示並 exit 0(不阻斷);
-#          諮詢次數已達上限(doc 模式) → 印 STOP 並 exit 0(由 Claude 接手,不阻斷);
-#          用量/額度上限 → 印 RATE_LIMITED 並 exit 0(不阻斷、不重試、不計次);
+#          用量/額度上限 → 印 RATE_LIMITED 並 exit 0(不阻斷、不重試、不計 round);
 #          諮詢失敗(codex 非正常結束,或跑了但零輸出) → 印 FAILED 並 exit 1;
 #          呼叫端合約錯誤(--doc 檔不存在、參數矛盾) → exit 2(顯錯,不可靜默)。
 #
@@ -55,9 +55,8 @@ CRIT_MODEL="gpt-5.6-sol";      CRIT_EFFORT="max"        # critical
 REQ_MODEL="gpt-5.6-sol";       REQ_EFFORT="high"        # required
 LOW_MODEL="gpt-5.6-terra";     LOW_EFFORT="medium"      # optional / nit / fyi
 FALLBACK_MODEL="gpt-5.6-sol";  FALLBACK_EFFORT="high"   # --severity 未傳/未知時的保底
-MAX_CODESIGN_ROUNDS=4          # doc 模式(spec/plan 共議)上限(數 Cross-Check Log 的 ### Round)
-MAX_DIFF_CONSULTS=2            # diff 模式每次 code review 的上限。腳本無狀態、無從強制,
-                               # 由 mao-review / mao-execute 自行計數;此處僅供訊息引用。
+CONVERGE_WARN_ROUNDS=6         # doc 模式共議輪數警示線:達此輪數仍未收斂即印提醒(不阻斷)。
+                               # 無硬上限——收斂由呼叫端依每輪「收斂問句」判斷,見 header。
 
 # --- Rate limit 判定 ---
 # pattern 取自 codex 0.144.x binary 內實際的使用者可見字串。刻意不涵蓋「接近但仍可用」
@@ -65,10 +64,26 @@ MAX_DIFF_CONSULTS=2            # diff 模式每次 code review 的上限。腳�
 # "Hide future rate limit reminders"(偏好設定)——那些不代表本次被擋。
 # 429 / too many requests 只在 stderr 且 codex 非正常結束時採信: review 內容(stdout)
 # 本來就可能提到這些字或剛好有行號 429,拿來當訊號會誤判。
+# 成功短路(2026-08-04 兩次 dogfood 實測誤判後加入): codex exec 的 transcript 會回顯
+# prompt+stdin 原文,當 diff/doc 內容本身含限制字樣(例如本腳本的 rate limit 測試
+# fixture)時,成功的諮詢會被誤判成 RATE_LIMITED。rc=0 且 stdout 有實質內容(>=200 個
+# 非空白字元)＝諮詢確實發生,不可能同時是被擋;唯一例外是「stdout 極短且全是限制訊息、
+# exit 仍為 0」——那種真被擋的情況輸出遠小於門檻,仍會被 pattern 攔到。
 RATE_PAT_STRICT="you'?ve (hit|reached) your usage limit|you have (hit|reached) your usage limit|reached your workspace credit limit|out of credits|quota exceeded|rate limit reached"
 RATE_PAT_ERR_ONLY='too many requests|(^|[^0-9.])429([^0-9]|$)'
 
 is_rate_limited() {  # $1=codex exit code  $2=stderr 檔  $3=stdout 檔
+  # 成功證據二選一(round 4 共議: 短版有效回覆「無重大遺漏+收斂問句:無」遠小於長度門檻,
+  # 不能只看長度): (a) stdout 有行首收斂問句合約行——真回覆才會有,prompt 回顯裡它永遠
+  # 在行中;(b) 實質輸出量(>=200 非空白字元)。兩者都再要求尾端 1000 bytes 無限制字樣
+  # ——「回顯完 payload 之後才被擋、exit 仍 0」的情況,限制訊息必然落在尾端(round 3)。
+  local out_sz
+  out_sz="$(tr -d '[:space:]' < "$3" 2>/dev/null | wc -c)"
+  if [ "$1" -eq 0 ]; then
+    if grep -qE "^收斂問句[:：]" "$3" 2>/dev/null || [ "${out_sz:-0}" -ge 200 ]; then
+      tail -c 1000 "$3" 2>/dev/null | grep -qiE "$RATE_PAT_STRICT" || return 1
+    fi
+  fi
   grep -qiE "$RATE_PAT_STRICT" "$2" "$3" 2>/dev/null && return 0
   [ "$1" -ne 0 ] || return 1
   grep -qiE "$RATE_PAT_ERR_ONLY" "$2" 2>/dev/null
@@ -112,13 +127,13 @@ if [ -n "$DOC" ] || [ -n "$KIND" ]; then
   DOC_MODE=1
 fi
 
-# --- doc 模式共議輪數上限: 已滿即不再諮詢,由 Claude 接手(放在環境 gate 之前,離線可測) ---
+# --- doc 模式共議輪數警示: 輪數異常偏高時提醒強制收斂(不阻斷,照常諮詢;離線可測) ---
+# 無硬上限——收斂由呼叫端依每輪「收斂問句」判斷;這裡只是未收斂的 tripwire。
 # 迴圈狀態本來就由呼叫端記在文件的「## Cross-Check Log」小節,腳本只讀不寫,仍屬無狀態。
 if [ "$DOC_MODE" -eq 1 ]; then
   ROUNDS="$(awk '/^## Cross-Check Log/{f=1} f && /^### Round /{n++} END{print n+0}' "$DOC")"
-  if [ "$ROUNDS" -ge "$MAX_CODESIGN_ROUNDS" ]; then
-    echo "[codex-review] STOP: '$DOC' 的 Cross-Check Log 已記錄 $ROUNDS 次(上限 $MAX_CODESIGN_ROUNDS)。共議到此為止——由 Claude 接手續行,剩餘分歧交使用者仲裁,不再諮詢 codex。"
-    exit 0
+  if [ "$ROUNDS" -ge "$CONVERGE_WARN_ROUNDS" ]; then
+    echo "[codex-review] 警示: '$DOC' 的 Cross-Check Log 已累積 $ROUNDS 輪仍未收斂(警示線 $CONVERGE_WARN_ROUNDS)。檢查是否在追新戰線而非收斂舊問題——建議本輪後強制收斂:未決事項改記 user call 交使用者仲裁。" >&2
   fi
 fi
 
@@ -201,7 +216,10 @@ repo 內程式碼與文件驗證假設,但禁止修改任何檔案。
   Critical(不改會走錯方向) / Required(進 plan 前必改) / Optional(建議) / Nit(可忽略) / FYI
 若文件尾端有「## Cross-Check Log」: 那是前幾輪共議的處置紀錄。已處置的議題,除非你有新論據,
 不要重提;對標記「不採納」的項目,你可提出一次異議(項目前加 [異議] 並給出新理由),之後尊重
-第一位設計者的裁量。若無實質補充,直接回「無重大補充」。你是唯讀的共同設計者,禁止修改任何檔案。
+第一位設計者的裁量。若無實質補充,直接回「無重大補充」(仍須附上收斂問句行)。
+回覆最後必須以單獨一行作結:「收斂問句:<你認為最關鍵的一個未決問題>」——只能提一個,選對這份
+設計影響最大者。若已無足以改變這份文件的問題,寫「收斂問句:無」;不要為了湊問題而發明新議題
+或擴大範圍——這一行是收斂訊號,不是出題義務。你是唯讀的共同設計者,禁止修改任何檔案。
 EOF
   else
     read -r -d '' PROMPT_BODY <<'EOF'
@@ -226,7 +244,10 @@ EOF
   Critical(照做會做壞) / Required(執行前必改) / Optional(建議) / Nit(可忽略) / FYI
 若文件尾端有「## Cross-Check Log」: 已處置議題除非有新論據不要重提;對「不採納」項目可提出
 一次異議(項目前加 [異議] 並給出新理由),之後尊重第一位設計者的裁量。
-若無實質補充,直接回「無重大補充」。你是唯讀的共同設計者,禁止修改任何檔案。
+若無實質補充,直接回「無重大補充」(仍須附上收斂問句行)。
+回覆最後必須以單獨一行作結:「收斂問句:<你認為最關鍵的一個未決問題>」——只能提一個,選對這份
+計畫影響最大者。若已無足以改變這份計畫的問題,寫「收斂問句:無」;不要為了湊問題而發明新議題
+或擴大範圍——這一行是收斂訊號,不是出題義務。你是唯讀的共同設計者,禁止修改任何檔案。
 EOF
   fi
   # 文件路徑經變數插值放在引導行,不進 heredoc —— prompt 本體保持零展開
@@ -267,7 +288,10 @@ else
   Critical(阻斷合併) / Required(合併前必修) / Optional(建議) / Nit(可忽略) / FYI
 五個檢查軸: 正確性(邊界、錯誤路徑、測試覆蓋) / 可讀性與簡潔 / 架構(重複、邊界、循環相依) /
   安全(硬編 secrets、輸入驗證、輸出編碼、authz、加密演算法) / 效能(N+1、無界迴圈、同步阻塞)。
-若無實質遺漏,直接回「無重大遺漏」。你是唯讀第二意見,禁止修改任何檔案。
+若無實質遺漏,直接回「無重大遺漏」(仍須附上收斂問句行)。
+回覆最後必須以單獨一行作結:「收斂問句:<你認為最關鍵的一個未決問題>」——只能提一個,選對這次
+變更風險最大者。若已無足以改變這次變更的問題,寫「收斂問句:無」;不要為了湊問題而發明新議題。
+你是唯讀第二意見,禁止修改任何檔案。
 EOF
   PAYLOAD="$DIFF"
   SRC_INFO="base=$BASE (merge-base=${MB:0:12})"
@@ -302,7 +326,7 @@ case "$RC" in ''|*[!0-9]*) RC=1 ;; esac   # RC_FILE 沒寫成(內層整個被砍
 
 if is_rate_limited "$RC" "$ERR_FILE" "$OUT_FILE"; then
   echo "[codex-review] RATE_LIMITED: codex 回報用量/額度上限,本次諮詢沒有取得結果(codex exit=$RC)。" >&2
-  echo "  處置: 不要重試、不要計入本階段的諮詢次數,直接繼續後續動作。" >&2
+  echo "  處置: 不要重試、不要為本次補記 Cross-Check Log 的「### Round」(doc 模式),直接繼續後續動作。" >&2
   echo "  下次需要諮詢時照常再呼叫本腳本——不會因為這次被擋就永久跳過。" >&2
   exit 0
 fi
@@ -324,6 +348,15 @@ if [ -z "$OUT_TRIMMED" ] || [ "$RC" -ne 0 ]; then
   echo "  codex stderr(末 20 行):" >&2
   tail -n 20 "$ERR_FILE" >&2
   exit 1
+fi
+
+# --- 收斂問句在場檢查: 缺行不算失敗(review 內容仍是有效的第二意見),但要告知呼叫端 ---
+# 依協議缺行視為「收斂問句:無」=保守收斂停止,不得據此續輪。不用 FAILED——那會連帶丟棄
+# 已取得的有效 findings,懲罰過當。
+# 行首錨定是關鍵: transcript 會回顯 prompt,而 prompt 裡「收斂問句」只出現在行中
+# (「…作結:「收斂問句:…」)。codex 依指示輸出的是「單獨一行」=行首。不錨定會永遠命中。
+if ! grep -qE "^收斂問句[:：][[:space:]]*[^[:space:]]" "$OUT_FILE" 2>/dev/null; then
+  echo "[codex-review] 注意: 回覆未附行首「收斂問句:」行(協議要求)。視為「收斂問句:無」——依預設收斂停止,不得據此續輪。" >&2
 fi
 
 echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT, codex exit=$RC)。唯讀諮詢,腳本未改任何檔。" >&2

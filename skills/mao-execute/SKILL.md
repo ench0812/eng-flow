@@ -29,7 +29,11 @@ All tasks done → final integration review: run the FULL test suite first
                  could show. A failing full suite is a REQUEST_CHANGES back to
                  the owning task; re-run the full suite after the fix. Do not
                  re-review internals each task's spec-review and code-review
-                 already approved.
+                 already approved. Check the full-suite runtime against
+                 the mao-tdd budget (default 10 min; >20% growth where
+                 the project keeps a runtime ledger) — over → file a
+                 test-debt item in the closing report; never block this
+                 integration on it.
 ```
 
 Model routing (shared rules: `references/model-routing.md`): implement / spec-review / code-review stages default to `model:"sonnet"`. Omit `model` (inherit the session model) only for tasks flagged architecture-level or high-uncertainty. Set `model:"haiku"` for genuinely mechanical high-volume stages.
@@ -66,9 +70,9 @@ After the **final integration review** passes (all tasks done, all Required/Crit
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
 ```
 
-Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure. Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized. If findings trigger further fix-and-review cycles, this closing cross-check is capped at **2 consultations** — the same per-code-review cap as mao-review, counted independently of the spec/plan stages. Past the cap, Claude closes out alone with no further codex-review calls (diff mode is stateless; you enforce this count).
+Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure. Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized. **No consultation cap** — codex ends each reply with `收斂問句:<one question>` (or `無`); consult again only if a fix-and-review cycle produced Critical/Required-level fixes codex hasn't seen, or its question is substantive (answering it would change the code), in scope, and not already settled — same convergence rules as mao-review's closing cross-check. A `無`, repeated, or scope-expanding question closes the loop (report scope-expanding ones to the user as open questions).
 
-If the script answers `[codex-review] RATE_LIMITED:`, that consultation did not happen: do not retry it, do not count it against the 2, and close out with what you have, saying so in one line.
+If the script answers `[codex-review] RATE_LIMITED:`, that consultation did not happen: do not retry it, and close out with what you have, saying so in one line.
 
 ## Red Flags
 - Dispatching multiple agents on overlapping files without worktree isolation

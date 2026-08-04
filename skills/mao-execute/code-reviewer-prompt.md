@@ -10,7 +10,7 @@ Review the code changes between BASE_SHA and HEAD_SHA for quality.
 [Task description from plan]
 
 ## Review Axes
-**1. Correctness** — Does code do what spec says? Edge cases? Error paths? No tautological assertions (expected values from an independent source, not recomputed by the same logic)?
+**1. Correctness** — Does code do what spec says? Edge cases? Error paths? No tautological assertions (expected values from an independent source, not recomputed by the same logic)? New tests at the lowest level that expresses them, no duplicate coverage of what an existing/lower test already asserts, obsolete tests removed with the behavior?
 **2. Readability** — Clear names? Straightforward flow? No clever tricks?
 **3. Architecture** — Follows existing patterns? Clean boundaries? No duplication? Delete this module — does complexity vanish (pass-through, cut it) or reappear at every caller (earns its keep)? Only one implementation behind this interface — premature abstraction; extract only once a second real one exists.
 **4. Security** — Input validated? Secrets safe? Auth checked? No injection?
