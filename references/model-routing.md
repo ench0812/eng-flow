@@ -15,7 +15,7 @@ Model tiers:
 - **mao-execute pipeline** (implement / spec-review / code-review): default `model:"sonnet"` on all three stages. Escalate a stage to inherit (omit `model`) only when its task is flagged architecture-level or high-uncertainty in the plan.
 - **mao-review reviewer dispatch**: default `model:"sonnet"`. High-risk changes (security, auth, data integrity) → omit `model` to escalate.
 - **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=opus, root-cause-debugger=opus, implementer=sonnet, mechanical-scanner=haiku. These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
-- **Effort**（Workflow `agent()` 用 `opts.effort`；`~/.claude/agents/*.md` 用 frontmatter `effort:`）：機械高量 stage → `effort:'low'`；spec-review / code-review → `effort:'medium'`（官方實測 Opus 5 review 準確度在低 effort 仍維持）；implement 與架構級判斷 → omit，繼承 session。安全 / 認證 / 資料完整性相關的 review 一律 omit。這組值是依官方指引訂的第一版起點，跑過一輪真實 plan 後再校。
+- **Effort**（Workflow `agent()` 用 `opts.effort`；`~/.claude/agents/*.md` 用 frontmatter `effort:`）：機械高量 stage → `effort:'low'`；spec-review / code-review → `effort:'medium'`（官方實測 Opus 5 review 準確度在低 effort 仍維持）；**implement（範疇明確的模組實作）→ `effort:'high'`**（2026-08-05 校準：high→xhigh 對範疇明確任務邊際效益遞減、每輪思考延遲照付；具名 sonnet agent 的 frontmatter 已同步 `effort: high`）；架構級判斷 → omit，繼承 session。安全 / 認證 / 資料完整性相關的 review 一律 omit。總原則：**xhigh 留給「思考一次、影響全局」的節點（規劃/架構/安全審查/最終 judge），「執行多輪、範疇明確」的節點降階**——否則平行化省下的時間會被每輪思考延遲吃回去。
 - When unsure: omit `model`（harness 的預設就是繼承主線，不確定時降能力是反向操作）；要省成本就把 effort 降一階，不要用降模型來省。已經確定機械化的 stage 才明寫 `model:"sonnet"` / `"haiku"`。
 
 ## Codex Cross-Family Consultation (gpt-5.6)
