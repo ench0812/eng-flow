@@ -124,7 +124,7 @@ If codex is absent/unauthorized the script self-skips — relay in one line and 
 ## Execution Handoff
 
 After the co-design loop converges — summarize it first (rounds, adopted/rejected counts, each *user call* item with both positions; the user arbitrates) — then offer:
-1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task. Under ultracode it authors a Workflow to orchestrate the tasks — review the generated script before approving on large plans.
+1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task. It authors a Workflow to orchestrate the tasks whenever the Workflow tool is available — review the generated script before approving on large plans.
    - To run the whole plan unattended, hand the user a `/goal` condition to paste. `/goal` is user-invocable only (Claude cannot set it), and needs auto mode to actually run without interruption. The condition must be **provable from the transcript** — the evaluator does not read files or run commands — and must keep an escape hatch and a turn cap. Template:
      `/goal 依序實作 docs/plans/<file>.md 的每個 task，每完成一個就貼出該 task 驗收指令的實際輸出；全部驗收指令都 exit 0、且最終整合 review 貼出 full test suite 通過的輸出，才算達成。遇到 BLOCKED、「## Not yet specified」、或需要我裁決的項目就停下來問我，或跑滿 30 turns 停。`
 2. **Inline** — execute sequentially in current session
