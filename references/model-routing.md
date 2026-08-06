@@ -1,22 +1,25 @@
 # Model Routing (eng-flow shared rules)
 
-Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能力）與 **effort**（推理預算）。`ultracode` 把 session effort 釘在 xhigh，任何沒指定 effort 的 stage 都繼承 xhigh；省成本先動 effort，model 只在任務確實機械化時才降。
+Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能力）與 **effort**（推理預算）。**兩者成對選定、一律明寫**（2026-08-06 校準）：挑 tier 就把該 tier 的 effort 一起帶上，不靠 omit 繼承 session。Sonnet 分兩檔，是這張表的重點——降成本先在 B1→B2 之間動，不是急著降到 haiku。
 
-Model tiers:
+| Tier | Model | Effort | 用途 | How |
+|------|-------|--------|------|-----|
+| **Session** | 主線（settings.json `model`） | `high`（settings.json `effortLevel`） | 編排、架構決策、需求拆解 | 不由 `agent()` 設定；改 settings |
+| **A** | opus（繼承主線） | `high` | 平行深度任務、跨模組驗證 — **節制使用** | Omit `model` + `effort:'high'` |
+| **B1** | sonnet | `high` | 複雜商業邏輯、演算法 — 執行層首選工程師 | `model:"sonnet"` + `effort:'high'` |
+| **B2** | sonnet | `medium` | Spec 明確的實作、標準重構 | `model:"sonnet"` + `effort:'medium'` |
+| **C** | haiku | **不設** | 樣板、config、migration、文件 | `model:"haiku"`，`effort` 留空 |
 
-| Tier | When | How |
-|------|------|-----|
-| **opus** (inherit) | Architecture-level decisions, high-uncertainty tasks, security-critical review | Omit `model` in `agent()` — inherits the session model |
-| **sonnet** (default for execution) | Standard implement / spec-review / code-review stages, scoped multi-step tasks | `model:"sonnet"` |
-| **haiku** | Genuinely mechanical high-volume: scanning, format conversion, log analysis, simple lookups | `model:"haiku"` |
+B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想出解法（演算法、跨模組互動、狀態機、並行/交易邏輯）→ B1；解法已寫在 spec/plan 裡、只是落地成 code → B2。C 層刻意不設 effort——樣板與文件不需要推理預算，交給模型自己的預設。
 
 ## Rules
 
-- **mao-execute pipeline** (implement / spec-review / code-review): default `model:"sonnet"` on all three stages. Escalate a stage to inherit (omit `model`) only when its task is flagged architecture-level or high-uncertainty in the plan.
-- **mao-review reviewer dispatch**: default `model:"sonnet"`. High-risk changes (security, auth, data integrity) → omit `model` to escalate.
-- **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=opus, root-cause-debugger=opus, implementer=sonnet, mechanical-scanner=haiku. These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
-- **Effort**（Workflow `agent()` 用 `opts.effort`；`~/.claude/agents/*.md` 用 frontmatter `effort:`）：機械高量 stage → `effort:'low'`；spec-review / code-review → `effort:'medium'`（官方實測 Opus 5 review 準確度在低 effort 仍維持）；**implement（範疇明確的模組實作）→ `effort:'high'`**（2026-08-05 校準：high→xhigh 對範疇明確任務邊際效益遞減、每輪思考延遲照付；具名 sonnet agent 的 frontmatter 已同步 `effort: high`）；架構級判斷 → omit，繼承 session。安全 / 認證 / 資料完整性相關的 review 一律 omit。總原則：**xhigh 留給「思考一次、影響全局」的節點（規劃/架構/安全審查/最終 judge），「執行多輪、範疇明確」的節點降階**——否則平行化省下的時間會被每輪思考延遲吃回去。
-- When unsure: omit `model`（harness 的預設就是繼承主線，不確定時降能力是反向操作）；要省成本就把 effort 降一階，不要用降模型來省。已經確定機械化的 stage 才明寫 `model:"sonnet"` / `"haiku"`。
+- **mao-execute pipeline**: implement 依任務性質選 B1 或 B2（plan 標記 architecture-level / high-uncertainty 的升 A）；spec-review / code-review 走 B2，安全 / 認證 / 資料完整性相關的升 A。
+- **mao-review reviewer dispatch**: default B2（`model:"sonnet"` + `effort:'medium'`）。High-risk changes (security, auth, data integrity) → A（omit `model` + `effort:'high'`）。
+- **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=A, root-cause-debugger=A, implementer=B2（其定義就是「依明確 spec 落地」）, mechanical-scanner=C。These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
+- **Effort 寫在哪**：Workflow `agent()` 用 `opts.effort`；`~/.claude/agents/*.md` 用 frontmatter `effort:`。除 C 層外一律明寫——session 有自己的 effortLevel，omit 會讓 stage 悄悄繼承它、失去分層的意義。
+- When unsure: 升 tier（B2→B1→A），不要拆開 model 與 effort 的配對去單獨拉 effort；也不要用降 model 來省成本（能力降級是反向操作）。確定機械化才進 C。
+- **沿革**：2026-08-05 曾把 implement stage 單獨校準為 `effort:'high'`（理由：high→xhigh 對範疇明確任務邊際效益遞減、每輪思考延遲照付，平行化省下的時間不該被吃回去）。該結論已被本版吸收成 **B1**——差別是現在由「任務不確定性」決定 implement 走 B1 還是 B2，而不是整條 implement stage 一律 high。
 
 ## Codex Cross-Family Consultation (gpt-5.6)
 

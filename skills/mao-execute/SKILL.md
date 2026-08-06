@@ -36,9 +36,17 @@ All tasks done → final integration review: run the FULL test suite first
                  integration on it.
 ```
 
-Model routing (shared rules: `references/model-routing.md`): implement / spec-review / code-review stages default to `model:"sonnet"`. Omit `model` (inherit the session model) only for tasks flagged architecture-level or high-uncertainty. Set `model:"haiku"` for genuinely mechanical high-volume stages.
+Model + effort routing (shared rules: `references/model-routing.md` — model and effort are chosen as a pair, always written explicitly):
 
-Effort routing (same reference): spec-review / code-review stages set `effort:'medium'`; genuinely mechanical stages `effort:'low'`; implement and anything architecture-level or security-related omit `effort` (inherits session). Under ultracode an omitted effort inherits xhigh — set it explicitly on review stages or they run at full reasoning cost.
+| Stage | Tier | Dispatch |
+|-------|------|----------|
+| implement — 複雜商業邏輯 / 演算法 / 跨模組互動 | **B1** | `model:"sonnet"` + `effort:'high'` |
+| implement — spec 明確、只是落地 | **B2** | `model:"sonnet"` + `effort:'medium'` |
+| spec-review / code-review | **B2** | `model:"sonnet"` + `effort:'medium'` |
+| 任何 architecture-level / high-uncertainty / 安全相關的 stage | **A** | omit `model`（inherits session）+ `effort:'high'` |
+| 樣板、config、migration、文件這類機械高量 stage | **C** | `model:"haiku"`，`effort` 留空 |
+
+Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand-tuning its effort. Outside tier C, never omit `effort` — an omitted effort silently inherits the session level and the layering stops meaning anything.
 
 **Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool per task.
 

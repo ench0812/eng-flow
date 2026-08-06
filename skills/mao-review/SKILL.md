@@ -106,7 +106,7 @@ Treat the output as a **pure second opinion**: present findings by severity, do 
 - `git diff <BASE_SHA>..HEAD --stat` — empty diff → stop, report to the user, do not dispatch
 
 For automated review, run a reviewer via Workflow `agent()` (or Agent tool directly for a single-file review) using the template at `mao-execute/code-reviewer-prompt.md`:
-- Model & effort: default `model:"sonnet"` + `effort:'medium'` (same routing as mao-execute; see `references/model-routing.md`). High-risk changes (security/auth/data) → omit both `model` and `effort` to inherit the session model at full reasoning depth
+- Model & effort: default **B2** = `model:"sonnet"` + `effort:'medium'` (same routing as mao-execute; see `references/model-routing.md`). High-risk changes (security/auth/data) → **A** = omit `model` (inherits the session model) + `effort:'high'`
 - Provide git SHAs (BASE_SHA from the merge-base above, and HEAD)
 - Include task/plan requirements
 - List changed files
