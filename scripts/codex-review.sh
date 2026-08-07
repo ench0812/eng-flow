@@ -25,11 +25,14 @@
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
-#   映射(嚴重度用語同 mao-review taxonomy):
-#     critical          -> gpt-5.6-sol   / max   (旗艦最深,阻斷級風險值得最貴複查)
-#     required          -> gpt-5.6-sol   / high
-#     optional/nit/fyi  -> gpt-5.6-terra / medium(低風險用便宜模型快速掃)
-#   --severity 未傳/未知 -> fallback gpt-5.6-sol / high(保守:不靜默降級、也不漏看)。
+#   映射(嚴重度用語同 mao-review taxonomy;2026-08-07 改版,理由:舊映射 token 消耗過大):
+#     critical          -> gpt-5.6-sol   / medium(旗艦保留給阻斷級風險,但 effort 由 max 降到 medium)
+#     required          -> gpt-5.6-terra / high  (中階模型 + 高 effort 補償)
+#     optional/nit/fyi  -> gpt-5.6-luna  / xhigh (nano 級模型,單價低到 xhigh 也划算)
+#   --severity 未傳/未知 -> fallback gpt-5.6-luna / xhigh(對齊最低一級:沒說嚴重度就不燒旗艦額度;
+#                            腳本仍印警告要求呼叫端補傳,別靠 fallback 過日子)。
+#   策略:模型階梯隨嚴重度下降(sol > terra > luna),effort 反向上升作為補償。舊版 sol/max
+#   ＋ sol/high 兩級都吃旗艦模型的最貴檔位,是 token 消耗的主因。
 #
 # 用法: bash codex-review.sh --severity <critical|required|optional|nit|fyi> [--base <branch>]
 #        bash codex-review.sh --severity <...> --doc <path> --kind <spec|plan>
@@ -51,10 +54,10 @@
 set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
-CRIT_MODEL="gpt-5.6-sol";      CRIT_EFFORT="max"        # critical
-REQ_MODEL="gpt-5.6-sol";       REQ_EFFORT="high"        # required
-LOW_MODEL="gpt-5.6-terra";     LOW_EFFORT="medium"      # optional / nit / fyi
-FALLBACK_MODEL="gpt-5.6-sol";  FALLBACK_EFFORT="high"   # --severity 未傳/未知時的保底
+CRIT_MODEL="gpt-5.6-sol";      CRIT_EFFORT="medium"     # critical
+REQ_MODEL="gpt-5.6-terra";     REQ_EFFORT="high"        # required
+LOW_MODEL="gpt-5.6-luna";      LOW_EFFORT="xhigh"       # optional / nit / fyi
+FALLBACK_MODEL="gpt-5.6-luna"; FALLBACK_EFFORT="xhigh"  # --severity 未傳/未知時的保底(對齊 optional)
 CONVERGE_WARN_ROUNDS=6         # doc 模式共議輪數警示線:達此輪數仍未收斂即印提醒(不阻斷)。
                                # 無硬上限——收斂由呼叫端依每輪「收斂問句」判斷,見 header。
 

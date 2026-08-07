@@ -24,6 +24,20 @@ Approve when the change **definitely improves overall code health**, even if it 
 - Tests avoid tautological assertions (expected values from an independent source, not recomputed by the same logic)?
 - New tests at the lowest pyramid level that expresses them — no duplicate coverage of what an existing/lower-level test already asserts, no obsolete tests left behind?
 
+**跨服務接縫（改動觸及兩個以上服務/程序時必查，2026-08-07 加）**
+單側全綠是已知的假綠形態——A 服務測「我送出的形狀是這樣」、B 服務測「我收到這個形狀會正確處理」，
+兩邊都測對了，但兩邊假設的形狀不同，中間沒有測試跨過去。mutation、`-race`、full suite 在設計上都攔不住。
+- **有沒有任何一項驗證真的跨過了服務邊界？** 若「各服務都綠」是唯一證據，那還沒被驗證。
+- **fixture 是不是消費端自造的？** 自造的 fixture 證明的只是「我對對端的假設自洽」；認證軸上等於沒證明。
+  輸入必須來自對端實際產生的 bytes（golden fixture 由對端匯出）或真正的 e2e。
+- **「欄位省略」與「送空字串」在對端會解成同一件事嗎？** 常見分歧：`nil` vs 指向空字串的指標 → SQL `NULL` vs `''`。
+- **新增的契約欄位在消費端是不是無條件 fail-closed？** 「欄位不存在」會等同「尚未升級的對端」，
+  部署順序一顛倒就全面拒收。readiness 要綁在「該功能是否真的啟用」，不是綁在欄位存在與否。
+- **一端的判斷是否依賴另一端某個值的形狀**，而該形狀從未被同一份 bytes 驗證過？
+
+> 實測依據（2026-08-07 單次量測，非持續更新）：一輪跨五 repo 的改造裡，這一類缺陷出現**五個實例**（欄位頂替、空字串 vs 省略、
+> 快照鍵與查表鍵不一致、別名缺席語意、新欄位 readiness 的跨版本時序），返工佔總工時 48.5%。
+
 ### 2. Readability & Simplicity
 - Names descriptive and consistent?
 - Control flow straightforward?
@@ -90,7 +104,7 @@ After the five axes are complete AND the author has fixed all Required/Critical 
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
 ```
 
-Set `<level>` to the **highest original severity this review assigned** to the change (Critical/Required/Optional/Nit/FYI — even if now fixed; the risk area remains). The script maps severity → Codex model (Critical→`sol/max`, Required→`sol/high`, else→`terra/medium`; see `references/model-routing.md`). Severity is your input from this review — never let the script re-triage it. Over-estimate when unsure.
+Set `<level>` to the **highest original severity this review assigned** to the change (Critical/Required/Optional/Nit/FYI — even if now fixed; the risk area remains). The script maps severity → Codex model (Critical→`sol/medium`, Required→`terra/high`, else→`luna/xhigh`; see `references/model-routing.md`). Severity is your input from this review — never let the script re-triage it. Over-estimate when unsure (`else` lands on the nano tier — anything that might matter belongs at `required` or above).
 
 Treat the output as a **pure second opinion**: present findings by severity, do **not** auto-fix, the user decides. If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay the reason in one line, do not install anything.
 

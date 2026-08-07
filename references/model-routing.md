@@ -35,13 +35,15 @@ B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想�
 
 **Rate limit.** If codex reports a usage/credit limit the script prints `[codex-review] RATE_LIMITED:` and exits 0. That consultation did not happen: do **not** retry it, do **not** log a round for it, and carry straight on with whatever came next. The next time a consultation is due, call the script again as normal — being rate-limited once never disables codex for the rest of the flow.
 
-Severity is an **input decided by the source** — never re-triaged by a weaker model. When in doubt, over-estimate — under-calling sends work that deserves deep review to a fast terra scan. Model mapping (all modes):
+Severity is an **input decided by the source** — never re-triaged by a weaker model. When in doubt, over-estimate — under-calling sends work that deserves deep review to a cheap luna scan. Model mapping (all modes, revised 2026-08-07 to cut token spend):
 
 | Source severity | Codex model / effort |
 |---------------------|----------------------|
-| Critical | `gpt-5.6-sol` / max |
-| Required | `gpt-5.6-sol` / high |
-| Optional / Nit / FYI | `gpt-5.6-terra` / medium |
-| (unspecified) | fallback `gpt-5.6-sol` / high |
+| Critical | `gpt-5.6-sol` / medium |
+| Required | `gpt-5.6-terra` / high |
+| Optional / Nit / FYI | `gpt-5.6-luna` / xhigh |
+| (unspecified) | fallback `gpt-5.6-luna` / xhigh |
+
+The ladder walks the **model** down with severity (sol → terra → luna) and walks **effort** up to compensate. The previous mapping put both Critical and Required on the flagship's most expensive tiers (`sol/max`, `sol/high`), which was the dominant token cost. Caveat carried knowingly: `gpt-5.6-luna` is the nano tier — extra reasoning effort does not buy it flagship-level review depth, so anything that might actually matter should be called `required` or above, not left on luna. The unspecified-severity fallback now lands on that same bottom rung (it used to be the flagship): omitting `--severity` no longer buys a deep review, it buys the shallowest one. The script still prints a warning on omission — treat that warning as a caller bug to fix, not as a default to lean on.
 
 Doc mode skips the base-branch / empty-diff gates; outside a git repo it continues with `--skip-git-repo-check` (sandbox is read-only — codex merely loses repo context). A missing `--doc` file or contradictory flags is a caller bug → exit 2, loud (environment gaps SKIP with exit 0, never blocking). Requires codex client >= 0.144.x + GPT-5.6 access; self-skips when codex is absent/unauthorized.

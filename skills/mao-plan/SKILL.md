@@ -65,6 +65,21 @@ Build complete feature paths, not horizontal layers.
 - **Bad:** all DB → all API → all UI → connect everything
 - **Good:** feature A (DB+API+UI) → feature B (DB+API+UI)
 
+**多服務／多 repo 時，「repo」就是層——不要按 repo 切波次**（2026-08-07 加，實測代價見下）：
+- **Bad:** W1=契約定案 → W2=整個 backend → W3=整個 gateway → W4=整個前端 → W5=模擬器 → W6=收尾
+- **Good:** 片1=「行為 X 端到端」(backend+gateway+驗證) → 片2=「行為 Y 端到端」 → …
+
+按 repo 切等同水平切層，而且**後果比單庫分層更嚴重**：服務之間的接縫（wire 形狀、快照欄位、部署時序）
+只有在兩側都蓋完之後才驗得到，此時其他服務已經疊在上面，修一個接縫缺陷要動全部。
+
+> **實測（2026-08-07 單次量測，非持續更新）**：一個五 repo 的識別碼改造照 W1~W6 按 repo 切，11 個 workflow 共 675 分鐘，
+> **實作 44%、返工 48.5%**，而返工幾乎都是**同一類接縫缺陷的五個實例**——每一輪都只修掉當下那個實例。
+> 四個 agent 全綠、單 repo 複驗也全綠，唯一抓到最後一個實例的是跨服務的契約測試。
+
+**判準（切完自我檢查）**：每一片都要寫得出「誰送什麼 → 誰收到什麼 → 哪裡看得到結果」。
+**若某片的產出「要等另一片才驗得起來」，那條界線就切錯了。**
+碰到服務接縫的片，**片末就要跑跨接縫驗證**，不可留到收尾。
+
 **Wide refactor exception:** Mechanical but codebase-wide changes (rename a shared column, retype a shared symbol) can't be sliced vertically — no slice can go green on its own. Split into three task types instead:
 - **Expand** — old and new forms coexist, no caller breaks. Stays a single sequential task.
 - **Migrate** — split by blast radius (per package/directory), one task per batch, depends on expand. Batches touch disjoint files, so each goes green independently and already qualifies as parallel under mao-execute's existing independent-files rule — no extra tagging needed. (Doesn't conflict with mao-execute's "database migrations must be sequential" rule — that covers the expand step's schema change itself, not these caller-side migration batches.)
@@ -82,6 +97,14 @@ Build complete feature paths, not horizontal layers.
 | XL | 8+ | **Must split further** |
 
 **Break down further when:** >2 hours of work, can't describe acceptance in ≤3 bullets, touches 2+ independent subsystems, title contains "and".
+
+**plan／spec 本身的大小也要控制**（2026-08-07 加）：一個功能一份大 spec 會隨裁定累積而膨脹——
+實例是一份 spec 長到千行、裁定累積到 D1~D16，**後期裁定還推翻前期段落**，讀者要自己分辨哪些還有效；
+而每個執行 agent 每輪都整份讀，token 大量花在重複閱讀。
+- **切片後每片一份小 spec**，裁定寫在它所屬那一片裡，不要全部堆進同一份。
+- 交給執行 agent 的 brief **控制在 150 行內**，大 spec 只指名要讀的小節。
+- **不要把上一輪的完整回報整段貼進下一輪 brief**——回報是給人判斷用的，不是給下一個 agent 當輸入。
+- 若某份 spec 已經長到必須靠「這一段已被 Dn 推翻」來閱讀，那是**應該切開而沒切**的訊號。
 
 ## No Placeholders — Ever
 
