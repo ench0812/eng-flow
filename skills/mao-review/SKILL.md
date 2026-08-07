@@ -104,7 +104,7 @@ After the five axes are complete AND the author has fixed all Required/Critical 
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
 ```
 
-Set `<level>` to the **highest original severity this review assigned** to the change (Critical/Required/Optional/Nit/FYI — even if now fixed; the risk area remains). The script maps severity → Codex model (Critical→`sol/medium`, Required→`terra/high`, else→`luna/xhigh`; see `references/model-routing.md`). Severity is your input from this review — never let the script re-triage it. Over-estimate when unsure (`else` lands on the nano tier — anything that might matter belongs at `required` or above).
+Set `<level>` to the **highest original severity this review assigned** to the change (Critical/Required/Optional/Nit/FYI — even if now fixed; the risk area remains). The script maps severity → Codex model (Critical→`sol/medium`, Required→`terra/high`, else→`luna/max`; see `references/model-routing.md`). Severity is your input from this review — never let the script re-triage it. Over-estimate when unsure (`else` lands on the nano tier — anything that might matter belongs at `required` or above).
 
 Treat the output as a **pure second opinion**: present findings by severity, do **not** auto-fix, the user decides. If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay the reason in one line, do not install anything.
 

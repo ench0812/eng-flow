@@ -41,9 +41,19 @@ Severity is an **input decided by the source** — never re-triaged by a weaker 
 |---------------------|----------------------|
 | Critical | `gpt-5.6-sol` / medium |
 | Required | `gpt-5.6-terra` / high |
-| Optional / Nit / FYI | `gpt-5.6-luna` / xhigh |
-| (unspecified) | fallback `gpt-5.6-luna` / xhigh |
+| Optional / Nit / FYI | `gpt-5.6-luna` / max |
+| (unspecified) | fallback `gpt-5.6-luna` / max |
 
 The ladder walks the **model** down with severity (sol → terra → luna) and walks **effort** up to compensate. The previous mapping put both Critical and Required on the flagship's most expensive tiers (`sol/max`, `sol/high`), which was the dominant token cost. Caveat carried knowingly: `gpt-5.6-luna` is the nano tier — extra reasoning effort does not buy it flagship-level review depth, so anything that might actually matter should be called `required` or above, not left on luna. The unspecified-severity fallback now lands on that same bottom rung (it used to be the flagship): omitting `--severity` no longer buys a deep review, it buys the shallowest one. The script still prints a warning on omission — treat that warning as a caller bug to fix, not as a default to lean on.
+
+**Effort ceilings per model** (source: the model catalog bundled in codex 0.146.0 — `supported_reasoning_levels` per slug, not a blog post; several third-party write-ups get this wrong):
+
+| Model | Supported efforts | Default |
+|---|---|---|
+| `gpt-5.6-sol` | low, medium, high, xhigh, max, **ultra** | low |
+| `gpt-5.6-terra` | low, medium, high, xhigh, max, **ultra** | medium |
+| `gpt-5.6-luna` | low, medium, high, xhigh, max | medium |
+
+So `luna/max` is luna's ceiling — `ultra` is not a valid setting there. `ultra` exists on sol *and* terra (it is not sol-exclusive), but it spawns parallel subagents and burns quota fast, which runs against the point of this mapping — do not reach for it without deciding the cost is worth it. Note the CLI does not validate effort against this catalog locally: an unsupported pair is sent to the server, so a bad combination surfaces as a request error at consultation time, not at call time.
 
 Doc mode skips the base-branch / empty-diff gates; outside a git repo it continues with `--skip-git-repo-check` (sandbox is read-only — codex merely loses repo context). A missing `--doc` file or contradictory flags is a caller bug → exit 2, loud (environment gaps SKIP with exit 0, never blocking). Requires codex client >= 0.144.x + GPT-5.6 access; self-skips when codex is absent/unauthorized.
