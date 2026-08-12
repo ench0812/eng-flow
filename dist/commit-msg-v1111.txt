@@ -1,0 +1,16 @@
+v1.11.1: Workflow 派工不再綁 ultracode 條件
+
+使用者環境已於 2026-08-06 關閉 ultracode(session effort 改由 effortLevel
+固定為 high)，但兩處文件把「用 Workflow 編排」寫成 ultracode 的條件，會讓
+未來 session 誤判「ultracode 沒開 = 該退回 legacy Agent 序列派工」。實際的
+fallback 條件一直是「Workflow tool 不在可用工具清單中」(mao-execute 的
+Fallback 段本來就這樣寫)，兩者不一致。
+
+- mao-execute: 「Default (ultracode): author a Workflow」→ 「Default:
+  author a Workflow ... 只要 Workflow tool 可用就是預設，不取決於 ultracode」
+- mao-plan: 「Under ultracode it authors a Workflow」→ 「whenever the
+  Workflow tool is available」
+
+純文字澄清，未改任何流程或 script 行為。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>

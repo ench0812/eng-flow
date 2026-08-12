@@ -213,6 +213,24 @@ check_e2e "非信任目錄附具體處置" 1 "非信任目錄" "完成("
 # 串流留存仍完整: stderr 內容要能被 rate limit 判定看到(fd 調度改寫後的回歸點)
 mk_stub 'echo "progress line" >&2; echo "You'"'"'ve hit your usage limit." >&2; exit 1'
 check_e2e "stderr 多行仍能判定 RATE_LIMITED" 0 "RATE_LIMITED" "FAILED:"
+# --- 輸入過長(2026-08-12 實測誤判後新增) ---
+# 背景: codex 0.144.x 把 transcript(含被回顯的整份 diff)寫到 stderr,而舊版的寬鬆 429 規則
+# 對整份 stderr 比對,於是 diff 裡一行 hunk header `@@ -303,18 +429,23 @@` 就把
+# input_too_large 誤判成 RATE_LIMITED——呼叫端因此以為「只是額度、等等再說」,實際上是
+# 「這份 diff 永遠不會被複查」。兩者的處置相反,誤分類等於放行未複查的變更。
+mk_stub 'echo "@@ -303,18 +429,23 @@ function f() {" >&2; echo "Error: turn/start failed: Input exceeds the maximum length of 1048576 characters. (code -32602), data: {\"input_error_code\":\"input_too_large\"}" >&2; exit 1'
+check_e2e "input_too_large → FAILED(非 RATE_LIMITED)" 1 "FAILED:" "RATE_LIMITED"
+mk_stub 'echo "@@ -303,18 +429,23 @@ function f() {" >&2; echo "Error: turn/start failed: Input exceeds the maximum length of 1048576 characters." >&2; exit 1'
+check_e2e "input_too_large 附具體處置" 1 "縮小" "RATE_LIMITED"
+
+# 負控組: diff 裡出現 429 但 codex 正常回覆,不可誤判成 RATE_LIMITED
+mk_stub 'echo "@@ -1,5 +429,7 @@" >&2; echo "無重大遺漏"; echo "收斂問句:無"; exit 0'
+check_e2e "diff 內的 429 不觸發 RATE_LIMITED" 0 "完成(" "RATE_LIMITED"
+
+# 負控組: 真正的 429 出現在錯誤行上,仍必須判為 RATE_LIMITED(收窄不可改壞既有行為)
+mk_stub 'echo "ERROR: request failed with status 429 Too Many Requests" >&2; exit 1'
+check_e2e "錯誤行上的 429 仍判 RATE_LIMITED" 0 "RATE_LIMITED" "FAILED:"
+
 rm -rf "$STUB"
 
 echo "pass=$pass fail=$fail"

@@ -82,6 +82,8 @@ Set `<level>` to the **highest original severity** surfaced across this implemen
 
 If the script answers `[codex-review] RATE_LIMITED:`, that consultation did not happen: do not retry it, and close out with what you have, saying so in one line.
 
+**Input too large.** If the script answers `[codex-review] FAILED: 輸入過長,未送出`, the consultation did **not** happen and this is *not* a quota problem — the diff exceeds codex's input limit, so it will never be reviewed until the scope is narrowed. Unlike RATE_LIMITED you must not just carry on: re-run with a tighter `--base` (per-commit or per-theme), or review the high-risk files separately from the test-file bulk. Treating it as reviewed is a false pass.
+
 ## Red Flags
 - Dispatching multiple agents on overlapping files without worktree isolation
 - Skipping spec review ("it looks fine")

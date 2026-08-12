@@ -74,6 +74,13 @@ CONVERGE_WARN_ROUNDS=6         # doc 模式共議輪數警示線:達此輪數仍
 # exit 仍為 0」——那種真被擋的情況輸出遠小於門檻,仍會被 pattern 攔到。
 RATE_PAT_STRICT="you'?ve (hit|reached) your usage limit|you have (hit|reached) your usage limit|reached your workspace credit limit|out of credits|quota exceeded|rate limit reached"
 RATE_PAT_ERR_ONLY='too many requests|(^|[^0-9.])429([^0-9]|$)'
+# 輸入過長判定(2026-08-12 實測誤判後新增): codex 對超過模型輸入上限的 payload 會在
+# turn/start 就拒絕,錯誤形如
+#   Error: turn/start failed: Input exceeds the maximum length of 1048576 characters.
+#   (code -32602), data: {"input_error_code":"input_too_large","max_chars":...,"actual_chars":...}
+# 這**不是**額度問題,是「這份 diff 永遠不會被複查,除非縮小範圍」——必須走 FAILED,
+# 不可走 RATE_LIMITED(後者的處置是「直接繼續、下次再叫」,會讓呼叫端以為只是暫時被擋)。
+TOO_LARGE_PAT='input_too_large|Input exceeds the maximum length'
 
 is_rate_limited() {  # $1=codex exit code  $2=stderr 檔  $3=stdout 檔
   # 成功證據二選一(round 4 共議: 短版有效回覆「無重大遺漏+收斂問句:無」遠小於長度門檻,
@@ -89,7 +96,16 @@ is_rate_limited() {  # $1=codex exit code  $2=stderr 檔  $3=stdout 檔
   fi
   grep -qiE "$RATE_PAT_STRICT" "$2" "$3" 2>/dev/null && return 0
   [ "$1" -ne 0 ] || return 1
-  grep -qiE "$RATE_PAT_ERR_ONLY" "$2" 2>/dev/null
+  # 輸入過長不是 rate limit(見 TOO_LARGE_PAT 說明),讓它落到 FAILED 分支。
+  grep -qiE "$TOO_LARGE_PAT" "$2" 2>/dev/null && return 1
+  # 寬鬆的 429 規則**先剔除看起來像 diff 的行**再比對,不對整份 stderr 套用。
+  # 2026-08-12 實測誤判: codex 0.144.x 會把 transcript(含被回顯的整份 diff)寫到 stderr,
+  # 於是 diff 裡任何一個 429 都會命中——實際觸發的是一行 hunk header
+  # `@@ -303,18 +429,23 @@`（`+429,` 命中 `[^0-9.]429[^0-9]`)。原註解假設「stderr 不與
+  # review 內容混流」,那個前提對這個 codex 版本不成立。
+  # 刻意用「排除 diff 行」而非「要求 Error 前綴」: 後者會漏掉 codex 直接印
+  # `HTTP 429 Too Many Requests` 這種沒有前綴的訊息(既有測試涵蓋),收窄不可改壞既有行為。
+  grep -vE '^(@@|\+\+\+|---|diff --git|index [0-9a-f]+\.\.|[+-])' "$2" 2>/dev/null     | grep -qiE "$RATE_PAT_ERR_ONLY"
 }
 
 SEVERITY=""
@@ -300,8 +316,34 @@ EOF
   SRC_INFO="base=$BASE (merge-base=${MB:0:12})"
 fi
 
+# --- 送出前的輸入長度守門(2026-08-12 新增) ---
+# 為什麼要在送出前擋: codex 對超長 payload 是在 turn/start 就拒絕,跑都沒跑。等它回錯誤才發現,
+# 已經白等一輪(實測 admin 那份 136 萬字元的 diff 等了 9 分鐘才拿到錯誤),而且錯誤訊息容易被
+# 誤讀成額度問題。先量再送:超標時直接印出實際大小、上限與可行的縮小做法,exit 1(＝複查沒有
+# 發生,呼叫端不得放行),不浪費一次往返。
+# 上限取 codex 回報的 max_chars(1048576);字元數以 wc -m 計(非位元組)——錯誤訊息講的是
+# characters,中文註解在 UTF-8 下一字 3 bytes,用 wc -c 會高估到誤擋。
+# 保留 2% 餘裕: PAYLOAD 之外 codex 還會附上 REVIEW_PROMPT 與自身的系統訊息。
+CODEX_MAX_CHARS=1048576
+PAYLOAD_CHARS="$(printf '%s' "$PAYLOAD" | wc -m | tr -d '[:space:]')"
+CODEX_SAFE_CHARS=$(( CODEX_MAX_CHARS * 98 / 100 ))
+if [ "${PAYLOAD_CHARS:-0}" -gt "$CODEX_SAFE_CHARS" ]; then
+  echo "[codex-review] FAILED: 輸入過長,未送出——複查沒有發生,呼叫端不得視為已複查。" >&2
+  echo "  實際 ${PAYLOAD_CHARS} 字元 / 安全上限 ${CODEX_SAFE_CHARS}(codex 硬上限 ${CODEX_MAX_CHARS})。" >&2
+  if [ -n "$DOC" ]; then
+    echo "  縮小做法: 該文件已超過單次諮詢可容納的長度,請拆節後分次諮詢。" >&2
+  else
+    echo "  縮小做法(擇一):" >&2
+    echo "    1. 縮小 --base 範圍(逐 commit 或逐主題複查,而非一次比整輪):" >&2
+    echo "       bash codex-review.sh --severity <sev> --base <較近的 commit>" >&2
+    echo "    2. 排除測試檔等佔比高但風險低的路徑後另行複查(測試檔往往佔 diff 大半)。" >&2
+    echo "    3. 分批: 先複查高風險檔案,再單獨複查其餘。" >&2
+  fi
+  exit 1
+fi
+
 # --- 單次 codex 諮詢: 模型由來源嚴重度決定,唯讀,--ephemeral 不落地 session 檔 ---
-echo "[codex-review] $SRC_INFO | 來源嚴重度=$SEV_SHOWN → $MODEL / $EFFORT" >&2
+echo "[codex-review] $SRC_INFO | 來源嚴重度=$SEV_SHOWN → $MODEL / $EFFORT | 輸入 ${PAYLOAD_CHARS} 字元" >&2
 # 輸出邊串流給使用者、邊留存一份,供事後判斷是否被用量上限擋下。
 # stderr 另存不與 review 內容混流,才能只對 stderr 套用較寬鬆的 429 判定。
 OUT_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-out-$$.txt")"
@@ -344,6 +386,10 @@ if [ -z "$OUT_TRIMMED" ] || [ "$RC" -ne 0 ]; then
   else
     echo "[codex-review] FAILED: codex 非正常結束(exit=$RC),已產出的 ${#OUT_TRIMMED} 個字元可能是截斷的半份 review。" >&2
     echo "  不可當成完整的第二意見;要嘛重跑,要嘛明講這一輪複查未完成。" >&2
+  fi
+  if grep -qiE "$TOO_LARGE_PAT" "$ERR_FILE" 2>/dev/null; then
+    echo "  已知原因: 輸入超過 codex 的長度上限,codex 在 turn/start 就拒絕、跑都沒跑。" >&2
+    echo "  這不是額度問題——縮小 --base 範圍或分批複查後重跑(見送出前守門的說明)。" >&2
   fi
   if grep -qi 'trusted directory' "$ERR_FILE" 2>/dev/null; then
     echo "  已知原因: codex 拒絕在非信任目錄執行。改在 git repo 內呼叫本腳本,或讓 codex 信任該目錄。" >&2

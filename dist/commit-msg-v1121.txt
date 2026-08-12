@@ -1,0 +1,30 @@
+v1.12.1: optional/fallback 的 codex effort 由 xhigh 提到 max，並記錄各模型 effort 上限
+
+## 映射調整（使用者要求）
+
+optional / nit / fyi 與 fallback 兩處：`gpt-5.6-luna / xhigh` → `gpt-5.6-luna / max`。
+critical（sol/medium）與 required（terra/high）不變。
+
+## 新增：各模型 effort 上限（references/model-routing.md）
+
+來源是 codex 0.146.0 內建 model catalog 的 supported_reasoning_levels（逐 slug 列舉），
+不是二手文章——實際查到多篇解析文把這件事寫錯（宣稱 ultra 只有 sol）。
+
+| 模型 | 支援的 effort | 預設 |
+|---|---|---|
+| gpt-5.6-sol | low, medium, high, xhigh, max, ultra | low |
+| gpt-5.6-terra | low, medium, high, xhigh, max, ultra | medium |
+| gpt-5.6-luna | low, medium, high, xhigh, max | medium |
+
+因此 luna/max 已是 luna 的天花板，ultra 在 luna 不是合法值。
+ultra 在 sol 與 terra 都存在（非 sol 專屬），但會啟動平行 subagent、額度消耗極快，
+與本次降 token 的目的相反，不在此採用。
+
+另記錄一個實測到的行為：CLI 不在本地依 catalog 驗證 effort，
+不支援的組合會照樣送出、由 server 端報錯——問題會在諮詢當下才浮現，不是呼叫當下。
+
+驗證：optional / nit / 未傳 severity 三條路徑分派輸出皆為 gpt-5.6-luna / max；
+tests/codex-review-args.test.sh 60 案全過。
+server 端可用性仍未實測（帳號額度耗盡，2026-08-08 11:36 恢復）。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>

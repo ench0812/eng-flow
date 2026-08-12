@@ -1,0 +1,24 @@
+v1.11.0: 模型路由由三層擴為五層，model 與 effort 成對明寫
+
+- model-routing.md: 三層表(opus/sonnet/haiku)改為五層——Session(主線+high)、
+  A(opus+high，平行深度任務/跨模組驗證，節制使用)、B1(sonnet+high，複雜商業
+  邏輯/演算法)、B2(sonnet+medium，spec 明確的實作/標準重構)、C(haiku 不設
+  effort，樣板/config/migration/文件)。新增 B1 vs B2 判準：看任務不確定性
+  (要自己想出解法 vs 解法已寫在 spec 裡)，不是看任務大小。
+- effort 不再靠 omit 繼承 session：C 層以外一律明寫。session 有自己的
+  effortLevel(現 high)，omit 會讓 stage 悄悄繼承它、分層失去意義。升級推理
+  深度改用升 tier(B2→B1→A)，不保持 tier 去單獨調 effort。
+- mao-execute: effort routing 段改為 stage→tier 對照表(implement 依複雜度
+  分流 B1/B2、spec-review 與 code-review 走 B2、架構級/安全相關升 A、
+  機械高量進 C)。移除已過時的 ultracode/xhigh 敘述。
+- mao-review: reviewer 派發改標 B2；high-risk(security/auth/data)改標 A
+  = omit model + effort:'high'(原寫「omit 兩者」，在 session effort 已明確
+  分層後語意不再正確)。
+- 對應的使用者層落點同批調整(不在本 repo)：~/.claude/CLAUDE.md 模型策略段、
+  agents/ 四個具名 agent(senior-reviewer/root-cause-debugger=A、
+  implementer=B2、mechanical-scanner=C 移除 effort 欄位)、settings.json
+  effortLevel xhigh→high + ultracode 關閉。
+- tests: 164 案全綠(codex-review-args 60、iso-scan-bash 29、
+  iso-scan-write 36、iso-secret-lib 39)。本次僅改文件，未動 script 行為。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>

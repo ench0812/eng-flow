@@ -1,0 +1,24 @@
+v1.10.0: codex 收斂問句制取代次數上限 + TDD Suite Growth Discipline
+
+- codex-review: 移除 MAX_CODESIGN_ROUNDS / MAX_DIFF_CONSULTS 硬上限。三個 prompt
+  (spec/plan/diff)要求回覆末尾附行首「收斂問句:」合約行;續/停由呼叫端逐輪判斷
+  (停為預設,續輪僅限「採納了 codex 沒看過的 Critical/Required 修改」或「問句實質
+  +在範圍內+未處置」),doc 模式 Cross-Check Log >= 6 輪印非阻斷警示。
+  mao-brainstorm / mao-plan / mao-review / mao-execute / model-routing / README 同步。
+- is_rate_limited: 修 transcript 回顯 payload 含限制字樣導致的 RATE_LIMITED 誤判
+  (dogfood 兩次實測)——成功證據=stdout 行首合約行或 >= 200 非空白字元,且尾端
+  1000 bytes 無限制字樣(回顯後才被擋的情況訊息必在尾端)。
+- 收斂問句在場檢查: 缺行印「注意」並視為「收斂問句:無」保守收斂,不判 FAILED
+  (findings 仍有效,懲罰過當)。
+- mao-tdd: 新增 Suite Growth Discipline——一行為一測試(先搜既有測試)、測試與行為
+  同生命週期、層級下推、速度紅線(unit 禁真實 I/O/sleep、共享 fixture 限 immutable)、
+  時間預算(targeted ~30s / full 10min)+ opt-in runtime ledger 的 >20% 成長 tripwire,
+  超標開 test-debt 項目、不阻斷合併。mao-execute / mao-ship / mao-review Correctness 軸 /
+  implementer-prompt / code-reviewer-prompt 同步。
+- tests: 60 案全綠(輪數警示行為、警示 stderr 分流、收斂問句指示送達、在場檢查
+  含回顯 prompt/缺冒號/空值、RATE_LIMITED 誤判回歸)。
+
+四輪 codex 共議(gpt-5.6-sol/high)發現全數處置;第四輪問句已由修法直接回答,
+依收斂責任條款主動收斂。
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

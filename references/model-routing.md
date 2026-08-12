@@ -35,6 +35,8 @@ B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想�
 
 **Rate limit.** If codex reports a usage/credit limit the script prints `[codex-review] RATE_LIMITED:` and exits 0. That consultation did not happen: do **not** retry it, do **not** log a round for it, and carry straight on with whatever came next. The next time a consultation is due, call the script again as normal — being rate-limited once never disables codex for the rest of the flow.
 
+**Input too large.** If the script answers `[codex-review] FAILED: 輸入過長,未送出`, the consultation did **not** happen and this is *not* a quota problem — the diff exceeds codex's input limit, so it will never be reviewed until the scope is narrowed. Unlike RATE_LIMITED you must not just carry on: re-run with a tighter `--base` (per-commit or per-theme), or review the high-risk files separately from the test-file bulk. Treating it as reviewed is a false pass.
+
 Severity is an **input decided by the source** — never re-triaged by a weaker model. When in doubt, over-estimate — under-calling sends work that deserves deep review to a cheap luna scan. Model mapping (all modes, revised 2026-08-07 to cut token spend):
 
 | Source severity | Codex model / effort |

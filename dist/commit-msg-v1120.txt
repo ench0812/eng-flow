@@ -1,0 +1,49 @@
+v1.12.0: codex 複查模型映射改版（降 token 消耗）＋ 垂直切片與跨服務接縫規則
+
+## codex-review 模型映射（使用者要求，理由：舊映射 token 消耗過大）
+
+| severity | 舊 | 新 |
+|---|---|---|
+| critical | sol / max | sol / medium |
+| required | sol / high | terra / high |
+| optional / nit / fyi | terra / medium | luna / xhigh |
+| 未傳・未知（fallback） | sol / high | luna / xhigh |
+
+策略：模型階梯隨嚴重度下降（sol > terra > luna），effort 反向上升作補償。
+舊版 critical 與 required 兩級都吃旗艦最貴檔位，是 token 消耗的主因。
+
+fallback 由「對齊最高一級」改為「對齊 optional」：漏傳 --severity 不再換到深審，
+而是拿到最淺的一次；腳本仍印警告，該警告要當呼叫端 bug 修，不是可依賴的預設。
+
+已知取捨：gpt-5.6-luna 是 nano 級（codex binary 自述 high-throughput / simple /
+strict-latency），xhigh effort 買不到旗艦級 review 深度——有實質風險的變更要標
+required 以上，不可留在 optional。
+
+改動點集中在 scripts/codex-review.sh 的 CRIT/REQ/LOW/FALLBACK 四組變數，
+references/model-routing.md 映射表，及 mao-execute / mao-review 內嵌的映射描述。
+mao-brainstorm / mao-plan 只寫 severity 分級指引、未寫死模型，不受影響。
+
+驗證：四種 severity（含未傳與未知值）實跑分派輸出全對；
+tests/codex-review-args.test.sh 60 案全過。
+三組 slug/effort 的 server 端可用性未實測——帳號額度已耗盡（2026-08-08 恢復）。
+
+## mao-plan：多 repo 時不要按 repo 切波次
+
+按 repo 切＝水平切層，服務接縫只有兩側都蓋完才驗得到，屆時其他服務已疊在上面。
+改以「一條端到端行為」為切片單位，片末就跑跨接縫驗證。
+判準：某片產出若要等另一片才驗得起來，那條界線就切錯了。
+附 2026-08-07 單次實測數據（五 repo 識別碼改造：675 分鐘、實作 44%、返工 48.5%，
+返工幾乎都是同一類接縫缺陷的五個實例）。
+
+同段加入 plan/spec 大小控制：切片後每片一份小 spec、裁定寫在所屬片內；
+執行 agent 的 brief 控制在 150 行內；不把上一輪完整回報整段貼進下一輪 brief。
+
+## mao-review：新增「跨服務接縫」檢查項
+
+改動觸及兩個以上服務／程序時必查。單側全綠是已知的假綠形態，
+mutation、-race、full suite 在設計上都攔不住。檢查點：
+是否有任何驗證真的跨過服務邊界、fixture 是否消費端自造、
+「欄位省略」與「送空字串」在對端是否解成同一件事、
+新增契約欄位在消費端是否無條件 fail-closed（部署順序顛倒會全面拒收）。
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
