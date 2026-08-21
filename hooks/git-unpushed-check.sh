@@ -24,8 +24,16 @@
 # Stop 都再觸發，形成迴圈。因此以 (session, repo, HEAD) 為鍵留下標記，同一狀態
 # 只提醒一次；有新 commit（HEAD 變了）才會再提醒。
 #
-# 檢查範圍：預設只看 cwd 所在的 repo（零成本）。要納入更多，在
-# ~/.claude/git-guard-roots 每行寫一個根目錄，會以 maxdepth 3 掃描其下的 repo。
+# 檢查範圍＝**本 session 實際碰過的 repo**，不是「cwd」也不是「全機器」。
+#   只看 cwd：session 中途 cd 到別處工作、或 cwd 根本不是 repo 時會漏掉。
+#   掃全機器：會報出跟這次工作無關的專案。範圍不對的警告會被忽略，
+#            而被忽略的警告等於沒有警告。
+# 折衷做法是從 transcript 取出本 session 出現過的所有 cwd，以及 Write/Edit
+# 動過的檔案所在目錄，解析成 repo 後只檢查那些。這正好是「這次工作可能造成
+# 遺失」的集合。成本是一次 jq 掃 transcript（實測 4.7MB / 127ms）。
+#
+# ~/.claude/git-guard-roots 仍然支援，但定位改為「不論這次有沒有碰、都要盯著的
+# 根目錄」的明確加選，不是預設。多數情況不需要它——session 範圍已經涵蓋。
 set -uo pipefail
 
 STAMP_DIR="${TMPDIR:-/tmp}/claude-git-guard"
@@ -43,17 +51,60 @@ sid="$(printf '%s' "$input" | "$JQ" -r '.session_id // "nosession"' 2>/dev/null 
 sid="$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9._-' | cut -c1-40)"
 cwd="$(printf '%s' "$input" | "$JQ" -r '.cwd // ""' 2>/dev/null || true)"
 [ -n "$cwd" ] || cwd="$PWD"
+transcript="$(printf '%s' "$input" | "$JQ" -r '.transcript_path // ""' 2>/dev/null || true)"
 
 # --- 收集要檢查的 repo ---
 repos=""
+tops_norm=()    # 已解析出的 repo 頂層（正斜線形式），用於前綴短路
+
+# 效能守則（實測逼出來的，改動前請先量）：本函式對 transcript 取出的每個路徑
+# 都會跑一次，而一個 session 可以有 20+ 個相異路徑。在 Windows/Git Bash 上，
+# **每開一個子行程約 30ms**，所以這裡一律用 bash 內建運算，不用 printf|sed|tr。
+#   實測 23 個路徑：printf|sed 取目錄共 740ms、git rev-parse 共 493ms。
+#   前者用參數展開可降到接近 0，後者靠「已知 repo 底下不再問」收斂。
 add_repo() {
-  local top
-  top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  local p="${1:-}" top np ntop t
+  [ -n "$p" ] || return 0
+  np="${p//\\//}"                       # 反斜線換正斜線（內建，不開子行程）
+  for t in ${tops_norm+"${tops_norm[@]}"}; do
+    case "$np/" in "$t/"*) return 0 ;; esac
+  done
+  top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || return 0
   [ -n "$top" ] || return 0
   case "$repos" in *"|$top|"*) return 0 ;; esac
   repos="$repos|$top|"
+  ntop="${top//\\//}"
+  tops_norm+=("$ntop")
 }
 add_repo "$cwd"
+
+# 本 session 碰過的目錄：transcript 每筆記錄都帶 cwd，Write/Edit 則帶 file_path
+# （檔案可能不在 cwd 底下，所以要另外取其所在目錄）。一次 jq 取完兩者。
+# 用 jq 而不是 grep：路徑是 JSON 字串，Windows 的反斜線是跳脫過的，
+# 自己反跳脫容易寫錯——正確性優先於省下的那幾十毫秒。
+if [ -n "$transcript" ] && [ -f "$transcript" ]; then
+  # jq 只負責「把路徑原封取出」，取目錄的動作放到 shell 端。
+  # 別在 jq 的正規式裡處理 Windows 反斜線：字元類 [^/\\] 要穿過
+  # shell 引號、jq 字串、Oniguruma 三層跳脫，少一層就變成未閉合的
+  # [/\]（實測 jq 報 premature end of char-class），而 jq 一出錯就會
+  # 中止該檔剩下的記錄——變成靜默漏檢。
+  # 分工：grep 做大量掃描（只認欄位名，不解析 JSON 結構），jq 只負責把去重後的
+  # 少數字串做 JSON 反跳脫。純 jq 走完整份 transcript 要迭代每筆的 message.content
+  # 陣列——實測 4.7MB 要 1889ms，比這個混合寫法慢 19 倍，而這段掛在每個回合結束。
+  # 反跳脫交給 jq 而不是自己 sed：Windows 路徑的反斜線是跳脫過的，手寫容易錯。
+  # fromjson? 讓個別壞行被略過而不是中止整串。
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    # cwd 本來就是目錄；file_path 是檔案，取其所在目錄。
+    # 用參數展開而非 printf|sed：後者每個路徑要開一個子行程，實測 23 個
+    # 路徑共 740ms——本 hook 最大的單項成本，而它掛在每個回合結束。
+    [ -d "$d" ] || d="${d%[/\\]*}"
+    add_repo "$d"
+  done <<EOF
+$(grep -ohE '"(cwd|file_path|notebook_path)":"[^"]*"' "$transcript" 2>/dev/null \
+  | sed 's/^"[a-z_]*"://' | sort -u | "$JQ" -rR 'fromjson? // empty' 2>/dev/null)
+EOF
+fi
 
 if [ -f "$ROOTS_FILE" ]; then
   while IFS= read -r root; do

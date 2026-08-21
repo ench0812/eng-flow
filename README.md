@@ -36,7 +36,9 @@ Guarantees that matter:
 - **Warns once per state.** A Stop hook's `additionalContext` continues the conversation, so re-warning on an unchanged condition would loop forever. Keyed on (session, repo, HEAD) — a new commit warns again, an unchanged one stays quiet.
 - **No upstream is reported by severity, not as worst case.** A branch cut from `origin/main` with no tracking set still has all its commits on the remote; saying "no backup" there is crying wolf, and warnings that cry wolf get ignored. The hook checks whether `HEAD` is contained in any remote-tracking ref and words the message accordingly.
 
-Scope defaults to the repo containing the current directory (measured ~330 ms, and it runs once per turn). To cover more, list root directories in `~/.claude/git-guard-roots`, one per line; each is scanned to depth 3. Measured ~1.5 s per turn for a root holding 13 repos, so switch it on deliberately.
+**Scope is the set of repos this session actually touched** — read from the transcript: every `cwd` that appeared, plus the directory of every file a Write/Edit acted on. Neither extreme works: checking only the current directory misses work you `cd`'d away from (or gives nothing when the cwd is not a repo), while scanning every repo on the machine reports projects unrelated to this session — and a warning that fires about things you are not working on gets ignored, which is the same as no warning at all.
+
+Measured ~700 ms per turn against a 4.7 MB transcript, and it scales with transcript size rather than with how many repos exist on disk. `~/.claude/git-guard-roots` still works (one root per line, scanned to depth 3) but is now an explicit *addition* for repos you want watched whether or not you touched them — most setups do not need it.
 
 ## Tools
 

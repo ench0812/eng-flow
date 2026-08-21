@@ -108,6 +108,58 @@ case "$out" in
 esac
 git_q "$WORK" checkout -q main
 
+echo "== session 範圍（transcript）=="
+# 範圍必須是「本 session 實際碰過的 repo」：
+#   只看 cwd → 中途 cd 走或 cwd 不是 repo 就漏掉；
+#   掃全機器 → 報出與這次工作無關的專案，而被忽略的警告等於沒有警告。
+OTHER="$SANDBOX/unrelated"
+git init -q -b main "$OTHER"
+echo u > "$OTHER/u.txt"
+git_q "$OTHER" add u.txt
+git_q "$OTHER" commit -qm "unrelated unpushed work"
+
+mktr(){ # mktr <file> <cwd值>
+  jq -cn --arg c "$2" '{cwd:$c, message:{content:[]}}' > "$1"
+}
+fire_tr(){ # fire_tr <cwd> <session> <transcript>
+  jq -cn --arg c "$1" --arg s "$2" --arg t "$3" '{session_id:$s, cwd:$c, transcript_path:$t}' | bash "$HOOK" 2>/dev/null
+}
+# 斷言要用 git 正規化後的路徑：Git for Windows 的 rev-parse --show-toplevel
+# 回傳的是 C:/... 形式，而 mktemp 給的是 /tmp/... 形式。拿後者做子字串比對
+# 會永遠找不到——那會讓測試在 hook 其實正常時報 FAIL（實測踩過）。
+top_of(){ git -C "$1" rev-parse --show-toplevel 2>/dev/null; }
+WORK_TOP="$(top_of "$WORK")"
+OTHER_TOP="$(top_of "$OTHER")"
+
+TR1="$SANDBOX/t1.jsonl"; mktr "$TR1" "$WORK"
+echo five > "$WORK/e.txt"; git_q "$WORK" add e.txt; git_q "$WORK" commit -qm "in-scope unpushed"
+out="$(fire_tr "$SANDBOX" s30 "$TR1")"
+case "$out" in
+  *"$WORK_TOP"*) ok "transcript 的 cwd 指到的 repo 會被檢查（即使 hook cwd 不是 repo）" ;;
+  *) ng "transcript 的 cwd 指到的 repo 會被檢查" "未報出 $WORK_TOP" ;;
+esac
+case "$out" in
+  *"$OTHER_TOP"*) ng "[regression] 本 session 沒碰過的 repo 不得出現" "誤報了 $OTHER_TOP" ;;
+  *) ok "[regression] 本 session 沒碰過的 repo 不得出現" ;;
+esac
+
+# Write/Edit 動到的檔案可能不在 cwd 底下，其所在 repo 也算本 session 碰過。
+TR2="$SANDBOX/t2.jsonl"
+jq -cn --arg f "$OTHER/u.txt" \
+  '{cwd:"/nonexistent", message:{content:[{type:"tool_use", id:"w1", name:"Edit", input:{file_path:$f}}]}}' > "$TR2"
+out="$(fire_tr "$SANDBOX" s31 "$TR2")"
+case "$out" in
+  *"$OTHER_TOP"*) ok "Write/Edit 動過的檔案所屬 repo 會被檢查" ;;
+  *) ng "Write/Edit 動過的檔案所屬 repo 會被檢查" "未報出 $OTHER_TOP" ;;
+esac
+
+# transcript 不存在或欄位缺漏時，不得整支失效——退回只看 cwd。
+out="$(fire_tr "$WORK" s32 "$SANDBOX/no-such-transcript.jsonl")"
+case "$out" in
+  *"$WORK_TOP"*) ok "transcript 不存在時退回檢查 cwd 的 repo" ;;
+  *) ng "transcript 不存在時退回檢查 cwd 的 repo" "未報出 $WORK_TOP" ;;
+esac
+
 echo "== 路徑含空格 =="
 # [regression] 舊版用 `for x in $(...)` 逐一走訪 repo，會依空白斷詞，
 # 路徑含空格的 repo 被切成碎片而永遠檢查不到——正是本 hook 要防的靜默漏檢。
