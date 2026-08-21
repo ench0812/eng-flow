@@ -24,6 +24,20 @@ Streamlined engineering workflow skills for Claude Code — merged from [superpo
 
 `references/model-routing.md` — shared model-routing rules (opus for judgment, sonnet for execution stages, haiku for mechanical volume), plus the Codex cross-family consultation routing (`scripts/codex-review.sh`): diff second opinion at mao-review / mao-execute closing, spec/plan co-design loops in mao-brainstorm / mao-plan. Consultations are convergence-gated, not capped: every codex reply ends with one 收斂問句 (its most important open question, or 無), and Claude continues only while answering it would still change the artifact — the doc-mode script warns (non-blocking) at 6+ rounds. A `RATE_LIMITED` reply is not a consultation: no retry, no round logged, carry on. `mao-execute` and `mao-review` point here.
 
+## Hooks
+
+`hooks/iso-scan-write.sh` (PreToolUse Write|Edit) and `hooks/iso-scan-bash.sh` (PreToolUse Bash) — block hardcoded secrets, banned crypto, `--no-verify`, and remote-content-piped-to-shell; ask before destructive git operations. Both need `jq` on PATH — **without it they fail open and scan nothing**.
+
+`hooks/git-unpushed-check.sh` (Stop) — catches work that is committed locally but never pushed, at the moment the risk becomes real: the end of a turn. Reports the repo, how far ahead it is, and the commit subjects; it never pushes on its own.
+
+Guarantees that matter:
+
+- **No network.** Compares against the local remote-tracking ref only, so no fetch, no credential prompt. Ordinary staleness (someone else pushed, you have not fetched) can only make it *over*-report. **Known blind spot, accepted deliberately:** if the remote branch was force-pushed over or deleted, the local tracking ref still contains `HEAD`, the check stays quiet, and those commits are in fact no longer on the remote. Closing that gap requires a fetch on every turn — network round-trip plus credential prompts — which is not a trade worth making for a background safety net.
+- **Warns once per state.** A Stop hook's `additionalContext` continues the conversation, so re-warning on an unchanged condition would loop forever. Keyed on (session, repo, HEAD) — a new commit warns again, an unchanged one stays quiet.
+- **No upstream is reported by severity, not as worst case.** A branch cut from `origin/main` with no tracking set still has all its commits on the remote; saying "no backup" there is crying wolf, and warnings that cry wolf get ignored. The hook checks whether `HEAD` is contained in any remote-tracking ref and words the message accordingly.
+
+Scope defaults to the repo containing the current directory (measured ~330 ms, and it runs once per turn). To cover more, list root directories in `~/.claude/git-guard-roots`, one per line; each is scanned to depth 3. Measured ~1.5 s per turn for a root holding 13 repos, so switch it on deliberately.
+
 ## Tools
 
 `scripts/output-audit.sh` — offline analysis of Claude Code transcripts (`~/.claude/projects/**/*.jsonl`) that quantifies how much context each tool and command actually consumes, and simulates what any candidate truncation threshold *would* have saved. Read-only, zero runtime cost, no hook.
