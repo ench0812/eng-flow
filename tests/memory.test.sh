@@ -54,6 +54,27 @@ mkmem(){
   } > "$bank/$id.md"
 }
 
+# mkbig <bank> <id> <目標 bytes> <段落數>
+# 門檻是「> SPLIT_BYTES 且 >= SPLIT_PARAS」，要驗邊界就得能**精準**做出剛好等於
+# 門檻與剛好多一 byte 的檔案；靠「大概幾百 bytes 乘幾段」湊不出來，而且門檻一改動，
+# 那種 fixture 會無聲地跑到門檻的另一邊（實測發生過）。
+mkbig(){
+  local bank="$1" id="$2" target="$3" paras="$4" f cur pad i
+  mkdir -p "$bank"; f="$bank/$id.md"
+  { printf -- '---\nname: %s\ndescription: 門檻邊界測試\nmetadata:\n  node_type: memory\n  type: project\n---\n' "$id"
+    i=1; while [ "$i" -lt "$paras" ]; do printf 'x\n\n'; i=$((i+1)); done
+    printf 'y\n'
+  } > "$f"
+  cur=$(wc -c < "$f"); pad=$((target - cur))
+  if [ "$pad" -gt 0 ]; then
+    # 補在**最後一段內部**：先去掉結尾換行、補字、再補回換行，段落數才不會多一
+    head -c $((cur - 1)) "$f" > "$f.tmp"
+    head -c "$pad" /dev/zero | tr '\0' 'z' >> "$f.tmp"
+    printf '\n' >> "$f.tmp"
+    mv "$f.tmp" "$f"
+  fi
+}
+
 golden_index(){ # golden_index <topics> <pinned-blocks...>
   printf '# Memory Index\n\n<!-- PINNED:BEGIN -->\n'
   printf '%s' "$2"
@@ -275,12 +296,34 @@ printf '一般散文提到 memory 這個詞不該被解析。\n' > "$H/CLAUDE.md
 wantnot "散文中的 memory 不解析（不得誤報）" "claude_md_dangling" bash "$MEM" audit --home "$H" --today 2026-01-01
 
 echo "== 候選型檢查不影響 exit code =="
-H="$SANDBOX/c11"; B="$H/memory"; mkdir -p "$B"
-{ printf -- '---\nname: big\ndescription: 大檔\nmetadata:\n  node_type: memory\n  type: project\n---\n'
-  for i in 1 2 3 4 5 6; do head -c 400 /dev/zero | tr '\0' 'x'; printf '\n\n'; done
-} > "$B/big.md"
+H="$SANDBOX/c11"; B="$H/memory"
+mkbig "$B" big 4096 6
 golden_index "主題：（尚未分類）" "" > "$B/MEMORY.md"
 want "[regression] 只有 SUGGEST 時 exit 仍為 0" 0 "split_candidate" \
+     bash "$MEM" audit --home "$H" --today 2026-01-01
+
+echo "== split_candidate 的門檻邊界 =="
+# 條件是「bytes > 3072 **且** paras >= 4」，四個邊界都要驗：
+# 剛好等於（不報）、多一 byte（報）、段落剛好不足（不報）、段落剛好足夠（報）。
+H="$SANDBOX/sb1"; B="$H/memory"; mkbig "$B" exact 3072 6
+golden_index "主題：（尚未分類）" "" > "$B/MEMORY.md"
+[ "$(wc -c < "$B/exact.md")" = 3072 ] && ok "fixture 精準命中 3072 bytes" || ng "fixture 大小" "$(wc -c < "$B/exact.md")"
+want "剛好等於門檻時 audit 乾淨（不混入 index_missing）" 0 - \
+     bash "$MEM" audit --home "$H" --today 2026-01-01
+wantnot "[regression] 剛好等於門檻 → 不報（條件是 >，不是 >=）" "split_candidate" \
+     bash "$MEM" audit --home "$H" --today 2026-01-01
+H="$SANDBOX/sb2"; B="$H/memory"; mkbig "$B" over 3073 6
+golden_index "主題：（尚未分類）" "" > "$B/MEMORY.md"
+want "[regression] 門檻 +1 byte → 報" 0 "split_candidate" \
+     bash "$MEM" audit --home "$H" --today 2026-01-01
+H="$SANDBOX/sb3"; B="$H/memory"; mkbig "$B" fewpara 8000 3
+golden_index "主題：（尚未分類）" "" > "$B/MEMORY.md"
+want "段落不足時 audit 乾淨" 0 - bash "$MEM" audit --home "$H" --today 2026-01-01
+wantnot "[regression] 夠大但只有 3 段 → 不報（需 >= 4 段）" "split_candidate" \
+     bash "$MEM" audit --home "$H" --today 2026-01-01
+H="$SANDBOX/sb4"; B="$H/memory"; mkbig "$B" justpara 8000 4
+golden_index "主題：（尚未分類）" "" > "$B/MEMORY.md"
+want "[regression] 夠大且剛好 4 段 → 報" 0 "split_candidate" \
      bash "$MEM" audit --home "$H" --today 2026-01-01
 
 echo "== 空 bank 不報 index_missing =="
@@ -1155,7 +1198,7 @@ done
 
 echo "== bytes 必須是 byte 而非字元（T8a codex Optional） =="
 # gawk 在 multibyte locale 下 length() 回的是字元數；中文記憶會被低估成約三分之一，
-# 於是超過 2048 bytes 的長記憶不會被建議拆分——稽核在中文環境靜默失效。
+# 於是超過門檻的長記憶不會被建議拆分——稽核在中文環境靜默失效。
 H="$SANDBOX/c9"; B="$H/memory"; mkdir -p "$B"
 { printf -- '---\n'
   printf 'name: cjkbig\ndescription: 中文長記憶\nmetadata:\n  node_type: memory\n  type: project\n'
