@@ -42,6 +42,39 @@ Measured ~700 ms per turn against a 4.7 MB transcript, and it scales with transc
 
 ## Tools
 
+`scripts/memory.sh` — governance for Claude Code's memory stores. Memory degrades as it accumulates, and every failure mode is silent: one index line standing in for a file that holds ten separate facts, staleness written as prose that nothing can query, references to memories that no longer exist, and a "check for duplicates before saving" rule that depends entirely on remembering to check.
+
+```bash
+memory.sh audit  [--home PATH] [--today YYYY-MM-DD]
+memory.sh index  [--check|--write] [--home PATH]
+memory.sh search <keyword> [--home PATH]
+```
+
+Scans `<home>/memory/` plus `<home>/projects/*/memory/`. Exit `0` clean, `1` governance problems found, `2` usage error. `INFO`/`SUGGEST` go to stdout and never change the exit code — candidate heuristics that could fail the run would make "clean" an unstable target; `WARN` goes to stderr and does.
+
+The `TOPICS` block is the one part kept by hand and copied through untouched, with one normalisation: trailing blank lines inside it are dropped, so the first `--write` after adding them reports drift once and then stays stable.
+
+`index --check` and `audit` answer different questions and neither substitutes for the other: `--check` asks whether the index matches what the sources render to right now, `audit` asks whether the sources themselves are sound. A store with a malformed memory can pass `--check` — the renderer excludes it, and the index correctly reflects that exclusion. Run `audit` for governance, `--check` for sync.
+
+**The resident index is generated, not maintained.** `MEMORY.md` holds the pinned memories' text between `PINNED:BEGIN/END` markers, rendered from the memory files themselves. `index --check` compares byte-for-byte, so editing a pinned memory without regenerating is caught rather than silently drifting. Nothing in the template varies with the number of memories — no counts, no audit summary — which is what makes the next claim hold.
+
+**Resident cost is set by how many memories are pinned, not how many exist.** Measured on a 500-memory fixture: the index is byte-identical at 9 memories and at 500 (463 bytes both times), and pinning one more grows it by exactly the item marker plus that memory's body. `tests/memory.test.sh --only scale` asserts this, so a later change that reintroduces an N-dependent field fails the suite.
+
+**Superseded memories are excluded structurally.** `supersedes`/`superseded_by` must agree in both directions; a one-sided edit is reported rather than guessed at. Superseded memories leave the index and the search results, so a plain `grep` — which would happily return the outdated fact — is the wrong tool and the index says so.
+
+The generated index ends with two commands that reference `~/.claude/scripts/memory`, not the plugin path. Create that file as a two-line wrapper that resolves the installed plugin and runs `bash .../memory.sh "$@"` — invoked through `bash`, matching how every other script in this repo is called, so none of them carry an execute bit — the index is a resident document read on every session, so baking `plugins/cache/<marketplace>/eng-flow/<version>/scripts/memory.sh` into it would make every upgrade rewrite it and every stale copy point at a version that no longer exists.
+
+The only file it ever writes inside the memory store is `MEMORY.md`, and only inside the tree `--home` names. (Scratch files go to the system temp directory through `mktemp` and are removed on exit; they hold ids, paths, descriptions and metadata — not memory bodies.) A bank whose path crosses a symlink below that root is refused outright rather than resolved, because the only file this tool ever writes is the index and its write boundary should be checkable at a glance; `--home` itself may be a symlink, since that is the root the caller declared. Paths containing control characters are refused for a separate reason: the internal model is delimited by `US`, and a control character in a filename shifts every field after it, so `pin` and `superseded_by` get read as something else entirely.
+
+`index --write` is transactional: source-data errors block the whole run before anything is touched, every bank is staged first, each replace keeps a backup, and any failure restores all of them — including deleting an index that did not exist before, rather than leaving an empty one behind. `INT`/`TERM`/`HUP` roll back the same way, so a Ctrl-C between two banks does not leave a half-applied state. Staging and backup files are created with `mktemp` inside the target directory rather than from a `$PID`-derived name, which removes the check-then-open gap that a predictable name forces and the stale-file collisions that PID reuse causes. It does not make the write path race-proof against a process running as the same user — shell has no way to keep the descriptor `mktemp` opened — and it is not trying to: anyone who can win that race can also just write the index directly. What is *not* covered is `SIGKILL` or a power loss mid-`mv`; recovering from those means the backups left in the bank, which is why a failed rollback keeps them instead of cleaning up.
+
+A failure anywhere in reading the sources stops the run rather than proceeding with less: an unreadable bank, a symlinked memory file, a path with control characters in it, or a checks pass that could not complete. The reason is that all of those look identical to "there is less here" downstream, and `--write` acting on that view would rewrite the index without the pinned bodies it could not read.
+
+Case-insensitive search covers ASCII only (awk's `tolower`); CJK is unaffected since it has no case. CJK 2-gram similarity needs a character-oriented awk — gawk qualifies, mawk does not, and the audit prints which mode it used instead of silently degrading.
+
+The two awk stages deliberately run under different locales, because they measure different things. Sizes are bytes, so the parser runs under `LC_ALL=C` and its `bytes=` matches `wc -c`; left in a multibyte locale, gawk's `length()` returns *characters* and a 3.7 KB Chinese memory reports as 1.2 KB — under the 2048-byte split threshold, so the one check that exists to catch overgrown memories goes quiet exactly where memories are written in Chinese. Similarity is about characters, so the checks stage stays in the ambient locale and slices 2-grams on character boundaries. Neither stage uses gawk-only constructs, and the suite asserts that, since a construct like `ENDFILE` fails silently under mawk rather than erroring.
+
+
 `scripts/output-audit.sh` — offline analysis of Claude Code transcripts (`~/.claude/projects/**/*.jsonl`) that quantifies how much context each tool and command actually consumes, and simulates what any candidate truncation threshold *would* have saved. Read-only, zero runtime cost, no hook.
 
 ```bash
