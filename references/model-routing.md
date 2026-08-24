@@ -23,7 +23,7 @@ B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想�
 
 ## Codex Cross-Family Consultation (gpt-5.6)
 
-`scripts/codex-review.sh` is stateless — one call, one consultation. Two modes, two semantics:
+`scripts/codex-review.sh` keeps a small local ledger under `$CODEX_REVIEW_STATE` (round count + payload snapshot per review line); it still writes nothing inside the repo. One call is **at most** one consultation — a repeat whose payload is byte-identical to the previous round is refused outright (`CODEX_REVIEW_FORCE=1` overrides). Two modes, two semantics:
 
 | Mode | Semantics / caller | Invocation | Severity source |
 |------|--------------------|------------|-----------------|
@@ -59,3 +59,49 @@ The ladder walks the **model** down with severity (sol → terra → luna) and w
 So `luna/max` is luna's ceiling — `ultra` is not a valid setting there. `ultra` exists on sol *and* terra (it is not sol-exclusive), but it spawns parallel subagents and burns quota fast, which runs against the point of this mapping — do not reach for it without deciding the cost is worth it. Note the CLI does not validate effort against this catalog locally: an unsupported pair is sent to the server, so a bad combination surfaces as a request error at consultation time, not at call time.
 
 Doc mode skips the base-branch / empty-diff gates; outside a git repo it continues with `--skip-git-repo-check` (sandbox is read-only — codex merely loses repo context). A missing `--doc` file or contradictory flags is a caller bug → exit 2, loud (environment gaps SKIP with exit 0, never blocking). Requires codex client >= 0.144.x + GPT-5.6 access; self-skips when codex is absent/unauthorized.
+
+## Codex payload cost & telemetry (v1.17.0)
+
+The model ladder above decides the **per-token price**. It says nothing about **how many tokens you send**, and measurement showed that was the dominant term: over 2026-08-20~24 the script ran 129 times, 107 of them diff mode with no round counting at all (median gap between calls on one branch: 5.0 minutes — i.e. per fix, not per round). One plan document was consulted 12 times in 52 minutes while its payload grew 4,929 → 26,758 characters, because each round's `## Cross-Check Log` entry was written back into the same file and the whole file was resent: 181,335 characters sent for a 26,758-character document.
+
+Four mechanisms now bound that, all in `scripts/codex-review.sh`:
+
+| Mechanism | What it does | Where it shows |
+|---|---|---|
+| Round ledger | counts consultations per review line (repo/mode/target) | non-blocking `警示: ...第 N 次諮詢`; doc warns at 6, diff at 3 |
+| Payload trim | doc: only the last Cross-Check Log round; diff: excludes **build artifacts only** (`dist`/`build`/`vendor`/`node_modules`/minified/snapshots) | `已排除 N 字元未送出;其中建置產物: <files>` — never silent |
+| Secret-shaped files | `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*` are withheld from the payload **and** flagged | `警示: 本次變更含疑似機密檔案,內容【未送出】也【未被複查】: <files>` |
+| Dedup | refuses to send content identical to the previous round | `SKIP: 送出內容與上一輪...完全相同` |
+| Session resume | **off by default**; when enabled, inside `CODEX_RESUME_TTL` (default **30s**, tightened from the 1500s originally planned — see the measurements below) resumes the same session and sends only the delta | header `resume(<id>) delta A/B 字元` |
+
+**Why resume is off by default.** Codex sets `prompt_cache_key = session_id` and 0.148.0 exposes no override, so a fresh `codex exec` can never reuse the previous round's payload at the cached rate — resume is the only cache lever that exists. It also turns out to be unusable at the cadence reviews actually run at. Measured on `gpt-5.6-luna`:
+
+| gap since previous round | session | input | cached | uncached | hit |
+|---|---|---|---|---|---|
+| — | fresh | 15,348 | 9,984 | 5,364 | 65.1% |
+| 25 s | resume | 16,219 | 15,104 | **1,115** | **93.1%** |
+| 100 s | resume | 17,004 | 9,984 | 7,020 | 58.7% |
+
+At 25 s the history is cached and uncached input drops 79%. At 100 s only the static prefix is still cached, and because resume re-sends the history *including the previous assistant reply*, it costs ~30% **more** than a fresh call. The observed real-world gap between consultations is ~5 minutes, i.e. always in the losing region — so `CODEX_REVIEW_RESUME` defaults to `0`. Set it to `1` only for back-to-back rounds seconds apart (which is the per-fix pattern this release is trying to discourage). When enabled, each review line self-corrects: a resume round whose hit rate lands under 80% halves that line's resume window for next time.
+
+Three things these measurements rule out, so nobody re-litigates them:
+
+**(a) Payload layout / prefix alignment is not the problem.** The obvious hypothesis — that the short static instruction block (150–300 tokens, under the 1,024-token minimum) sits between the cached system prefix and a volatile payload, so nothing of ours ever forms a cacheable prefix — was tested directly: two **fresh** calls five seconds apart sharing an identical ~15,900-token prefix, differing only in a one-line tail. Both returned `cached_input_tokens: 9,984` — the system block and nothing else. A perfectly aligned, far-over-threshold identical prefix cached **zero** of our content. Reordering the payload (stable files first, changed files last) would therefore buy nothing.
+
+**(b) Keeping a codex CLI process alive does not help.** The 100 s call resumed the session successfully and produced a coherent continuation, and still missed — the cache is server-side, not process-local.
+
+**(c) A long-lived process saves no re-sending either.** Round 2's input ≈ round 1's input + round 1's output + delta, so codex re-sends the full history every turn; it does not use server-side conversation storage.
+
+Taken together the operative rule is: **the same `prompt_cache_key` (i.e. the same session, i.e. resume) is a necessary condition for any of our content to cache, and even then the window is tens of seconds.** The always-warm 9,984-token block is codex's own system+tools prefix, shared by every codex user — not something a caller can earn.
+
+**The constraint that makes resume work when it works:** it only turns *history* into cached input; the new message is always full price. A resume round must therefore send a **delta**, never the full payload. Do not "simplify" that away.
+
+**Lockfiles are deliberately NOT excluded.** They were, in the first cut, purely for payload size. Codex's own cross-check flagged that as a supply-chain blind spot and it was right: the lockfile is where the resolved versions, transitive dependencies and integrity hashes live, so a clean manifest says nothing about whether the lockfile was tampered with. "We don't know whether it changed" is not the same as "it doesn't need review". Verified after the change: a planted `left-pad@0.0.0-evil` with `integrity: sha512-SUSPICIOUS` was caught on the first real run. A project that genuinely cannot afford its lockfile churn can add it to `CODEX_REVIEW_EXCLUDE` itself — that is an explicit, local decision, not a silent default.
+
+**Secret-shaped files are withheld but never silent.** Two rules apply at once and they point in opposite directions: don't ship key material to an external service, and a `.env`/`*.pem` showing up in a diff is itself a violation worth surfacing. So those paths are kept out of the payload *and* reported loudly, rather than quietly dropped.
+
+**Dedup is independent of resume.** The payload snapshot is written and compared on every call regardless of `CODEX_REVIEW_RESUME`; sending content identical to the previous round is refused outright. Turning resume off must not turn that off.
+
+**Telemetry.** `codex exec --json` is used because human mode prints only `tokens used <total>` with no cached/input split — without the split there is no hit rate to speak of. Each call (including `FAILED` and `RATE_LIMITED`, which still burn input tokens) appends a row to `$CODEX_REVIEW_LOG` (default `~/.claude/cache/codex-review-usage.tsv`): `sent_chars, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, cache_hit_pct, session_mode, round, status, rc`. Read it with `bash scripts/codex-usage.sh [--since YYYY-MM-DD]`. **Track uncached input (`input − cached`), not total input** — that is the number that is actually billed at full rate.
+
+**Security note.** `codex exec resume` has no `-s/--sandbox` flag (0.148.0), so the resume branch passes `-c sandbox_mode="read-only"` explicitly. A user `config.toml` may carry e.g. `[windows] sandbox = "elevated"`; leaving the sandbox to the environment on an unattended review call is a fail-open. Verified by the header codex prints for that call: `sandbox: read-only`. (Note `--strict-config` does **not** validate `-c` overrides — it only rejects unknown fields in `config.toml`, so it is not evidence that the key took effect; the header is.)

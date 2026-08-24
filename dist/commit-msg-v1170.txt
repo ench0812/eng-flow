@@ -1,0 +1,141 @@
+v1.17.0: codex-review 成本治理 — 用量遙測、payload 瘦身、輪次 ledger、去重
+
+## 為什麼
+
+「codex 用量成長過快」在此之前無法查證：腳本用三個 mktemp 暫存並在 EXIT 全部刪除，
+本機一筆用量都沒留下；`~/.codex` 的 threads 表是空的，但那是 `--ephemeral` 的必然結果，
+不能據此推論沒被用過。改從 Claude Code transcript 還原實際呼叫（2026-08-20~24，5 天）：
+
+- 真實執行 129 次；diff 模式 107 次（83%）
+- 單一 session 最高 17 次，中位間隔 5.0 分鐘 —— 即「每修一處就複查一次」，
+  而 diff 模式當時完全沒有輪次計數，所以沒有任何一次被看見
+- 某份 plan 52 分鐘內 12 輪，payload 4,929 → 26,758 字元（每輪把新增的
+  Cross-Check Log 連同全文再送一次），累計送出 181,335 字元 = 6.8x 冗餘
+
+## 改了什麼
+
+（結論先講: 真正省下 token 的是 1~4 與 6；第 5 項 resume 量測後證實在真實節奏下不划算，
+預設關閉。負面結果與正面結果一樣重要，細節在下面。）
+
+1. **遙測**：改用 `codex exec --json` 取 turn.completed 的 usage，review 本體改由 `-o` 取得。
+   每次呼叫（含 FAILED / RATE_LIMITED —— 沒發生的複查照樣燒 input token）在
+   `$CODEX_REVIEW_LOG` 追加一列 TSV，含 cache hit rate。新增 `scripts/codex-usage.sh` 報表。
+   人類模式只印 `tokens used <總數>`，沒有 cached/input 拆分，所以不能用來量快取。
+
+2. **payload 瘦身**：doc 模式只附最後一輪 Cross-Check Log；diff 模式排除
+   lockfile/dist/vendor/node_modules/minified/snapshots，並且**一定印出排除了什麼**
+   （靜默截斷會讓呼叫端以為全都審過了）。新增軟性大小警示（預設 60,000 字元）。
+
+3. **輪次 ledger**：每條複查線（repo/模式/目標）記錄輪數，超過警示線印非阻斷提醒。
+   diff 警示線 3、doc 6 —— diff 的協議是「一輪 review 一次」，本來就該更嚴。
+   RATE_LIMITED / FAILED 不推進輪數、不覆蓋 payload 快照。
+
+4. **去重**：送出內容與上一輪完全相同就 SKIP 不送。
+
+5. **session resume（實作完成，但預設關閉——這是量出來的結論，不是保守）**：
+   codex 的 `prompt_cache_key = session_id` 且 0.148.0 沒有覆寫入口，所以 resume 是唯一
+   可能讓上一輪內容變成 cached input 的路徑。實測（gpt-5.6-luna）：
+
+   | 距上輪 | session | input | cached | 未快取 | hit |
+   |---|---|---|---|---|---|
+   | —     | fresh  | 15,348 | 9,984  | 5,364 | 65.1% |
+   | 25s   | resume | 16,219 | 15,104 | 1,115 | 93.1% |
+   | 100s  | resume | 17,004 | 9,984  | 7,020 | 58.7% |
+
+   25 秒內命中歷史，未快取 input 降 79%。但 100 秒就只剩靜態 prefix，而 resume 會把歷史
+   **連同上一輪的回覆**全額重送，於是比 fresh 還貴約 30%。實測的真實 review 間隔中位數是
+   5 分鐘 —— 永遠落在虧損區。因此 `CODEX_REVIEW_RESUME` 預設 `0`。
+
+   三個順帶被這組數據排除的方案，記下來免得日後重議：
+   - **重排 payload／對齊 prefix 沒有用**：直接測過——兩次 fresh 呼叫相隔 5 秒、共用完全
+     相同的 ~15,900 token 前綴、只有最後一行不同，兩次 cached 都停在 9,984，我方內容
+     一個 token 都沒快取。決定因素是 prompt_cache_key（每次 fresh 都是新 session_id），
+     不是排列。所以「把穩定檔案排前面、變動檔案排後面」這條路不成立。
+   - **保持 codex CLI 常駐沒有用**：100 秒那次確實成功接回同一個 session（回覆連貫），
+     快取還是掉了 —— 快取在伺服器端，不是 process 本地的。
+   - **常駐也省不到重送**：round 2 的 input ≈ round 1 的 input + round 1 的 output + delta，
+     可見 codex 每輪都重送完整歷史，沒有走 previous_response_id 那類伺服器端存檔。
+
+   開啟後仍有 per-line 自我校正：某輪 resume 命中率低於 80% 就把該條複查線的窗口砍半再試，
+   命中則清掉修正值。窗口只有 25s/100s 兩個數據點夾出來，沒有掃過中間值，所以不寫死常數。
+
+6. **去重與 resume 解耦**：payload 快照比對永遠執行，不隨 resume 開關失效 ——
+   關掉 resume 不該連帶關掉去重。
+
+## 安全
+
+`codex exec resume` 沒有 `-s/--sandbox` 旗標（0.148.0 實測），而使用者 config.toml 可能有
+`[windows] sandbox = "elevated"`。resume 分支一律明確帶 `-c sandbox_mode="read-only"`——
+認證/權限路徑上「還不知道」與「確認不需要」是兩件事，一律 fail-closed。
+已實測 `exec resume <id> - -c sandbox_mode="read-only" --strict-config` rc=0 且
+header 顯示 `sandbox: read-only`。
+
+## 文件 bug 修正
+
+mao-brainstorm / mao-plan 的「輸入過長」處置照抄了 diff 模式的
+「re-run with a tighter `--base`」，但 doc 模式 `--base` 與 `--doc` 互斥（腳本直接 exit 2）。
+改成腳本實際印的「拆節後分次諮詢」。
+
+## 不動的部分
+
+模型/effort 階梯（critical→sol/medium、required→terra/high、optional→luna/max）是
+2026-08-07 做過的成本校準，本次不動。rate limit 判定與收斂問句偵測邏輯同樣不動。
+
+## Review 修正(2026-08-24 兩位 reviewer,均 REQUEST_CHANGES,已全數處理)
+
+Critical 一項、Required 九項,以下是會改變行為的部分:
+
+- **C1 去重誤判(Critical)**: per-file delta 只迭代【本輪】diff 裡的檔案,所以「上一輪有、
+  本輪已還原」的檔案不產生區塊 → delta 為空 → 被判成「與上一輪完全相同」並 exit 0。
+  實測重現: round1 改 a.txt/b.txt,round2 還原 b.txt(仍有 a.txt 的變更)→ 被擋。
+  那正是最需要複查的一輪(照 codex 建議還原後再問)。改為用 `cmp -s` 直接比內容,
+  delta 只在 resume 會用到時才計算。已加回歸測試。
+- **`-- .` 是 cwd 相對**: 在子目錄執行時會把同 repo 其他目錄的變更整批濾掉,還標成
+  「產生物/鎖檔」。改 `:/`(repo 根)。
+- **排除 pathspec 壞掉時 fail-open**: git 回非零而 DIFF 空 → 落到「全部變更都被排除」+
+  exit 0。現在接 rc 走 FAILED/exit 1。
+- **`-o` 落空但 stdout 是 JSONL** → 舊碼會把整份 JSON 當 review 印出並宣稱「完成」。
+  現在偵測 `{"type":` 開頭直接 FAILED。
+- **rate-limit 判定看不到 JSONL 的 error 事件** → 額度被擋會被誤判成 FAILED(處置相反)。
+  現在把 error 事件行併入 stderr 再判定。
+- **輪次 ledger 永不重置** → 一個 repo 用滿警示線後每次都警示,兩天內退化成雜訊。
+  key 納入目前分支,並加閒置重置(`CODEX_ROUND_RESET`,預設 6 小時)。
+- **fresh 路徑白白落地 session**: resume 預設關閉,session 檔永遠用不到卻仍寫入
+  `~/.codex`。改成 resume 關閉時 fresh 帶 `--ephemeral`。
+- **SKIP 的逃生門無效**: 訊息叫人設 `CODEX_REVIEW_RESUME=0`,但那本來就是預設值。
+  新增 `CODEX_REVIEW_FORCE=1` 作為真正可用的旁路。
+- **delta 不比全文小就退 fresh**: 小文件的 unified diff 常比原文長,那時 resume 沒有效益。
+- 文件契約: `model-routing.md` 的 TTL 寫 1500s(實作是 30s)、兩處「stateless」宣稱已被
+  本次改動推翻,均已修正。
+- 測試: `state_key` 的抽取因單行函式沒有行首 `}` 而產生巢狀定義、呼叫回傳空字串,
+  而守門只驗 `declare -f` 所以照樣綠(假斷言)。改為行為斷言,並把 `now_ts`/`jnum` 改多行。
+  另補上遙測解析鏈、resume 分支(含 `-c sandbox_mode=read-only` 的安全回歸)、
+  輪次重置與換分支的覆蓋;測試 Gate 隔離改為確定性 stub,不再依賴「PATH 上找不到 codex」
+  (腳本 fallback 含 `/usr/local/bin/codex`,在 Linux/macOS 會打到真實 API)。
+
+## Codex 交叉複查修正(第二輪意見,4 項全數處理)
+
+- **排除 lockfile 是供應鏈盲點**: lockfile 才記錄實際解析到的版本、transitive dependency
+  與 integrity hash;manifest 乾淨不代表 lockfile 沒被動過。原本為了 payload 體積把它排掉,
+  等於在這一軸開盲點——而「不知道有沒有被動」與「確認不需要審」是兩件事。已從預設排除清單
+  移除。修完後的真實驗證: 植入 `left-pad@0.0.0-evil` + `integrity: sha512-SUSPICIOUS`,
+  第一次跑就被 codex 抓到。專案真的受不了 lockfile 體積可自行加進 CODEX_REVIEW_EXCLUDE。
+- **新增「疑似機密檔案」類別**(`.env*`、`*.pem`、`*.key`、`*.p12`、`*.pfx`、`id_rsa*`、
+  `id_ed25519*`): 不送出【且】大聲警示。兩條規則同時成立——不把金鑰內容交給外部服務,
+  而這種檔案出現在 diff 裡本身就是安全鐵律 #1 的違反,必須被看見,不能靜默略過。
+- **payload 快照的權限與保留期限**: 快照是本次唯一新增的長期明文副本(先前三個 mktemp 在
+  EXIT 全刪),內容是完整 diff 或文件全文。現在目錄 0700、檔案 0600、預設保留 7 天
+  (`CODEX_REVIEW_STATE_TTL_DAYS`)。註記: chmod 在 Windows/MSYS 的 NTFS 上是 no-op,
+  那裡靠 profile 目錄本身的 ACL —— 不當成跨平台保證。
+- **ledger 與快照改為 tmp + mv 原子寫入**: 同一條複查線並行呼叫時,不會讀到寫到一半的
+  state,也不會出現「session 屬於 B、快照屬於 A」的交錯狀態。
+- **resume delta 現在會回報「已還原」的檔案**: 上一輪存在、本輪已還原的檔案不出現在本輪
+  diff,不明講的話 codex 歷史裡那份舊 diff 仍然成立,會依過期資訊給意見。
+
+## 測試
+
+tests/codex-review-args.test.sh 由 64 → 142 個斷言，新增涵蓋 Cross-Check Log 裁切、
+per-file delta、ledger 累加與警示線、去重 SKIP、ledger 損毀 fail-open、排除清單
+pathspec 組裝（用真的 git repo，組錯 git 會直接報錯）、軟性大小警示、
+RATE_LIMITED 不推進輪數、遙測落檔。全部 stub 驅動，不打真實 API。
+另有真實 codex E2E（fresh → resume → 去重 SKIP → 報表）實跑驗證。

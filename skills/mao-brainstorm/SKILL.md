@@ -40,7 +40,7 @@ Write it complete and self-consistent in one pass — no TBD, TODO, or vague req
 
 ### 6. Codex Co-Design Loop
 
-The spec the user reviews must be the **converged result of Claude and Codex co-designing** — not Claude's solo draft. Once the doc is saved, loop (each script call is one stateless consultation):
+The spec the user reviews must be the **converged result of Claude and Codex co-designing** — not Claude's solo draft. Once the doc is saved, loop (each script call is **at most** one consultation — the script refuses a repeat whose payload is byte-identical to the previous round; apply the round's fixes first, or set `CODEX_REVIEW_FORCE=1` to deliberately re-ask the same content):
 
 1. **Consult** — one cross-family co-design pass on the saved doc:
    ```bash
@@ -64,7 +64,9 @@ The spec the user reviews must be the **converged result of Claude and Codex co-
 
 If the script answers `[codex-review] RATE_LIMITED:` the consultation did not happen: do not retry it, do not log a `### Round` for it, and go straight to the Gate with the spec as it stands. Say so in one line. A later flow calls codex again as normal.
 
-**Input too large.** If the script answers `[codex-review] FAILED: 輸入過長,未送出`, the consultation did **not** happen and this is *not* a quota problem — the diff exceeds codex's input limit, so it will never be reviewed until the scope is narrowed. Unlike RATE_LIMITED you must not just carry on: re-run with a tighter `--base` (per-commit or per-theme), or review the high-risk files separately from the test-file bulk. Treating it as reviewed is a false pass.
+**Input too large.** If the script answers `[codex-review] FAILED: 輸入過長,未送出`, the consultation did **not** happen and this is *not* a quota problem — the document exceeds codex's input limit, so it will never be reviewed until it is split. Unlike RATE_LIMITED you must not just carry on. Note this is **doc mode**: `--base` is not available here (`--doc` and `--base` are mutually exclusive and the script exits 2) — split the document into sections and consult on each, which is what the script's own message says. Treating it as reviewed is a false pass.
+
+**Cost discipline (v1.17.0).** The script sends the document with the `## Cross-Check Log` **trimmed to its last round only** (earlier rounds still count as settled — the prompt says so). Do not paste earlier rounds back into the body to compensate; that was the exact behaviour that grew one plan's payload from 4,929 to 26,758 characters across 12 rounds. Session resume is **off by default** (measured server-side cache window is only tens of seconds — see `references/model-routing.md`). Identical content twice in a row is refused (`SKIP: 送出內容與上一輪...完全相同`): apply the round's fixes first. Per-call token usage and cache hit rate land in `$CODEX_REVIEW_LOG`; report with `scripts/codex-usage.sh`.
 
 If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay in one line and go to the Gate with the solo spec.
 

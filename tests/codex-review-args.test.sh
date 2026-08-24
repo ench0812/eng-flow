@@ -12,11 +12,18 @@ SCRIPT="$ROOT/scripts/codex-review.sh"
 DOC="$ROOT/README.md"   # 任一存在的檔案即可
 pass=0; fail=0
 FIX="$(mktemp -d)"
-trap 'rm -rf "$FIX"' EXIT
+# Gate 隔離: 不可依賴「PATH 上找不到 codex」——腳本的 fallback 清單裡有 /usr/local/bin/codex,
+# 那是 Linux/macOS 的常見安裝位置,一旦命中這些 case 會拿 fixture 真的送出諮詢(花錢、打 API,
+# 而且要等到斷言拿不到 SKIP 才會叫)。改成確定性地在 Gate 2 擋下: login status 回非零。
+GATE="$(mktemp -d)"
+printf '#!/usr/bin/env bash
+exit 1
+' > "$GATE/codex"; chmod +x "$GATE/codex"
+trap 'rm -rf "$FIX" "$GATE"' EXIT
 
 check() {
   local desc="$1" expect="$2"; shift 2
-  bash "$SCRIPT" "$@" >/dev/null 2>&1
+  HOME="$FIX" PATH="$GATE:/usr/bin:/bin" CODEX_REVIEW_STATE="$FIX/state" CODEX_REVIEW_LOG="$FIX/usage.tsv" bash "$SCRIPT" "$@" >/dev/null 2>&1
   local rc=$?
   if [ "$rc" -eq "$expect" ]; then pass=$((pass+1))
   else echo "FAIL [$desc] expected exit=$expect got=$rc"; fail=$((fail+1)); fi
@@ -27,7 +34,7 @@ check() {
 check_out() {
   local desc="$1" expect_rc="$2" pattern="$3"; shift 3
   local out rc
-  out="$(HOME="$FIX" PATH="/usr/bin:/bin" bash "$SCRIPT" "$@" 2>&1)"; rc=$?
+  out="$(HOME="$FIX" PATH="$GATE:/usr/bin:/bin" CODEX_REVIEW_STATE="$FIX/state" CODEX_REVIEW_LOG="$FIX/usage.tsv" bash "$SCRIPT" "$@" 2>&1)"; rc=$?
   if [ "$rc" -eq "$expect_rc" ] && printf '%s\n' "$out" | grep -q "$pattern"; then pass=$((pass+1))
   else echo "FAIL [$desc] rc=$rc out=$out"; fail=$((fail+1)); fi
 }
@@ -35,7 +42,7 @@ check_out() {
 check_absent() { # 同 check_out,但 pattern 必須「不」出現
   local desc="$1" expect_rc="$2" pattern="$3"; shift 3
   local out rc
-  out="$(HOME="$FIX" PATH="/usr/bin:/bin" bash "$SCRIPT" "$@" 2>&1)"; rc=$?
+  out="$(HOME="$FIX" PATH="$GATE:/usr/bin:/bin" CODEX_REVIEW_STATE="$FIX/state" CODEX_REVIEW_LOG="$FIX/usage.tsv" bash "$SCRIPT" "$@" 2>&1)"; rc=$?
   if [ "$rc" -eq "$expect_rc" ] && ! printf '%s\n' "$out" | grep -q "$pattern"; then pass=$((pass+1))
   else echo "FAIL [$desc] rc=$rc out=$out"; fail=$((fail+1)); fi
 }
@@ -137,9 +144,13 @@ mk_stub() { # $1 = exec 分支要跑的 shell 片段
   } > "$STUB/codex"
   chmod +x "$STUB/codex"
 }
+E2E_N=0
 check_e2e() { # $1=desc $2=期望結束碼 $3=期望出現的字樣 $4=不該出現的字樣
   local desc="$1" expect_rc="$2" want="$3" unwanted="$4" out rc
-  out="$(PATH="$STUB:$PATH" bash "$SCRIPT" --doc "$STUB_DOC" --kind spec --severity required 2>&1)"; rc=$?
+  # 每個 case 都是獨立情境,不是同一條複查線的多輪 → 給各自的 ledger,否則第 2 個 case
+  # 起會被「與上一輪內容完全相同」的去重攔截擋掉(那個攔截本身是對的,見腳本說明)。
+  E2E_N=$((E2E_N+1))
+  out="$(PATH="$STUB:$PATH" CODEX_REVIEW_STATE="$STUB/state$E2E_N"          CODEX_REVIEW_LOG="$STUB/usage.tsv"          bash "$SCRIPT" --doc "$STUB_DOC" --kind spec --severity required 2>&1)"; rc=$?
   if [ "$rc" -eq "$expect_rc" ] && printf '%s' "$out" | grep -q "$want" \
      && ! printf '%s' "$out" | grep -q "$unwanted"; then
     pass=$((pass+1))
@@ -230,6 +241,285 @@ check_e2e "diff 內的 429 不觸發 RATE_LIMITED" 0 "完成(" "RATE_LIMITED"
 # 負控組: 真正的 429 出現在錯誤行上,仍必須判為 RATE_LIMITED(收窄不可改壞既有行為)
 mk_stub 'echo "ERROR: request failed with status 429 Too Many Requests" >&2; exit 1'
 check_e2e "錯誤行上的 429 仍判 RATE_LIMITED" 0 "RATE_LIMITED" "FAILED:"
+
+ok() { # $1=desc  $2..=條件(直接當指令跑)
+  local desc="$1"; shift
+  if "$@"; then pass=$((pass+1)); else echo "FAIL [$desc]"; fail=$((fail+1)); fi
+}
+has()  { printf '%s' "$2" | grep -q "$1"; }
+hasnt() { ! printf '%s' "$2" | grep -q "$1"; }
+
+# --- 成本治理: 純函式(2026-08-24 新增) ---
+# 直接抽腳本裡的函式本體來測,不另抄一份以免 drift(同 is_rate_limited 的做法)。
+eval "$(sed -n '/^now_ts()/,/^}$/p;/^state_key()/,/^}$/p;/^state_get()/,/^}$/p;/^trim_crosscheck_log()/,/^}$/p;/^diff_delta_per_file()/,/^}$/p' "$SCRIPT")"
+for fn in now_ts state_key state_get trim_crosscheck_log diff_delta_per_file; do
+  if declare -f "$fn" >/dev/null; then pass=$((pass+1))
+  else echo "FAIL [抽取 $fn] sed 範圍失效,腳本結構可能已改"; fail=$((fail+1)); fi
+done
+# declare -f 只證明「有東西被定義」,證明不了「定義的是對的東西」。
+# 實際踩過: 腳本裡的單行函式(行尾 `; }`)沒有行首 `}` 可以終止 sed range,於是下一個函式被
+# 包進上一個函式的定義裡 —— state_key 變成巢狀定義、呼叫回傳空字串,而 declare -f 照樣成功。
+# 所以守門必須驗行為,不能只驗存在。
+NT_VAL="$(now_ts)"   # bash -c 是新行程,看不到 eval 進來的函式,所以就地取值再驗
+case "$NT_VAL" in ''|*[!0-9]*) echo "FAIL [now_ts 回傳整數] got=$NT_VAL"; fail=$((fail+1)) ;;
+                  *) pass=$((pass+1)) ;; esac
+ok "state_key 非空"             test -n "$(state_key a b c)"
+ok "state_key 單行輸出"         test "$(state_key a b c | wc -l)" -eq 1
+ok "state_key 同輸入同輸出"     test "$(state_key a b c)" = "$(state_key a b c)"
+ok "state_key 不同輸入不同輸出" test "$(state_key a b c)" != "$(state_key a b d)"
+
+CG="$FIX/cg"; mkdir -p "$CG"
+{ echo "# S"; echo "body-line"; echo; echo "## Cross-Check Log"
+  echo "### Round 1 — a"; echo "r1"; echo "### Round 2 — b"; echo "r2"
+  echo "### Round 3 — c"; echo "r3"; } > "$CG/three.md"
+TRIM="$(trim_crosscheck_log "$CG/three.md")"
+ok "trim: 保留最後一輪"        has "### Round 3" "$TRIM"
+ok "trim: 丟掉更早的輪次"      hasnt "### Round 1" "$TRIM"
+ok "trim: 本文不得被裁掉"      has "body-line" "$TRIM"
+ok "trim: 標明省略了幾輪"      has "前 2 輪" "$TRIM"
+{ echo "# S"; echo "## Cross-Check Log"; echo "### Round 1 — a"; echo "only"; } > "$CG/one.md"
+ok "trim: 只有一輪則原樣輸出"  test "$(trim_crosscheck_log "$CG/one.md")" = "$(cat "$CG/one.md")"
+ok "trim: 只有一輪不加省略註記" hasnt "已省略" "$(trim_crosscheck_log "$CG/one.md")"
+printf '# S\nplain\n' > "$CG/none.md"
+ok "trim: 沒有 log 小節則原樣" test "$(trim_crosscheck_log "$CG/none.md")" = "$(cat "$CG/none.md")"
+
+printf 'diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-x\n+y\ndiff --git a/b.py b/b.py\n@@ -1 +1 @@\n-p\n+q\n' > "$CG/old.diff"
+sed 's/+q/+QQ/' "$CG/old.diff" > "$CG/new.diff"
+DLT="$(diff_delta_per_file "$CG/old.diff" "$CG/new.diff")"
+ok "delta: 只送有變的檔案區塊" has "diff --git a/b.py" "$DLT"
+ok "delta: 未變更的檔案不重送" hasnt "diff --git a/a.py" "$DLT"
+ok "delta: 列出未變更檔名"     has "a.py" "$DLT"
+ok "delta: 兩輪相同則無區塊"   hasnt "^diff --git" "$(diff_delta_per_file "$CG/old.diff" "$CG/old.diff")"
+
+# --- 成本治理: 端到端(stub codex) ---
+STUB2="$(mktemp -d)"
+mk_stub2() { { echo '#!/usr/bin/env bash'; echo 'case "$1" in'; echo '  login) exit 0 ;;'
+               echo "  exec)  $1 ;;"; echo 'esac'; echo 'exit 0'; } > "$STUB2/codex"; chmod +x "$STUB2/codex"; }
+mk_stub2 'echo "無重大補充"; echo "收斂問句:無"; exit 0'
+LG="$STUB2/ledger"; TSV="$STUB2/usage.tsv"
+D2="$STUB2/spec.md"; printf '# F\nv1\n' > "$D2"
+run2() { PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG" CODEX_REVIEW_LOG="$TSV" \
+         bash "$SCRIPT" --doc "$D2" --kind spec --severity required 2>&1; }
+
+O1="$(run2)"
+ok "ledger: 首次為 round=1 且 fresh" has "fresh round=1" "$O1"
+printf '# F\nv2\n' > "$D2"
+O2="$(run2)"
+ok "ledger: 內容有變 → round=2"      has "round=2" "$O2"
+ok "ledger: resume 關閉時即使有 session id 也走 fresh" has "fresh round=2" "$O2"
+O3="$(run2)"; rc3=$?
+ok "去重: 內容未變 → SKIP 不送出"    has "SKIP: 送出內容與上一輪" "$O3"
+ok "去重: SKIP 不阻斷(exit 0)"       test "$rc3" -eq 0
+
+ok "遙測: TSV 已產生"                test -s "$TSV"
+ok "遙測: 有表頭"                    has "cache_hit_pct" "$(head -1 "$TSV")"
+ok "遙測: 每次成功各一列"            test "$(grep -c '	OK	' "$TSV")" -eq 2
+
+# ledger 損毀 → 當 0 續跑,不得阻斷
+printf '# F\nv3\n' > "$D2"
+for f in "$LG"/*.state; do printf 'rounds=???\nlast_ts=abc\n' > "$f"; done
+O4="$(run2)"
+ok "ledger 損毀 → 當 0 續跑"         has "round=1" "$O4"
+
+# 輪數警示: 把 ledger 直接推到警示線前一格,下一次必須印警示
+printf '# F\nv4\n' > "$D2"
+for f in "$LG"/*.state; do   # 不用 sed -i: BSD sed 需要備份後綴參數,在 macOS 會直接報錯
+  { echo "rounds=5"; grep -v '^rounds=' "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+done
+O5="$(run2)"
+ok "doc 6 輪 → ledger 印警示"        has "第 6 次諮詢" "$O5"
+ok "警示仍不阻斷"                    has "完成(" "$O5"
+
+# diff 模式排除清單: 用真的 git repo 驗 pathspec 組裝(組錯 git 會直接報錯)
+GR="$STUB2/repo"; mkdir -p "$GR"
+( cd "$GR" && git init -q . && git config user.email t@t.t && git config user.name t \
+  && printf 'base\n' > f.txt && git add -A && git commit -qm i && git branch -M main ) >/dev/null 2>&1
+printf 'changed\n' > "$GR/f.txt"; printf 'lockdata\n' > "$GR/package-lock.json"; mkdir -p "$GR/dist"; printf 'built
+' > "$GR/dist/out.js"; printf 'SECRET=x
+' > "$GR/.env"
+( cd "$GR" && git add -N . >/dev/null 2>&1 )
+O6="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$STUB2/lg2" CODEX_REVIEW_LOG="$STUB2/u2.tsv" \
+      bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: 排除建置產物並回報"      has "字元未送出;其中建置產物" "$O6"
+ok "diff: 排除清單點名檔案"        has "dist/out.js" "$O6"
+# lockfile 不再預設排除: 它才記錄實際解析到的版本與 integrity hash,排掉等於開供應鏈盲點
+ok "diff: lockfile 必須被送審"       hasnt "建置產物.*package-lock" "$O6"
+# 疑似機密檔案: 不送出,但必須大聲講(安全鐵律 #1 —— secrets 不進版控)
+ok "diff: 機密檔案不送出但要警示"    has "含疑似機密檔案" "$O6"
+ok "diff: 警示點名機密檔案"          has "[.]env" "$O6"
+ok "diff: 非排除檔仍送出"            has "fresh round=1" "$O6"
+O7="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE= CODEX_REVIEW_STATE="$STUB2/lg3" \
+      CODEX_REVIEW_LOG="$STUB2/u3.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: 清空排除清單則不排除"      hasnt "已排除" "$O7"
+ok "diff: 清空排除清單仍照常送出" has "fresh round=1" "$O7"
+
+# diff 模式輪次警示: 協議是「一輪一次」,所以警示線比 doc 嚴(預設 3)。
+# 每輪都改內容,避免被「與上一輪相同」的去重攔截擋掉。
+LG6="$STUB2/lg6"; DIFF_OUT=""
+for i in 1 2 3; do
+  ( cd "$GR" && printf 'v%s\n' "$i" > f.txt )
+  DIFF_OUT="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG6" CODEX_REVIEW_LOG="$STUB2/u6.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+done
+ok "diff 第 3 輪 → 印警示"           has "第 3 次諮詢" "$DIFF_OUT"
+ok "diff 警示點名協議"               has "not per file or per fix" "$DIFF_OUT"
+ok "diff 警示標的不重複前綴"         has "複查線(diff:main@" "$DIFF_OUT"
+ok "diff 複查線含目前分支"           has "複查線(diff:main@main)" "$DIFF_OUT"
+
+# 輪次要能重置: 沒有重置的話,一個 repo 用滿警示線之後往後每次都警示,警示就退化成雜訊。
+# 這裡把 last_ts 往前推到重置門檻之外,下一次必須從第 1 輪重新起算。
+for f in "$LG6"/*.state; do
+  { grep -v '^last_ts=' "$f"; echo "last_ts=1"; } > "$f.tmp" && mv "$f.tmp" "$f"
+done
+( cd "$GR" && printf 'reset-probe
+' > f.txt )
+RESET_OUT="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG6" CODEX_REVIEW_LOG="$STUB2/u6.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "閒置超過門檻 → 輪數歸零"         has "fresh round=1" "$RESET_OUT"
+ok "輪數歸零後不再警示"              hasnt "次諮詢" "$RESET_OUT"
+
+# 換分支 = 換複查線,輪數不該沿用上一條分支的累計
+( cd "$GR" && git checkout -q -b probe-branch && printf 'on-branch
+' > f.txt )
+BR_OUT="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG6" CODEX_REVIEW_LOG="$STUB2/u6.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "換分支 → 另一條複查線"           has "fresh round=1" "$BR_OUT"
+( cd "$GR" && git checkout -q main )
+ok "diff 警示仍不阻斷"               has "完成(" "$DIFF_OUT"
+
+# 軟性大小警示
+printf '# F\n' > "$D2"; head -c 200 /dev/zero | tr '\0' 'x' >> "$D2"
+O8="$(PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$STUB2/lg4" CODEX_REVIEW_LOG="$STUB2/u4.tsv" \
+      CODEX_WARN_CHARS=50 bash "$SCRIPT" --doc "$D2" --kind spec --severity required 2>&1)"
+ok "軟性大小警示會觸發"              has "軟性警示線" "$O8"
+ok "軟性大小警示不阻斷"              has "完成(" "$O8"
+
+# RATE_LIMITED / FAILED 不得推進輪數(協議: 不計 round)
+LG5="$STUB2/lg5"; D5="$STUB2/s5.md"; printf '# F\nv1\n' > "$D5"
+run5() { PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG5" CODEX_REVIEW_LOG="$STUB2/u5.tsv" \
+         bash "$SCRIPT" --doc "$D5" --kind spec --severity required 2>&1; }
+mk_stub2 'echo "You'"'"'ve hit your usage limit." >&2; exit 1'
+R1="$(run5)"
+ok "RATE_LIMITED 仍記遙測"           has "RATE_LIMITED" "$R1"
+mk_stub2 'echo "無重大補充"; echo "收斂問句:無"; exit 0'
+R2="$(run5)"
+ok "RATE_LIMITED 不推進輪數"         has "round=1" "$R2"
+ok "遙測含 RATE_LIMITED 列"          has "RATE_LIMITED" "$(cat "$STUB2/u5.tsv")"
+
+
+# review 內容與後續狀態行不得黏在同一行(-o 檔無結尾換行造成)
+mk_stub2 'printf "無重大遺漏\n收斂問句:無"; exit 0'   # 刻意不給結尾換行
+NL_OUT="$(PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$STUB2/lg7" CODEX_REVIEW_LOG="$STUB2/u7.tsv" \
+          bash "$SCRIPT" --doc "$D2" --kind spec --severity required 2>&1)"
+ok "狀態行不得黏在 review 尾巴"      hasnt "收斂問句:無\[codex-review\]" "$NL_OUT"
+ok "行首完成訊息仍在"                has "^\[codex-review\] 完成(" "$NL_OUT"
+
+
+# 去重必須與 resume 開關解耦: resume 預設關閉,去重仍要生效(不然關掉 resume 等於關掉去重)
+mk_stub2 'echo "無重大遺漏"; echo "收斂問句:無"; exit 0'
+LG8="$STUB2/lg8"; D8="$STUB2/s8.md"; printf '# F
+v1
+' > "$D8"
+run8() { PATH="$STUB2:$PATH" CODEX_REVIEW_RESUME=0 CODEX_REVIEW_STATE="$LG8"          CODEX_REVIEW_LOG="$STUB2/u8.tsv" bash "$SCRIPT" --doc "$D8" --kind spec --severity required 2>&1; }
+D8_1="$(run8)"; D8_2="$(run8)"
+ok "resume 關閉時首輪照常送出"       has "fresh round=1" "$D8_1"
+ok "resume 關閉時去重仍生效"         has "SKIP: 送出內容與上一輪" "$D8_2"
+
+
+# --- 遙測解析鏈 + resume 分支(先前完全零覆蓋) ---
+# 用會吐 JSONL 的 stub。先前的 stub 只吐純文字,所以 jnum / emit_telemetry 的欄位解析、
+# cache_hit_pct 計算、thread_id 擷取、以及整條 resume 路徑一行都沒被執行過——
+# 既有的三條遙測斷言(TSV 存在/有表頭/OK 列數)在 jnum 全壞、欄位全 0 時照樣會綠。
+ARGV="$STUB2/argv.txt"
+mk_stub_json() { # $1=thread_id $2=input $3=cached $4=output $5=reasoning
+  # 忠實模擬真 codex 的 --json 行為: stdout 只有 JSONL,review 本體寫進 -o 指定的檔。
+  # (先前版本把 review 印在 stdout,會被腳本正確判成「-o 落空」而 FAILED —— 那個判定是對的。)
+  cat > "$STUB2/codex" <<STUBEOF
+#!/usr/bin/env bash
+case "\$1" in
+  login) exit 0 ;;
+  exec)
+    printf '%s
+' "\$@" >> "$ARGV"
+    o=""; prev=""
+    for a in "\$@"; do [ "\$prev" = "-o" ] && o="\$a"; prev="\$a"; done
+    [ -n "\$o" ] && printf '%s
+' "無重大遺漏" "收斂問句:無" > "\$o"
+    echo '{"type":"thread.started","thread_id":"$1"}'
+    echo '{"type":"turn.completed","usage":{"input_tokens":$2,"cached_input_tokens":$3,"cache_write_input_tokens":0,"output_tokens":$4,"reasoning_output_tokens":$5}}'
+    exit 0 ;;
+esac
+exit 0
+STUBEOF
+  chmod +x "$STUB2/codex"
+}
+
+TID="11111111-2222-3333-4444-555555555555"
+LG7="$STUB2/lg7"; TSV7="$STUB2/u7.tsv"; D7="$STUB2/s7.md"
+run7() { PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG7" CODEX_REVIEW_LOG="$TSV7" \
+         env "$@" bash "$SCRIPT" --doc "$D7" --kind spec --severity required 2>&1; }
+
+# 文件要有實際體積,delta 才會真的比全文小 —— 兩行的文件其 unified diff 比原文還長,
+# 會(正確地)觸發「增量不比全文小 → 退 fresh」的守門,那樣就測不到 resume 了。
+mk_doc7() { # $1=變動標記
+  { echo "# Fixture spec"
+    for i in $(seq 1 40); do echo "需求 $i: 系統必須在第 $i 個步驟驗證輸入並記錄稽核軌跡。"; done
+    echo "變動標記: $1"
+  } > "$D7"
+}
+mk_doc7 v1; : > "$ARGV"
+mk_stub_json "$TID" 15348 9984 700 500
+O_T="$(run7 IGNORE=1)"
+fld() { awk -F'\t' -v c="$1" 'END{print $c}' "$TSV7"; }
+ok "遙測: input_tokens 落欄"    test "$(fld 9)"  = "15348"
+ok "遙測: cached 落欄"          test "$(fld 10)" = "9984"
+ok "遙測: output 落欄"          test "$(fld 11)" = "700"
+ok "遙測: reasoning 落欄"       test "$(fld 12)" = "500"
+ok "遙測: hit rate 計算正確"    test "$(fld 13)" = "65.1"
+ok "遙測: TSV 欄位數 = 17"      test "$(awk -F'\t' 'END{print NF}' "$TSV7")" -eq 17
+ok "用量行印出 hit rate"        has "cache hit 65.1%" "$O_T"
+ok "ledger 記下 session_id"     has "session_id=$TID" "$(cat "$LG7"/*.state)"
+
+# resume: 內容有變 + 開關開啟 + TTL 內 → 必須走 resume,且必須明確壓 read-only sandbox。
+# 那個旗標是針對 config.toml 可能有 [windows] sandbox = "elevated" 的 fail-closed 處置
+# (codex exec resume 沒有 -s/--sandbox),先前只靠人工 E2E 記憶保護,有人拿掉不會有任何反應。
+mk_doc7 v2; : > "$ARGV"
+O_R="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"
+ok "resume: 走 resume 分支"          has "resume(11111111)" "$O_R"
+ok "resume: 用 exec resume 子指令"   has "^resume$" "$(cat "$ARGV")"
+ok "resume: 必帶 read-only sandbox"  has "^sandbox_mode=read-only$" "$(cat "$ARGV")"
+ok "resume: 送 delta 不送全文"       test "$(printf '%s' "$O_R" | sed -n 's/.*delta \([0-9][0-9]*\)\/\([0-9][0-9]*\) 字元.*/\1 \2/p' | awk '{print ($1<$2)?"y":"n"}')" = "y"
+
+# 去重與 resume 解耦的【真】命題: resume 開著時,相同內容仍要被擋
+O_D="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"
+ok "resume 開啟時去重仍生效"         has "SKIP: 送出內容與上一輪" "$O_D"
+ok "FORCE=1 可略過去重攔截"          has "完成(" "$(run7 CODEX_REVIEW_FORCE=1)"
+
+# TTL 之外必須退回 fresh 並說明原因(resume 在窗口外比 fresh 更貴)
+mk_doc7 v4; : > "$ARGV"
+O_E="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=0)"
+ok "resume: 超出窗口 → 明講並退 fresh" has "超出快取窗口" "$O_E"
+ok "resume: 退 fresh 後照常完成"       has "fresh round=" "$O_E"
+ok "resume: 退 fresh 不帶 resume 子指令" hasnt "^resume$" "$(cat "$ARGV")"
+
+
+# --- C1 回歸(2026-08-24 review 抓到的 Critical) ---
+# 「上一輪有、本輪已還原」的檔案不會出現在本輪 diff 裡,所以 per-file delta 為空。
+# 舊版拿 delta 是否為空當去重判準,於是把「照 codex 建議還原後再問一次」誤判成
+# 「與上一輪完全相同」並 exit 0 —— 那正是最需要複查的一輪。去重必須直接比內容。
+C1R="$STUB2/c1repo"; mkdir -p "$C1R"
+( cd "$C1R" && git init -q . && git config user.email t@t.t && git config user.name t   && echo base > a.txt && echo base > b.txt && git add -A && git commit -qm i && git branch -M main ) >/dev/null 2>&1
+mk_stub_json "cccccccc-0000-0000-0000-000000000000" 100 50 10 0
+c1run() { ( cd "$C1R" && PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$STUB2/lgc1"             CODEX_REVIEW_LOG="$STUB2/uc1.tsv" bash "$SCRIPT" --severity required --base main 2>&1 ); }
+( cd "$C1R" && echo changed > a.txt && echo changed > b.txt )
+C1_1="$(c1run)"
+( cd "$C1R" && echo base > b.txt )          # 還原 b.txt,a.txt 的變更還在
+C1_2="$(c1run)"
+( cd "$C1R" && : )                          # 什麼都不改
+C1_3="$(c1run)"
+ok "C1: 首輪正常送出"                 has "round=1" "$C1_1"
+ok "C1: 還原某檔後仍須複查"           has "round=2" "$C1_2"
+ok "C1: 還原某檔不得誤判為相同"       hasnt "完全相同" "$C1_2"
+ok "C1: 真正沒改動才 SKIP"            has "SKIP: 送出內容與上一輪" "$C1_3"
+
+rm -rf "$STUB2"
 
 rm -rf "$STUB"
 
