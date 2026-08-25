@@ -1,0 +1,29 @@
+# ~/.claude/memory-pg/docker-compose.yml — 由 bootstrap.sh 從 plugin 範本複製。
+# project 名刻意避開 pgs / pgsdoc（那是產品 DB 的 compose project），container 不用 pgs-* 前綴。
+name: claude-memory
+services:
+  pg:
+    build: .
+    image: claude-memory-pg:18-pgroonga4.0.8-pgvector
+    container_name: claude-memory-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: memory
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: ${MEMORY_PG_PASSWORD:?請先執行 bootstrap.sh 產生 .env}
+      # en_US.utf8：給 pg_trgm 退路保留 CJK word-char 語意；PGroonga 本身不依賴 locale
+      POSTGRES_INITDB_ARGS: "--locale=en_US.utf8 --encoding=UTF8"
+    ports:
+      - "127.0.0.1:${MEMORY_PG_PORT:-5433}:5432"
+    volumes:
+      # PG 18 官方 image 的 VOLUME 是 /var/lib/postgresql（PGDATA 在其下的 18/docker）；
+      # 掛在舊的 /var/lib/postgresql/data 不會持久化。見 bootstrap.sh 的 inspect 檢查。
+      - claude-memory-pgdata:/var/lib/postgresql
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  claude-memory-pgdata: {}
