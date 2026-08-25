@@ -17,9 +17,11 @@ from . import search as searchmod
 from .config import Config
 
 
-def render(conn: psycopg.Connection, cfg: Config, cwd: str | None) -> tuple[str, str | None, int]:
-    """回傳 (輸出文字, project_slug, pinned 數)。空庫回 ('', slug, 0)——呼叫端不輸出。"""
-    pk = searchmod.resolve_project_key(conn, cwd)
+def render(conn: psycopg.Connection, cfg: Config, cwd: str | None,
+           slug: str | None = None) -> tuple[str, str | None, int]:
+    """回傳 (輸出文字, project_slug, pinned 數)。空庫回 ('', slug, 0)——呼叫端不輸出。
+    slug 優先於 cwd（hook 從 transcript_path 取到的 slug 比路徑比對可靠）。"""
+    pk = slug or searchmod.resolve_project_key(conn, cwd)
     with conn.cursor() as cur:
         # 該注入這個 session 的 pinned：本專案 pinned active ＋ global pinned（無標籤者全域可見；
         # 有標籤者只在被標的專案）——與 exporter 的 MEMORY.md PINNED 規則一致。

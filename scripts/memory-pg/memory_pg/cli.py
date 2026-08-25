@@ -446,7 +446,8 @@ def _cmd_session_context(args: argparse.Namespace) -> int:
         print(f"記憶服務未啟動（{type(e).__name__}）：cd ~/.claude/memory-pg && docker compose up -d", file=sys.stderr)
         return EXIT_OK
     try:
-        text, pk, n = session_context.render(conn, cfg, _os.getcwd())
+        text, pk, n = session_context.render(conn, cfg, getattr(args, "cwd", None) or _os.getcwd(),
+                                             slug=getattr(args, "slug", None))
         if text:
             sys.stdout.write(text)
             # inject 遙測（含 pinned ids）
@@ -646,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
     vf.set_defaults(fn=_cmd_verify)
 
     sc = sub.add_parser("session-context", help="SessionStart hook 用（PG 不在時印提示、exit 0）")
+    sc.add_argument("--cwd", help="覆寫 cwd（hook 從 stdin JSON 取，比行程 cwd 可靠）")
+    sc.add_argument("--slug", help="直接指定 project slug（優先於 cwd；hook 從 transcript_path 取）")
     sc.set_defaults(fn=_cmd_session_context)
 
     lg = sub.add_parser("log", help="讀取/匯入存取遙測")
