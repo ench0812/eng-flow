@@ -53,9 +53,33 @@ class SearchResult:
     warnings: list[str] = field(default_factory=list)
 
 
+_CJK = re.compile(r"[㐀-鿿豈-﫿]")
+
+
+def _is_cjk_run(t: str) -> bool:
+    return len(t) >= 2 and all(_CJK.match(c) for c in t)
+
+
 def tokenize(query: str) -> list[str]:
+    """空白切詞；純 CJK 長詞（≥4 字，多半是沒斷詞的自然語言）額外展開成 2-gram，
+    讓「哪台是正式機」也能靠「正式」「式機」子串命中——PGroonga &@ 對整串是 phrase 比對，
+    要求每個 bigram 都在，對自然語言問句太嚴。展開後靠 OR + coverage 排名，雜訊 bigram 不傷。
+    保留原詞：len==4 時原詞的 &@ 等於「完整片語」，命中就是精準加分。"""
     q = query.replace("[[", " ").replace("]]", " ").replace('"', " ").replace("'", " ")
-    return [t for t in q.split() if t]
+    raw = [t for t in q.split() if t]
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(t: str):
+        if t and t not in seen:
+            seen.add(t); out.append(t)
+
+    for t in raw:
+        add(t)
+        if _is_cjk_run(t) and len(t) >= 4:
+            for i in range(len(t) - 1):
+                add(t[i:i + 2])
+    return out
 
 
 def resolve_project_key(conn: psycopg.Connection, cwd: str | None) -> str | None:

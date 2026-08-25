@@ -100,10 +100,20 @@ def _cmd_search(args: argparse.Namespace) -> int:
 
     from . import search as searchmod
 
+    from . import embed as embedmod
+
     cfg = config.load(use_test_db=args.test_db)
     conn = db.connect(cfg)
     try:
         db.assert_schema(conn)
+        embed_fn = None
+        if args.mode == "hybrid":
+            with conn.cursor() as cur:
+                cur.execute("SELECT model, query_prefix FROM embedding_config LIMIT 1")
+                row = cur.fetchone()
+            if row:
+                to = float(_os.environ.get("MEMORY_EMBED_TIMEOUT", "3"))
+                embed_fn = embedmod.make_query_embedder(row[0], row[1] or "", timeout=to)
         res = searchmod.search(
             conn, cfg, args.query,
             cwd=_os.getcwd(),
@@ -112,7 +122,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
             include_superseded=args.all_status,
             mode=args.mode,
             degrade_ok=args.degrade,
-            embed_fn=None,   # Task 3 才接上 ollama；現在 hybrid 會自動降 fts
+            embed_fn=embed_fn,
         )
         for w in res.warnings:
             print(f"WARN -: {w}", file=sys.stderr)
@@ -143,6 +153,113 @@ def _cmd_search(args: argparse.Namespace) -> int:
         return EXIT_OK
     finally:
         conn.close()
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from . import eval_models
+
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        results = []
+        for model in args.models:
+            print(f"# 評測 {model} …", file=sys.stderr)
+            results.append(eval_models.evaluate(conn, cfg, model))
+        hdr = ["model", "top3", "mrr", "embed20ms", "coldms", "nan", "tau", "negSim", "gMinSim"]
+        print("\t".join(hdr))
+        for r in results:
+            print("\t".join(str(x) for x in [
+                r.model, f"{r.top3:.2f}", f"{r.mrr:.3f}", f"{r.embed_20_ms:.0f}",
+                f"{r.cold_ms:.0f}", r.nan_count, r.tau_suggest, f"{r.neg_max_sim:.3f}", f"{r.golden_min_sim:.3f}"]))
+            for n in r.notes:
+                print(f"  - {n}")
+        winner, log = eval_models.choose(results)
+        for line in log:
+            print(f"# {line}", file=sys.stderr)
+        if winner:
+            print(f"\n建議：--set-model {winner.model} --dim 1024 --tau {winner.tau_suggest}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_embed(args: argparse.Namespace) -> int:
+    from . import embed as embedmod
+
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT model, dim, doc_prefix FROM embedding_config LIMIT 1")
+            row = cur.fetchone()
+        if not row and not args.set_model:
+            print("WARN -: config_missing 尚未設定 embedding 模型，用 --set-model <name> --dim <n>", file=sys.stderr)
+            return 2
+        if args.set_model:
+            model, dim, dprefix = args.set_model, args.dim, (args.doc_prefix or "")
+            with db.top_level_transaction(conn):
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM embedding_config")
+                    cur.execute(
+                        "INSERT INTO embedding_config(model,dim,query_prefix,doc_prefix,tau) VALUES (%s,%s,%s,%s,%s)",
+                        (model, dim, args.query_prefix or "", dprefix, args.tau),
+                    )
+        else:
+            model, dim, dprefix = row
+
+        if args.smoke:
+            return _embed_smoke(conn, cfg, model, dim)
+
+        # 選要算的列：--all 全部；否則只算 pending（無 embedding 或 hash/model 不符）
+        with conn.cursor() as cur:
+            cur.execute("SELECT name, description, body, embedding_src_hash, embedding_model FROM memories WHERE status='active'")
+            rows = cur.fetchall()
+        todo = []
+        for name, desc, body, old_hash, old_model in rows:
+            text = embedmod.build_embed_text(name, desc, body, doc_prefix=dprefix)
+            h = embedmod.src_hash(text)
+            if args.all or old_hash != h or old_model != model:
+                todo.append((name, text, h))
+        if not todo:
+            print("embed: 無待算項")
+            return EXIT_OK
+        vecs = embedmod.embed_texts(cfg, model, [t for _, t, _ in todo], timeout=120.0)
+        ok = fail = 0
+        with db.top_level_transaction(conn):
+            with conn.cursor() as cur:
+                for (name, _t, h), v in zip(todo, vecs):
+                    if v is None:
+                        fail += 1
+                        print(f"WARN -: embed_failed {name}（ollama 回非有限值，留 NULL）", file=sys.stderr)
+                        continue
+                    cur.execute(
+                        "UPDATE memories SET embedding=%s, embedding_model=%s, embedding_dim=%s, "
+                        "embedding_src_hash=%s, embedded_at=now() WHERE name=%s",
+                        (str(v), model, dim, h, name),
+                    )
+                    ok += 1
+        print(f"embed model={model} ok={ok} failed={fail} total={len(todo)}")
+        return 1 if fail else EXIT_OK
+    finally:
+        conn.close()
+
+
+def _embed_smoke(conn, cfg, model, dim) -> int:
+    from . import embed as embedmod
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT name, description, body FROM memories WHERE status='active'")
+        rows = cur.fetchall()
+    texts = [embedmod.build_embed_text(n, d, b) for n, d, b in rows]
+    vecs = embedmod.embed_texts(cfg, model, texts, timeout=120.0)
+    bad = [rows[i][0] for i, v in enumerate(vecs) if v is None or len(v) != dim]
+    print(f"embed --smoke model={model} dim={dim} n={len(rows)} bad={len(bad)}",
+          file=sys.stderr if bad else sys.stdout)
+    for name in bad:
+        print(f"WARN -: embed_smoke_bad {name}", file=sys.stderr)
+    return 1 if bad else EXIT_OK
 
 
 def _cmd_import(args: argparse.Namespace) -> int:
@@ -280,6 +397,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--k", type=int, default=10)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=_cmd_search)
+
+    ev = sub.add_parser("eval", help="評測候選 embedding 模型並建議選擇")
+    ev.add_argument("models", nargs="+")
+    ev.set_defaults(fn=_cmd_eval)
+
+    em = sub.add_parser("embed", help="用本機 ollama 算 embedding")
+    em.add_argument("--all", action="store_true", help="全部重算（換模型時）")
+    em.add_argument("--smoke", action="store_true", help="全部嵌一次檢查 finite/維度，不寫入")
+    em.add_argument("--set-model", help="設定現行 embedding 模型")
+    em.add_argument("--dim", type=int, default=1024)
+    em.add_argument("--query-prefix", default="")
+    em.add_argument("--doc-prefix", default="")
+    em.add_argument("--tau", type=float, default=0.5)
+    em.set_defaults(fn=_cmd_embed)
 
     i = sub.add_parser("import", help="把 Markdown bank 匯入 PG（單一交易；來源有誤整批不寫）")
     i.add_argument("--dry-run", action="store_true", help="只驗證與統計，rollback 不寫入")
