@@ -178,6 +178,11 @@ def _claude_md(conn: psycopg.Connection, cfg: Config, rep: AuditReport) -> None:
         return
     refs = set(re.findall(r"`memory\s+([A-Za-z0-9_][A-Za-z0-9._-]*)`", text))
     refs |= set(re.findall(r"memory\s+`([A-Za-z0-9_][A-Za-z0-9._-]*)`", text))
+    # 排除子命令名：`memory search`、`memory write` 等是指令引用，不是「引用某則記憶」。
+    SUBCOMMANDS = {"search", "write", "edit", "learn", "forget", "verify", "audit", "index",
+                   "export", "import", "embed", "eval", "doctor", "migrate", "log", "project",
+                   "session-context", "backup"}
+    refs -= SUBCOMMANDS
     if not refs:
         return
     with conn.cursor() as cur:
