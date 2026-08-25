@@ -72,6 +72,79 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _cmd_audit(args: argparse.Namespace) -> int:
+    from . import audit as auditmod
+
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        rep = auditmod.run(conn, cfg)
+        for f in rep.findings:
+            print(f.line(), file=sys.stderr if f.level == "WARN" else sys.stdout)
+        return 1 if rep.has_warn else EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_index(args: argparse.Namespace) -> int:
+    # 相容別名：--check ＝ export --verify；--write ＝ export
+    args.verify = args.check
+    args.canonical = False
+    return _cmd_export(args)
+
+
+def _cmd_search(args: argparse.Namespace) -> int:
+    import json as _json
+    import os as _os
+
+    from . import search as searchmod
+
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        res = searchmod.search(
+            conn, cfg, args.query,
+            cwd=_os.getcwd(),
+            scope=("all" if args.all else args.scope),
+            k=args.k,
+            include_superseded=args.all_status,
+            mode=args.mode,
+            degrade_ok=args.degrade,
+            embed_fn=None,   # Task 3 才接上 ollama；現在 hybrid 會自動降 fts
+        )
+        for w in res.warnings:
+            print(f"WARN -: {w}", file=sys.stderr)
+        if res.degraded:
+            print(f"WARN -: degraded={res.degraded} backend={res.backend} mode={res.mode}", file=sys.stderr)
+        elif res.backend != "pgroonga":
+            print(f"WARN -: backend={res.backend}", file=sys.stderr)
+        searchmod.log_access(conn, event="search", cwd=_os.getcwd(), keyword=args.query,
+                             hits=res.hits, mode=res.mode)
+        if args.json:
+            print(_json.dumps({
+                "ok": True, "degraded": res.degraded, "backend": res.backend, "mode": res.mode,
+                "model": res.model,
+                "results": [
+                    {"id": h.name, "path": h.file_path, "description": h.description,
+                     "scope": h.scope, "project_key": h.project_key, "kind": h.kind,
+                     "status": h.status, "pinned": h.pinned, "stale": h.stale,
+                     "rank": i + 1, "score": round(h.rrf, 6),
+                     "matched": {"id": h.id_hit, "fts": h.fts_rank is not None,
+                                 "vec": h.vec_rank is not None, "sim": h.sim}}
+                    for i, h in enumerate(res.hits)
+                ],
+            }, ensure_ascii=False))
+        else:
+            # TSV 契約：<git-bash 絕對路徑>\t<id>\t<description>
+            for h in res.hits:
+                print(f"{h.file_path}\t{h.name}\t{h.description}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
 def _cmd_import(args: argparse.Namespace) -> int:
     from . import exporter, importer
 
@@ -187,6 +260,26 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--status", action="store_true")
     m.add_argument("--dry-run", action="store_true")
     m.set_defaults(fn=_cmd_migrate)
+
+    a = sub.add_parser("audit", help="記憶庫健全性檢查（WARN→stderr+exit1；SUGGEST/INFO→stdout）")
+    a.set_defaults(fn=_cmd_audit)
+
+    ix = sub.add_parser("index", help="相容別名：--check=export --verify；--write=export")
+    ixg = ix.add_mutually_exclusive_group()
+    ixg.add_argument("--check", action="store_true")
+    ixg.add_argument("--write", action="store_true")
+    ix.set_defaults(fn=_cmd_index)
+
+    s = sub.add_parser("search", help="hybrid 檢索（沿用 TSV 三欄契約）")
+    s.add_argument("query")
+    s.add_argument("--scope", help="global | <project_key>；預設為目前專案 + global")
+    s.add_argument("--all", action="store_true", help="所有 scope（不限目前專案）")
+    s.add_argument("--all-status", action="store_true", help="含已取代/deprecated")
+    s.add_argument("--mode", choices=["hybrid", "fts"], default="hybrid")
+    s.add_argument("--degrade", action="store_true", help="向量路不可用時降為 fts，不 fail-closed")
+    s.add_argument("--k", type=int, default=10)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=_cmd_search)
 
     i = sub.add_parser("import", help="把 Markdown bank 匯入 PG（單一交易；來源有誤整批不寫）")
     i.add_argument("--dry-run", action="store_true", help="只驗證與統計，rollback 不寫入")
