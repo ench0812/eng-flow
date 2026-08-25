@@ -18,8 +18,8 @@ from .config import Config
 
 
 def render(conn: psycopg.Connection, cfg: Config, cwd: str | None,
-           slug: str | None = None) -> tuple[str, str | None, int]:
-    """回傳 (輸出文字, project_slug, pinned 數)。空庫回 ('', slug, 0)——呼叫端不輸出。
+           slug: str | None = None) -> tuple[str, str | None, list[str]]:
+    """回傳 (輸出文字, project_slug, 本 session 實際注入的 pinned 名單)。空庫回 ('', slug, [])。
     slug 優先於 cwd（hook 從 transcript_path 取到的 slug 比路徑比對可靠）。"""
     pk = slug or searchmod.resolve_project_key(conn, cwd)
     with conn.cursor() as cur:
@@ -60,7 +60,7 @@ def render(conn: psycopg.Connection, cfg: Config, cwd: str | None,
 
     n = len(pinned)
     if n == 0 and not soon and not warns:
-        return "", pk, 0
+        return "", pk, []
 
     lines = [f'<project-memory bank="{pk or "global"}" pinned="{n}" via="MEMORY.md">']
     if pinned:
@@ -72,4 +72,4 @@ def render(conn: psycopg.Connection, cfg: Config, cwd: str | None,
         lines.append("稽核: " + w)
     lines.append('搜尋: `~/.claude/scripts/memory search "<關鍵字>"`；寫入用 `memory write/learn`')
     lines.append("</project-memory>")
-    return "\n".join(lines) + "\n", pk, n
+    return "\n".join(lines) + "\n", pk, pinned

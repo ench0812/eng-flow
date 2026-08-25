@@ -28,11 +28,11 @@ def _seed(conn, home: Path):
 
 def test_render_in_project(conn, home: Path):
     _seed(conn, home)
-    text, pk, n = session_context.render(conn, _cfg(), r"D:\Projects\IntelliPark")
+    text, pk, pinned = session_context.render(conn, _cfg(), r"D:\Projects\IntelliPark")
     assert pk == "D--Projects-IntelliPark"
     # pinned：本專案 + 全域無標籤
     assert "ip-pin" in text and "g-pin" in text
-    assert n == 2
+    assert set(pinned) == {"ip-pin", "g-pin"}
     # 不重印全文（只列名字），且註明由 MEMORY.md 載入
     assert "via=\"MEMORY.md\"" in text and "全文已由 MEMORY.md 載入" in text
     # 到期提醒出現
@@ -44,12 +44,12 @@ def test_render_empty_bank_silent(conn, home: Path):
     (home / "projects" / "D--Projects-empty" / "memory").mkdir(parents=True)
     importer.run(conn, _cfg(), dry_run=False)
     conn.commit()
-    text, pk, n = session_context.render(conn, _cfg(), r"D:\Projects\empty")
-    assert text == "" and n == 0
+    text, pk, pinned = session_context.render(conn, _cfg(), r"D:\Projects\empty")
+    assert text == "" and pinned == []
 
 
 def test_workspace_root_subrepo_resolves(conn, home: Path):
     _seed(conn, home)
     # 在 IntelliPark 子 repo cwd → 仍解析到 IntelliPark，注入 ip-pin
-    text, pk, n = session_context.render(conn, _cfg(), r"D:\Projects\IntelliPark\pgs-admin")
-    assert pk == "D--Projects-IntelliPark" and "ip-pin" in text
+    text, pk, pinned = session_context.render(conn, _cfg(), r"D:\Projects\IntelliPark\pgs-admin")
+    assert pk == "D--Projects-IntelliPark" and "ip-pin" in pinned

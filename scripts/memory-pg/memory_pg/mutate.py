@@ -155,7 +155,8 @@ def learn(conn, cfg: Config, *, supersedes: list[str], confirms: list[str], forc
             # 觸發器負責環偵測/同 bank/只能取代 active/舊者轉 superseded
             cur.execute("INSERT INTO memory_links(source_id, target_name, target_id, kind) "
                         "VALUES (%s,%s,%s,'supersedes')", (mid, old, oid))
-        for cid in confirms:
+        for cid in dict.fromkeys(confirms):   # 去重：重複參數不重複加 evidence
+            _get_mid(cur, cid)                 # 不存在 → 拋錯，不靜默遺失確認意圖
             cur.execute("UPDATE memories SET evidence_count = evidence_count + 1, last_verified = current_date "
                         "WHERE name = %s", (cid,))
     return name
@@ -175,8 +176,13 @@ def forget(conn, cfg: Config, name: str, *, reason: str, status: str = "deprecat
 
 
 def verify(conn, cfg: Config, name: str, *, method: str | None, extend_days: int = 90) -> str:
+    if extend_days < 0:
+        raise MutateError("--extend-days 不可為負（verify 是順延，不是往回推）")
     with conn.cursor() as cur:
         mid = _get_mid(cur, name)
+        cur.execute("SELECT status::text FROM memories WHERE id=%s", (mid,))
+        if cur.fetchone()[0] != "active":
+            raise MutateError(f"{name} 非 active，無法 verify（已 deprecated/invalid 的不需覆核）")
         new_rb = _dt.date.today() + _dt.timedelta(days=extend_days)
         cur.execute("UPDATE memories SET last_verified=current_date, verification_method=%s, "
                     "review_by = CASE WHEN review_by IS NOT NULL THEN %s ELSE review_by END WHERE id=%s",

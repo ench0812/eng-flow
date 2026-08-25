@@ -240,6 +240,13 @@ def _cmd_embed(args: argparse.Namespace) -> int:
                 ok = 0
                 for (name, _t, h), v in zip(todo, vecs):
                     if v is None:
+                        # 切換模型時的失敗列：清掉舊模型的 embedding（否則設定已是新模型、此列仍是
+                        # 舊模型 → search 判 mismatch 而整體 fail-closed）。清成 NULL 後變「缺 embedding」，
+                        # search 只略過+警示。--force 的語意就是「切換並容忍缺列」。
+                        if switching:
+                            cur.execute("UPDATE memories SET embedding=NULL, embedding_model=NULL, "
+                                        "embedding_dim=NULL, embedding_src_hash=NULL, embedded_at=NULL "
+                                        "WHERE name=%s", (name,))
                         print(f"WARN -: embed_failed {name}（ollama 回非有限值，留 NULL）", file=sys.stderr)
                         continue
                     cur.execute(
@@ -352,6 +359,17 @@ def _auto_export(conn, cfg) -> None:
         print(f"WARN -: export_after_write 匯出失敗（DB 已更新，稍後手動 memory export）: {e}", file=sys.stderr)
 
 
+def _resolve_project(conn, args) -> str | None:
+    """project scope 省略 --project 時，從 cwd 推 slug（實作 help 宣稱的行為）。"""
+    if args.project:
+        return args.project
+    if args.scope == "project":
+        import os as _os
+        from . import search as _s
+        return _s.resolve_project_key(conn, _os.getcwd())
+    return None
+
+
 def _cmd_write(args: argparse.Namespace) -> int:
     from . import mutate
     cfg = config.load(use_test_db=args.test_db)
@@ -363,7 +381,7 @@ def _cmd_write(args: argparse.Namespace) -> int:
         with db.top_level_transaction(conn):
             mutate.write(conn, cfg, name=name, scope=args.scope, description=desc, body=body,
                          kind=args.kind, pin=args.pin, review_by=args.review_by,
-                         project_slug=args.project, tags=args.tag or [])
+                         project_slug=_resolve_project(conn, args), tags=args.tag or [])
         _auto_export(conn, cfg)
         print(f"write {name}")
         return EXIT_OK
@@ -399,7 +417,7 @@ def _cmd_learn(args: argparse.Namespace) -> int:
             mutate.learn(conn, cfg, supersedes=args.supersedes or [], confirms=args.confirms or [],
                          force=args.force, name=name, scope=args.scope, description=desc, body=body,
                          kind=args.kind, pin=args.pin, review_by=args.review_by,
-                         project_slug=args.project, tags=args.tag or [])
+                         project_slug=_resolve_project(conn, args), tags=args.tag or [])
         _auto_export(conn, cfg)
         print(f"learn {name}")
         return EXIT_OK
@@ -447,23 +465,27 @@ def _cmd_session_context(args: argparse.Namespace) -> int:
         print(f"記憶服務未啟動（{type(e).__name__}）：cd ~/.claude/memory-pg && docker compose up -d", file=sys.stderr)
         return EXIT_OK
     try:
-        text, pk, n = session_context.render(conn, cfg, getattr(args, "cwd", None) or _os.getcwd(),
-                                             slug=getattr(args, "slug", None))
+        # 整段（render + 遙測）都不可讓 hook 非 0：schema 未遷移、連線中斷等都要降級成 exit 0。
+        text, pk, pinned = session_context.render(conn, cfg, getattr(args, "cwd", None) or _os.getcwd(),
+                                                  slug=getattr(args, "slug", None))
         if text:
             sys.stdout.write(text)
-            # inject 遙測（含 pinned ids）
             try:
                 with conn.cursor() as cur:
                     cur.execute("SELECT id FROM projects WHERE slug=%s", (pk,))
                     r = cur.fetchone()
+                    # 只記【本 session 實際注入】的 pinned（沿用 render 的可見性），不是全部 pinned
                     cur.execute(
                         "INSERT INTO memory_access_log(event, project_id, cwd, n, memory_ids) "
-                        "VALUES ('inject',%s,%s,%s,(SELECT coalesce(array_agg(id),'{}') FROM memories "
-                        " WHERE pinned AND status='active'))",
-                        (r[0] if r else None, _os.getcwd(), n))
+                        "VALUES ('inject',%s,%s,%s,"
+                        "(SELECT coalesce(array_agg(id),'{}') FROM memories WHERE name = ANY(%s)))",
+                        (r[0] if r else None, _os.getcwd(), len(pinned), pinned))
                 conn.commit()
             except psycopg.Error:
                 conn.rollback()
+        return EXIT_OK
+    except Exception as e:  # noqa: BLE001  hook 不可被擋
+        print(f"記憶注入略過（{type(e).__name__}）", file=sys.stderr)
         return EXIT_OK
     finally:
         conn.close()

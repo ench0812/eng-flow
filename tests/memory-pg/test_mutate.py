@@ -89,6 +89,37 @@ def test_learn_dup_refused(conn, home: Path):
         assert cur.fetchone()[0] == 2
 
 
+def test_learn_confirms_validates(conn, home: Path):
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="base-fact", scope="global", description="基礎 aaa bbb", body="\nx\n")
+    conn.commit()
+    # --confirms 指向不存在 → 拋錯，不靜默新增
+    with pytest.raises(mutate.MutateError):
+        mutate.learn(conn, _cfg(), supersedes=[], confirms=["no-such"], force=True,
+                     name="c1", scope="global", description="全新 ccc ddd", body="\ny\n")
+    conn.rollback()
+    # 重複 --confirms 只加一次 evidence
+    mutate.learn(conn, _cfg(), supersedes=[], confirms=["base-fact", "base-fact"], force=True,
+                 name="c2", scope="global", description="全新 eee fff", body="\nz\n")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT evidence_count FROM memories WHERE name='base-fact'")
+        assert cur.fetchone()[0] == 2   # 起始 1 + 一次（去重）
+
+
+def test_verify_rejects_negative_and_nonactive(conn, home: Path):
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="vf", scope="global", description="d", body="\nx\n", review_by="2026-09-01")
+    conn.commit()
+    with pytest.raises(mutate.MutateError):
+        mutate.verify(conn, _cfg(), "vf", method=None, extend_days=-5)
+    conn.rollback()
+    mutate.forget(conn, _cfg(), "vf", reason="停用")
+    conn.commit()
+    with pytest.raises(mutate.MutateError):
+        mutate.verify(conn, _cfg(), "vf", method=None, extend_days=90)
+
+
 def test_forget_and_verify(conn, home: Path):
     _seed_projects(conn, home)
     mutate.write(conn, _cfg(), name="temp-fact", scope="global", description="暫時", body="\nx\n",
