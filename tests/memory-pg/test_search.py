@@ -102,6 +102,15 @@ def test_scope_isolation(conn, home: Path):
     assert any(n.startswith("pgs-") for n in res.hits and [h.name for h in res.hits])
 
 
+def test_explicit_scope_project_key(conn, home: Path):
+    # R1 回歸：--scope <project_key> 的 SQL 不能 reference 未 join 的 p.slug
+    _seed(conn, home)
+    res = S.search(conn, config.load(use_test_db=True), "部署", cwd=None,
+                   mode="fts", scope="D--Projects-IntelliPark")
+    names = [h.name for h in res.hits]
+    assert names and all(not n.startswith("nav-") for n in names)   # 只該有 IntelliPark + global
+
+
 def test_global_always_visible(conn, home: Path):
     _seed(conn, home)
     # 在 car-navigator 下也查得到 global 的 gh-auth

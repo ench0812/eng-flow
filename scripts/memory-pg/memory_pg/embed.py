@@ -102,7 +102,8 @@ def embed_query(cfg: Config, text: str, *, timeout: float = 3.0) -> list[float]:
 
 
 def make_query_embedder(model: str, qprefix: str, timeout: float = 3.0):
-    """回傳一個 (cfg, text)->vec 的閉包，避免 search 每次都連 DB 讀設定。"""
+    """回傳 (cfg, raw_query)->vec 的閉包。prefix 在【這裡】加一次——search 傳原始 query，
+    不得自己再加 prefix（否則變成 'query: query: ...' 降低品質）。"""
     def _fn(cfg: Config, text: str) -> list[float]:
         embs = _post(cfg.ollama_url, model, [(qprefix or "") + text], timeout)
         v = embs[0]

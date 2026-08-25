@@ -120,11 +120,14 @@ def _embedding_config(conn: psycopg.Connection):
         return cur.fetchone()
 
 
-def _rows_have_embeddings(conn: psycopg.Connection, model: str) -> tuple[int, int]:
+def _rows_have_embeddings(conn: psycopg.Connection, model: str) -> tuple[int, int, int]:
+    """回傳 (本模型已嵌入數, 他模型數, 本模型缺嵌入數)。"""
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FILTER (WHERE embedding IS NOT NULL AND embedding_model=%s), "
-                    "count(*) FILTER (WHERE embedding_model IS NOT NULL AND embedding_model<>%s) "
-                    "FROM memories WHERE status='active'", (model, model))
+        cur.execute("SELECT "
+                    "count(*) FILTER (WHERE embedding IS NOT NULL AND embedding_model=%s), "
+                    "count(*) FILTER (WHERE embedding_model IS NOT NULL AND embedding_model<>%s), "
+                    "count(*) FILTER (WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM %s) "
+                    "FROM memories WHERE status='active'", (model, model, model))
         return cur.fetchone()
 
 
@@ -170,7 +173,7 @@ def search(
             degraded = "no_embedding_config" if not cfgrow else "no_embedder"
         else:
             model, dim, qprefix, tau = cfgrow
-            n_ok, n_mismatch = _rows_have_embeddings(conn, model)
+            n_ok, n_mismatch, n_missing = _rows_have_embeddings(conn, model)
             if n_mismatch:
                 # 混模型的向量距離是垃圾，比查無更糟 → fail-closed（除非明示降級）
                 if not degrade_ok:
@@ -178,13 +181,18 @@ def search(
                 degraded = "embed_model_mismatch"
             else:
                 try:
-                    qv = embed_fn(cfg, (qprefix or "") + query)
+                    # prefix 由 embed_fn 內部負責，這裡只傳原始 query（避免重複加 prefix）
+                    qv = embed_fn(cfg, query)
                 except Exception as e:  # noqa: BLE001
                     if not degrade_ok:
                         raise RetrievalUnavailable(f"embedding 查詢失敗: {e}") from e
                     degraded = f"embed_failed:{type(e).__name__}"
                 if n_ok == 0 and qv is not None:
                     warnings.append("沒有任何列有此模型的 embedding，向量路無效果")
+                elif n_missing and qv is not None:
+                    # 有列缺 embedding（embed 失敗留 NULL）：向量路會略過它們，可能對只能靠語意
+                    # 命中的查詢造成假陰性。明確警示（plan A5：只警示不 fail），提示補算。
+                    warnings.append(f"{n_missing} 列缺 embedding，向量路略過（memory embed --pending 補算）")
 
     use_vec = qv is not None
     eff_mode = "hybrid" if use_vec else "fts"
@@ -283,7 +291,9 @@ def _scope_filter(scope: str | None, pk: str | None) -> tuple[str, dict]:
     if scope == "global":
         return "m.scope = 'global'", {}
     if scope and scope not in ("all", "global"):    # 指定某 project_key
-        return "(m.scope = 'global' OR p.slug = %(pk)s)", {"pk": scope}
+        # vis CTE 只有 memories m，沒有 join projects——用子查詢比對，不能寫 p.slug
+        return ("(m.scope = 'global' OR m.home_project_id = (SELECT id FROM projects WHERE slug = %(pk)s))",
+                {"pk": scope})
     # 預設：目前專案 + 全域
     if pk:
         return "(m.scope = 'global' OR m.home_project_id = (SELECT id FROM projects WHERE slug = %(pk)s))", {"pk": pk}

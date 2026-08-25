@@ -197,22 +197,16 @@ def _cmd_embed(args: argparse.Namespace) -> int:
         if not row and not args.set_model:
             print("WARN -: config_missing 尚未設定 embedding 模型，用 --set-model <name> --dim <n>", file=sys.stderr)
             return 2
-        if args.set_model:
+        switching = bool(args.set_model)
+        if switching:
             model, dim, dprefix = args.set_model, args.dim, (args.doc_prefix or "")
-            with db.top_level_transaction(conn):
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM embedding_config")
-                    cur.execute(
-                        "INSERT INTO embedding_config(model,dim,query_prefix,doc_prefix,tau) VALUES (%s,%s,%s,%s,%s)",
-                        (model, dim, args.query_prefix or "", dprefix, args.tau),
-                    )
         else:
             model, dim, dprefix = row
 
         if args.smoke:
             return _embed_smoke(conn, cfg, model, dim)
 
-        # 選要算的列：--all 全部；否則只算 pending（無 embedding 或 hash/model 不符）
+        # 選要算的列。切換模型（--set-model）等同 --all：新模型的所有 active 都要重算。
         with conn.cursor() as cur:
             cur.execute("SELECT name, description, body, embedding_src_hash, embedding_model FROM memories WHERE status='active'")
             rows = cur.fetchall()
@@ -220,18 +214,31 @@ def _cmd_embed(args: argparse.Namespace) -> int:
         for name, desc, body, old_hash, old_model in rows:
             text = embedmod.build_embed_text(name, desc, body, doc_prefix=dprefix)
             h = embedmod.src_hash(text)
-            if args.all or old_hash != h or old_model != model:
+            if args.all or switching or old_hash != h or old_model != model:
                 todo.append((name, text, h))
-        if not todo:
-            print("embed: 無待算項")
-            return EXIT_OK
-        vecs = embedmod.embed_texts(cfg, model, [t for _, t, _ in todo], timeout=120.0)
-        ok = fail = 0
+
+        vecs = embedmod.embed_texts(cfg, model, [t for _, t, _ in todo], timeout=120.0) if todo else []
+        fail = sum(1 for v in vecs if v is None)
+
+        # 原子性（R2/收斂問句）：切換模型時，若不是全部成功就【不切換設定】——
+        # 舊模型的向量必須維持可搜尋，直到新模型的所有 active 都寫入。避免「設定已換、
+        # 文件仍是舊模型」讓 search 因模型不一致 fail-closed。
+        if switching and fail and not args.force:
+            print(f"WARN -: embed_incomplete 切換 {model} 失敗 {fail}/{len(todo)} 列，維持舊設定不切換。"
+                  f"排除 ollama 問題後重跑，或 --force 強制切換（會有列缺 embedding）", file=sys.stderr)
+            return 1
+
         with db.top_level_transaction(conn):
             with conn.cursor() as cur:
+                if switching:
+                    cur.execute("DELETE FROM embedding_config")
+                    cur.execute(
+                        "INSERT INTO embedding_config(model,dim,query_prefix,doc_prefix,tau) VALUES (%s,%s,%s,%s,%s)",
+                        (model, dim, args.query_prefix or "", dprefix, args.tau),
+                    )
+                ok = 0
                 for (name, _t, h), v in zip(todo, vecs):
                     if v is None:
-                        fail += 1
                         print(f"WARN -: embed_failed {name}（ollama 回非有限值，留 NULL）", file=sys.stderr)
                         continue
                     cur.execute(
@@ -327,6 +334,180 @@ def _cmd_export(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _read_input(args) -> str:
+    if getattr(args, "file", None):
+        return Path(args.file).read_text(encoding="utf-8")
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    return ""
+
+
+def _auto_export(conn, cfg) -> None:
+    """mutating 子命令後自動 export（產 md，不 commit）。export 失敗只警示，不回滾 DB。"""
+    from . import exporter
+    try:
+        exporter.run(conn, cfg, verify_dir=None)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN -: export_after_write 匯出失敗（DB 已更新，稍後手動 memory export）: {e}", file=sys.stderr)
+
+
+def _cmd_write(args: argparse.Namespace) -> int:
+    from . import mutate
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        name, desc, body = mutate._parse_input(args.name, _read_input(args))
+        desc = args.description or desc
+        with db.top_level_transaction(conn):
+            mutate.write(conn, cfg, name=name, scope=args.scope, description=desc, body=body,
+                         kind=args.kind, pin=args.pin, review_by=args.review_by,
+                         project_slug=args.project, tags=args.tag or [])
+        _auto_export(conn, cfg)
+        print(f"write {name}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_edit(args: argparse.Namespace) -> int:
+    from . import mutate
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        _, desc, body = mutate._parse_input(args.name, _read_input(args)) if (args.file or not sys.stdin.isatty()) else (None, None, None)
+        with db.top_level_transaction(conn):
+            mutate.edit(conn, cfg, args.name, description=(args.description or desc), body=body, reason=args.reason)
+        _auto_export(conn, cfg)
+        print(f"edit {args.name}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_learn(args: argparse.Namespace) -> int:
+    from . import mutate
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        name, desc, body = mutate._parse_input(args.name, _read_input(args))
+        desc = args.description or desc
+        with db.top_level_transaction(conn):
+            mutate.learn(conn, cfg, supersedes=args.supersedes or [], confirms=args.confirms or [],
+                         force=args.force, name=name, scope=args.scope, description=desc, body=body,
+                         kind=args.kind, pin=args.pin, review_by=args.review_by,
+                         project_slug=args.project, tags=args.tag or [])
+        _auto_export(conn, cfg)
+        print(f"learn {name}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_forget(args: argparse.Namespace) -> int:
+    from . import mutate
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        with db.top_level_transaction(conn):
+            mutate.forget(conn, cfg, args.name, reason=args.reason, status=args.status)
+        _auto_export(conn, cfg)
+        print(f"forget {args.name} → {args.status}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    from . import mutate
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        with db.top_level_transaction(conn):
+            mutate.verify(conn, cfg, args.name, method=args.method, extend_days=args.extend_days)
+        _auto_export(conn, cfg)
+        print(f"verify {args.name}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_session_context(args: argparse.Namespace) -> int:
+    import os as _os
+    from . import session_context
+    cfg = config.load(use_test_db=args.test_db)
+    try:
+        conn = db.connect(cfg)
+    except Exception as e:  # noqa: BLE001  hook 不可被擋：PG 不在就印一行提示、exit 0
+        print(f"記憶服務未啟動（{type(e).__name__}）：cd ~/.claude/memory-pg && docker compose up -d", file=sys.stderr)
+        return EXIT_OK
+    try:
+        text, pk, n = session_context.render(conn, cfg, _os.getcwd())
+        if text:
+            sys.stdout.write(text)
+            # inject 遙測（含 pinned ids）
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM projects WHERE slug=%s", (pk,))
+                    r = cur.fetchone()
+                    cur.execute(
+                        "INSERT INTO memory_access_log(event, project_id, cwd, n, memory_ids) "
+                        "VALUES ('inject',%s,%s,%s,(SELECT coalesce(array_agg(id),'{}') FROM memories "
+                        " WHERE pinned AND status='active'))",
+                        (r[0] if r else None, _os.getcwd(), n))
+                conn.commit()
+            except psycopg.Error:
+                conn.rollback()
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_log(args: argparse.Namespace) -> int:
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        if args.import_tsv:
+            path = Path(args.import_tsv)
+            if not path.is_file():
+                print(f"WARN -: usage 找不到 {path}", file=sys.stderr); return 2
+            n = 0
+            with db.top_level_transaction(conn), conn.cursor() as cur:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) < 5:
+                        continue
+                    ts, event, cwd, keyword, ncol = parts[:5]
+                    ids = parts[5] if len(parts) > 5 else ""
+                    names = [x for x in ids.split(",") if x]
+                    cur.execute(
+                        "INSERT INTO memory_access_log(ts, event, cwd, keyword, n, memory_ids) "
+                        "VALUES (%s, %s, %s, %s, %s, "
+                        "(SELECT coalesce(array_agg(id),'{}') FROM memories WHERE name = ANY(%s)))",
+                        (ts, event if event in ("search", "inject") else "search", cwd, keyword or None,
+                         int(ncol) if ncol.isdigit() else 0, names))
+                    n += 1
+            print(f"log import-tsv rows={n}")
+            return EXIT_OK
+        with conn.cursor() as cur:
+            since = f"WHERE ts >= %s" if args.since else ""
+            cur.execute(f"SELECT event, count(*), sum(CASE WHEN n=0 THEN 1 ELSE 0 END) "
+                        f"FROM memory_access_log {since} GROUP BY event ORDER BY event",
+                        ((args.since,) if args.since else ()))
+            for event, c, zero in cur.fetchall():
+                print(f"{event}\t{c}\tzero_hits={zero or 0}")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
 def _cmd_project(args: argparse.Namespace) -> int:
     cfg = config.load(use_test_db=args.test_db)
     conn = db.connect(cfg)
@@ -410,6 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("--query-prefix", default="")
     em.add_argument("--doc-prefix", default="")
     em.add_argument("--tau", type=float, default=0.5)
+    em.add_argument("--force", action="store_true", help="切換模型時即使有列失敗也強制切換")
     em.set_defaults(fn=_cmd_embed)
 
     i = sub.add_parser("import", help="把 Markdown bank 匯入 PG（單一交易；來源有誤整批不寫）")
@@ -421,6 +603,55 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--verify", action="store_true", help="寫到 cache/memory-export-verify 並與 bank 比對，不碰 bank")
     e.add_argument("--canonical", action="store_true", help="frontmatter 全部改用 canonical 順序（不用原樣回寫）")
     e.set_defaults(fn=_cmd_export)
+
+    def _common_write(sp):
+        sp.add_argument("--name")
+        sp.add_argument("--description")
+        sp.add_argument("--scope", default="project", choices=["global", "project"])
+        sp.add_argument("--project", help="project scope 的 slug（省略則需在已登錄專案的 cwd）")
+        sp.add_argument("--kind", choices=["semantic", "episodic", "procedural", "decision", "environment"])
+        sp.add_argument("--pin", action="store_true")
+        sp.add_argument("--review-by")
+        sp.add_argument("--tag", action="append", help="標記 global 記憶與哪些專案相關（可多次）")
+        sp.add_argument("--file", help="讀 md 檔（完整 frontmatter 或純 body）；省略則讀 stdin")
+
+    w = sub.add_parser("write", help="新增記憶")
+    _common_write(w)
+    w.set_defaults(fn=_cmd_write)
+
+    ed = sub.add_parser("edit", help="改記憶內容（舊版進 revisions）")
+    ed.add_argument("name")
+    ed.add_argument("--description")
+    ed.add_argument("--file")
+    ed.add_argument("--reason", required=True)
+    ed.set_defaults(fn=_cmd_edit)
+
+    ln = sub.add_parser("learn", help="新增記憶 + 治理（supersedes/confirms/dup 偵測）")
+    _common_write(ln)
+    ln.add_argument("--supersedes", action="append", help="取代的舊記憶 id（可多次）")
+    ln.add_argument("--confirms", action="append", help="確認的既有記憶 id，evidence_count+1（可多次）")
+    ln.add_argument("--force", action="store_true", help="即使疑似重複也新增")
+    ln.set_defaults(fn=_cmd_learn)
+
+    fg = sub.add_parser("forget", help="標記記憶為 deprecated/invalid（不刪列）")
+    fg.add_argument("name")
+    fg.add_argument("--reason", required=True)
+    fg.add_argument("--status", default="deprecated", choices=["deprecated", "invalid"])
+    fg.set_defaults(fn=_cmd_forget)
+
+    vf = sub.add_parser("verify", help="重新確認：last_verified=今天、順延 review_by")
+    vf.add_argument("name")
+    vf.add_argument("--method")
+    vf.add_argument("--extend-days", type=int, default=90)
+    vf.set_defaults(fn=_cmd_verify)
+
+    sc = sub.add_parser("session-context", help="SessionStart hook 用（PG 不在時印提示、exit 0）")
+    sc.set_defaults(fn=_cmd_session_context)
+
+    lg = sub.add_parser("log", help="讀取/匯入存取遙測")
+    lg.add_argument("--since")
+    lg.add_argument("--import-tsv", help="一次性匯入舊的 memory-usage.tsv")
+    lg.set_defaults(fn=_cmd_log)
 
     pr = sub.add_parser("project", help="專案登錄")
     prs = pr.add_subparsers(dest="action", required=True)

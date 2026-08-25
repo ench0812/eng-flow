@@ -56,6 +56,14 @@ def evaluate(conn: psycopg.Connection, cfg: Config, model: str) -> ModelResult:
     with conn.cursor() as cur:
         cur.execute("SELECT name, description, body FROM memories WHERE status='active'")
         rows = cur.fetchall()
+    if not rows:
+        r.notes.append("記憶庫為空，無法評測")
+        return r
+    present = {n for n, _, _ in rows}
+    missing = [gid for _, gid in GOLDEN if gid not in present]
+    if missing:
+        r.notes.append(f"golden 目標記憶不在庫中，跳過評測: {', '.join(sorted(set(missing)))}")
+        return r
     docs = [(n, embedmod.build_embed_text(n, d, b)) for n, d, b in rows]
 
     t0 = time.monotonic()

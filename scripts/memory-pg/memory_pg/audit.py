@@ -91,6 +91,13 @@ def run(conn: psycopg.Connection, cfg: Config) -> AuditReport:
         )
         for fp, name in cur.fetchall():
             rep.findings.append(Finding("WARN", fp, "relation_mismatch", f"self_supersede {name}"))
+        # 多重取代者：部分唯一索引平時擋住，但手改 DB 仍可能出現，audit 補查
+        cur.execute(
+            """SELECT t.file_path, t.name, count(*) FROM memory_links l JOIN memories t ON t.id=l.target_id
+               WHERE l.kind='supersedes' GROUP BY t.file_path, t.name HAVING count(*) > 1"""
+        )
+        for fp, name, c in cur.fetchall():
+            rep.findings.append(Finding("WARN", fp, "relation_mismatch", f"multiple_superseders {name} x{c}"))
 
         # orphan（SUGGEST）—— 無 inbound link 且非 pin
         cur.execute(
