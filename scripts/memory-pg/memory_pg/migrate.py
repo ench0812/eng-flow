@@ -21,6 +21,20 @@ def _migration_files() -> list[tuple[int, str, str]]:
     return sorted(out)
 
 
+def apply_one(conn: psycopg.Connection, filename: str) -> None:
+    """只套用指定的一支 migration，不記 schema_migrations。
+
+    給測試用：要驗證 migration 對【既有列】的語義，得在隔離的 schema 裡逐支套用並在中間
+    塞 fixture；整批的 apply() 做不到這件事。正式路徑一律走 apply()。
+    """
+    for _v, name, sql in _migration_files():
+        if name == filename:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            return
+    raise FileNotFoundError(f"找不到 migration: {filename}")
+
+
 def status(conn: psycopg.Connection) -> tuple[list[int], list[int]]:
     """回傳 (已套用版本集合, 期望版本集合)，皆排序。用完整集合而非 max()：
     DB 有 {2} 缺 {1} 時 max 會誤報正常，而修復命令也要據此補上缺的那支。"""
