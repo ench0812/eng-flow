@@ -191,3 +191,42 @@ def test_export_refuses_unmanaged_file(conn, home: Path):
     with pytest.raises(exporter.ExportAborted):
         exporter.run(conn, cfg, verify_dir=None)
     assert (g / "stranger.md").exists()          # 沒被刪
+
+
+@pytest.mark.parametrize("desc,expect_title,expect_hook", [
+    # 括號外有分隔符 → 切成「標題 — 提要」
+    ("gh token 缺 scope 會擋下 push——補授權要在一般終端機跑",
+     "gh token 缺 scope 會擋下 push", "補授權要在一般終端機跑"),
+    # 分隔符只出現在**全形**括號內 → 不可切。舊版硬切第 60 字，實測產出 "→ erro" / "r 5）"
+    ("codex 在這台 Windows 上讀不了檔（WindowsApps 版 pwsh + 受限 token → error 5），review 只看得到 diff",
+     "codex 在這台 Windows 上讀不了檔（WindowsApps 版 pwsh + 受限 token → error 5），review 只看得到 diff", None),
+    # **半形**括號同樣要算深度（_OPEN/_CLOSE 兩種都涵蓋，之前零覆蓋）
+    ("build fails on CI (missing env, see run 5), retry does not help and never will ever",
+     "build fails on CI (missing env, see run 5), retry does not help and never will ever", None),
+    # 括號外的「：」先出現 → 從那裡切，括號內的「、」不參與
+    ("三重玫瑰案場的檔案資產：9 樓層、目錄樹（地圖包、專案檔、原始 CAD）",
+     "三重玫瑰案場的檔案資產", "9 樓層、目錄樹（地圖包、專案檔、原始 CAD）"),
+    # 邊界：分隔符落在 index 60（可切）與 61（不可切），這是 _split_at 唯一的 magic number
+    ("x" * 60 + "，tail", "x" * 60, "tail"),
+    ("x" * 61 + "，tail", "x" * 61 + "，tail", None),
+    # 不平衡的右括號不可讓 depth 變負而吃掉後面的分隔符
+    ("abc），def", "abc）", "def"),
+    # 不平衡的左括號 → 整句當標題（找不到安全斷點）
+    ("a（b，c", "a（b，c", None),
+])
+def test_topic_line_split_boundaries(desc, expect_title, expect_hook):
+    line = exporter._topic_line("some-name", desc)
+    head, sep, hook = line.partition(" — ")
+    assert head.startswith("- [") and head.endswith("](some-name.md)")
+    title = head[3:-len("](some-name.md)")]
+    # 斷言用獨立算出的期望值，不是拿實作的輸出反推
+    assert title == expect_title
+    assert (hook if sep else None) == expect_hook
+    if sep:
+        # 真正要釘住的性質：切點不可落在**還沒閉合的**左括號之內（全形與半形都算）。
+        # 不是「標題括號成對」——輸入本身就可能不平衡（如 `abc），def`），那時整句照登才對。
+        assert title.count("（") - title.count("）") <= 0
+        assert title.count("(") - title.count(")") <= 0
+        # 標題 + 分隔符 + 提要要能還原出原句，不可掉字
+        assert desc.startswith(title) and desc.endswith(hook)
+        assert len(desc) - len(title) - len(hook) in (1, 2)   # 單字元或「——」

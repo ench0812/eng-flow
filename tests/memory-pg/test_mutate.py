@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
+import sys
+
 from pathlib import Path
 
 import pytest
 
 from conftest import write_memory  # noqa: E402
 
-from memory_pg import config, exporter, importer, mutate  # noqa: E402
+from memory_pg import cli, config, exporter, importer, mutate  # noqa: E402
 
 
 def _cfg():
@@ -147,3 +150,381 @@ def test_forget_and_verify(conn, home: Path):
         cur.execute("SELECT review_by, last_verified FROM memories WHERE name='check-me'")
         rb, lv = cur.fetchone()
         assert rb > dt.date(2026, 9, 1) and lv == dt.date.today()
+
+
+def test_edit_body_only_keeps_description(conn, home: Path):
+    """純 body 編輯不可把 description 洗成空字串（CHECK 會擋，實測 2026-08-26 全數失敗）。"""
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="keep-desc", scope="global",
+                 description="原始描述——不該被動到", body="\n舊正文。\n", kind="semantic")
+    conn.commit()
+    mutate.edit(conn, _cfg(), "keep-desc", description=None, body="\n新正文。\n", reason="只改正文")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT description, body FROM memories WHERE name='keep-desc'")
+        desc, body = cur.fetchone()
+    assert desc == "原始描述——不該被動到"
+    assert "新正文" in body
+
+
+def test_edit_governance_fields(conn, home: Path):
+    """kind / pin / review_by 要能改；pin 沿用 write 的 importance 慣例。"""
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="gov", scope="global", description="治理欄位",
+                 body="\nb\n", kind="semantic")
+    conn.commit()
+
+    mutate.edit(conn, _cfg(), "gov", description=None, body=None, reason="補分類",
+                kind="environment", pin=True, review_by="2026-11-24")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT kind::text, pinned, review_by::text, importance FROM memories WHERE name='gov'")
+        assert cur.fetchone() == ("environment", True, "2026-11-24", 4)
+
+    # KEEP 哨兵：沒傳的欄位不可被動到；review_by 傳 None 才是清除
+    mutate.edit(conn, _cfg(), "gov", description=None, body=None, reason="只降 pin", pin=False)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT kind::text, pinned, review_by::text, importance FROM memories WHERE name='gov'")
+        assert cur.fetchone() == ("environment", False, "2026-11-24", 3)
+
+    mutate.edit(conn, _cfg(), "gov", description=None, body=None, reason="清除覆核日", review_by=None)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT review_by FROM memories WHERE name='gov'")
+        assert cur.fetchone()[0] is None
+
+
+def test_write_and_edit_sync_wikilinks(conn, home: Path):
+    """連結圖要隨寫入更新——只有 import 會建的話，orphan/dangling 稽核會對著過期的圖判斷。"""
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="target-mem", scope="global", description="被連的",
+                 body="\nb\n", kind="semantic")
+    mutate.write(conn, _cfg(), name="source-mem", scope="global", description="來源",
+                 body="\n見 [[target-mem]]。\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("""SELECT t.name FROM memory_links l JOIN memories s ON s.id=l.source_id
+                       LEFT JOIN memories t ON t.id=l.target_id
+                       WHERE s.name='source-mem' AND l.kind='wikilink'""")
+        assert cur.fetchall() == [("target-mem",)]
+
+    # 移除連結 → 該列要消失（不是只增不減）
+    mutate.edit(conn, _cfg(), "source-mem", description=None, body="\n不再引用任何東西。\n",
+                reason="拿掉引用")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memory_links l JOIN memories s ON s.id=l.source_id "
+                    "WHERE s.name='source-mem' AND l.kind='wikilink'")
+        assert cur.fetchone()[0] == 0
+
+    # 指向不存在的名字 → 留 dangling（target_id NULL），交給 audit 報，不是靜默丟掉
+    mutate.edit(conn, _cfg(), "source-mem", description=None, body="\n見 [[not-a-memory]]。\n",
+                reason="指向不存在")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("""SELECT l.target_name, l.target_id IS NULL FROM memory_links l
+                       JOIN memories s ON s.id=l.source_id WHERE s.name='source-mem'""")
+        assert cur.fetchall() == [("not-a-memory", True)]
+
+
+def test_cli_edit_file_without_frontmatter_keeps_description(conn, home: Path, tmp_path: Path):
+    """走 CLI 的純 body 編輯（--file 給無 frontmatter 的檔）。
+
+    這是實際用法，也是原始缺陷的所在：cli 用 `args.description or desc`，而 _parse_input 對
+    純 body 回傳 description=""——空字串不是 None，於是被當成「要寫入空值」，每次都撞
+    memories_description_check。mutate.edit 那層測不到，要從 CLI 進去才會重現。
+    """
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="cli-edit", scope="global",
+                 description="CLI 描述——保持不變", body="\n舊。\n", kind="semantic")
+    conn.commit()
+    f = tmp_path / "body.md"
+    f.write_text("\n改過的正文，沒有 frontmatter。\n", encoding="utf-8")
+
+    assert cli.main(["edit", "cli-edit", "--file", str(f), "--reason", "只改正文"]) == 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT description, body FROM memories WHERE name='cli-edit'")
+        desc, body = cur.fetchone()
+    assert desc == "CLI 描述——保持不變"
+    assert "改過的正文" in body
+
+
+def _set_embed_cfg(conn, model="test-model"):
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM embedding_config")
+        cur.execute("INSERT INTO embedding_config(model,dim,tau) VALUES (%s,1024,0.35)", (model,))
+    conn.commit()
+    return model
+
+
+def test_cli_meta_only_edit_with_non_tty_stdin_keeps_body(conn, home: Path, monkeypatch):
+    """純治理型 edit（只給 --kind）在非 tty stdin 下不可清空正文。
+
+    這是最容易踩的組合：hook / CI / 管線下 isatty() 為 False，_read_input 讀到空字串，
+    _parse_input 回一個只有換行的 body。實測 2026-08-26 曾讓 44 bytes 的正文變成 1 byte，
+    連 wikilink 列一起刪光，而且完全不報錯。
+    """
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="target-mem", scope="global", description="被連的",
+                 body="\nb\n", kind="semantic")
+    mutate.write(conn, _cfg(), name="meta-edit", scope="global", description="治理型編輯",
+                 body="\n正文要活著，含 [[target-mem]]。\n", kind="semantic")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert sys.stdin.isatty() is False
+
+    assert cli.main(["edit", "meta-edit", "--kind", "decision", "--reason", "只補分類"]) == 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT kind::text, body FROM memories WHERE name='meta-edit'")
+        kind, body = cur.fetchone()
+        cur.execute("SELECT count(*) FROM memory_links l JOIN memories s ON s.id=l.source_id "
+                    "WHERE s.name='meta-edit' AND l.kind='wikilink'")
+        links = cur.fetchone()[0]
+    assert kind == "decision"
+    assert "正文要活著" in body
+    assert links == 1
+
+
+def test_cli_edit_refuses_empty_file(conn, home: Path, tmp_path: Path, monkeypatch):
+    """--file 指向空檔是用法錯（2），不可靜默把記憶清空。"""
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="not-empty", scope="global", description="有內容",
+                 body="\n原本的正文。\n", kind="semantic")
+    conn.commit()
+    empty = tmp_path / "empty.md"
+    empty.write_text("   \n", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    assert cli.main(["edit", "not-empty", "--file", str(empty), "--reason", "手滑"]) == 2
+    with conn.cursor() as cur:
+        cur.execute("SELECT body FROM memories WHERE name='not-empty'")
+        assert "原本的正文" in cur.fetchone()[0]
+
+
+def test_cli_edit_rejects_bad_review_by(conn, home: Path, monkeypatch):
+    """--review-by 格式錯是用法錯（2），不是「無法判定正確性」（1）。"""
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="dated", scope="global", description="有日期",
+                 body="\nb\n", kind="semantic")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["edit", "dated", "--review-by", "2026-13-45", "--reason", "x"]) == 2
+    assert cli.main(["edit", "dated", "--review-by", "2026-02-29", "--reason", "x"]) == 2
+    assert cli.main(["edit", "dated", "--review-by", "2028-02-29", "--reason", "x"]) == 0
+
+
+def test_forward_reference_is_backfilled_on_write(conn, home: Path):
+    """先寫來源（引用尚未存在的目標）、後寫目標時，那一列要被接回來。
+
+    不回填的話 audit 會永久報 dangling_ref 又把目標報成 orphan，兩個都清不掉，
+    正好抵銷「寫入時同步連結圖」想達成的目的。
+    """
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="src-first", scope="global", description="先寫的來源",
+                 body="\n之後才會有 [[tgt-later]]。\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT target_id IS NULL FROM memory_links WHERE target_name='tgt-later'")
+        assert cur.fetchone()[0] is True
+
+    mutate.write(conn, _cfg(), name="tgt-later", scope="global", description="後寫的目標",
+                 body="\nb\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT s.name, l.target_id = t.id FROM memory_links l "
+                    "JOIN memories s ON s.id=l.source_id JOIN memories t ON t.name='tgt-later' "
+                    "WHERE l.target_name='tgt-later' AND l.kind='wikilink'")
+        assert cur.fetchall() == [("src-first", True)]
+
+
+def test_forward_reference_backfill_respects_scope(conn, home: Path):
+    """跨專案不可被回填——那是 trg_link_scope 明文禁止的方向，回填了會 raise。"""
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="a-mem", scope="project", description="A 專案的",
+                 body="\n引用 [[b-only-mem]]。\n", kind="semantic",
+                 project_slug="D--Projects-IntelliPark")
+    conn.commit()
+    mutate.write(conn, _cfg(), name="b-only-mem", scope="project", description="B 專案的",
+                 body="\nb\n", kind="semantic", project_slug="D--Projects-pcpms-car-navigator")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT target_id IS NULL FROM memory_links WHERE target_name='b-only-mem'")
+        assert cur.fetchone()[0] is True
+
+
+def test_auto_embed_clears_stale_vector_on_failure(conn, home: Path, monkeypatch):
+    """ollama 算不出來時要把舊向量清成 NULL。
+
+    留著舊向量的話：DB 是新內容、向量是舊內容，而 embedding_model 仍等於現行模型，
+    search 的檢查（只看 IS NULL 與 model 是否一致）看不出異常，會拿舊內容的語意召回它，
+    且完全不警示——比「缺 embedding」更糟，因為後者至少會印 WARN。
+    """
+    from memory_pg import embed as embedmod
+    model = _set_embed_cfg(conn)
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="vec-mem", scope="global", description="有向量的",
+                 body="\n舊內容。\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("UPDATE memories SET embedding=%s, embedding_model=%s, embedding_dim=1024, "
+                    "embedding_src_hash='oldhash', embedded_at=now() WHERE name='vec-mem'",
+                    (str([0.1] * 1024), model))
+    conn.commit()
+
+    monkeypatch.setattr(embedmod, "embed_texts", lambda *a, **k: [None])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["edit", "vec-mem", "--description", "改過的描述", "--reason", "換內容"]) == 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT embedding IS NULL, embedding_model, embedding_src_hash "
+                    "FROM memories WHERE name='vec-mem'")
+        assert cur.fetchone() == (True, None, None)
+
+
+def test_auto_embed_skips_when_content_unchanged(conn, home: Path, monkeypatch):
+    """內容沒變的治理型編輯不可再打一次 ollama（設計 A5 的重算判定）。"""
+    from memory_pg import embed as embedmod
+    model = _set_embed_cfg(conn)
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="stable-mem", scope="global", description="不變的",
+                 body="\n內容。\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT name, description, body FROM memories WHERE name='stable-mem'")
+        r = cur.fetchone()
+        h = embedmod.src_hash(embedmod.build_embed_text(r[0], r[1], r[2], doc_prefix=""))
+        cur.execute("UPDATE memories SET embedding=%s, embedding_model=%s, embedding_dim=1024, "
+                    "embedding_src_hash=%s, embedded_at=now() WHERE name='stable-mem'",
+                    (str([0.1] * 1024), model, h))
+    conn.commit()
+
+    calls = []
+    monkeypatch.setattr(embedmod, "embed_texts", lambda *a, **k: calls.append(a) or [None])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["edit", "stable-mem", "--pin", "--reason", "只切 pin"]) == 0
+    assert calls == []
+    with conn.cursor() as cur:
+        cur.execute("SELECT pinned, embedding IS NOT NULL FROM memories WHERE name='stable-mem'")
+        assert cur.fetchone() == (True, True)
+
+
+def test_auto_embed_clears_vector_when_embed_raises(conn, home: Path, monkeypatch):
+    """embed_texts **拋例外**（不是回 None）時也必須清掉舊向量。
+
+    embed_texts 只吞 httpx.HTTPError / RetrievalUnavailable，ollama 回非 JSON、結構不符、
+    空陣列取 [0] 這幾種會往外拋。若讓它冒到 _auto_embed 外層，只會印一行 WARN，而內容已改、
+    舊向量還在——就是「過期但看起來健康」那個狀態，search 完全察覺不到。
+    """
+    from memory_pg import embed as embedmod
+    model = _set_embed_cfg(conn)
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="raise-mem", scope="global", description="會拋例外的",
+                 body="\n舊內容。\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("UPDATE memories SET embedding=%s, embedding_model=%s, embedding_dim=1024, "
+                    "embedding_src_hash='oldhash', embedded_at=now() WHERE name='raise-mem'",
+                    (str([0.1] * 1024), model))
+    conn.commit()
+
+    def _boom(*a, **k):
+        raise ValueError("ollama 回了非 JSON")
+
+    monkeypatch.setattr(embedmod, "embed_texts", _boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["edit", "raise-mem", "--description", "改過的", "--reason", "換內容"]) == 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT embedding IS NULL, embedding_model FROM memories WHERE name='raise-mem'")
+        assert cur.fetchone() == (True, None)
+
+
+def test_auto_embed_rejects_dim_mismatch(conn, home: Path, monkeypatch):
+    """回傳維度與設定不符時不可寫入。
+
+    embedding 欄位刻意不帶維度（換模型不必 ALTER），所以混維度寫得進去；代價是 hybrid search
+    一跑 `<=>` 就**整批**失敗，而不是只有那一列壞掉。同名模型改版是最可能的觸發路徑。
+    """
+    from memory_pg import embed as embedmod
+    model = _set_embed_cfg(conn)          # dim=1024
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="dim-mem", scope="global", description="維度不符的",
+                 body="\n內容。\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("UPDATE memories SET embedding=%s, embedding_model=%s, embedding_dim=1024, "
+                    "embedding_src_hash='oldhash', embedded_at=now() WHERE name='dim-mem'",
+                    (str([0.1] * 1024), model))
+    conn.commit()
+
+    monkeypatch.setattr(embedmod, "embed_texts", lambda *a, **k: [[0.2] * 768])   # 768 != 1024
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["edit", "dim-mem", "--description", "改過的", "--reason", "換內容"]) == 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT embedding IS NULL, embedding_dim FROM memories WHERE name='dim-mem'")
+        assert cur.fetchone() == (True, None)
+
+
+def test_set_model_does_not_switch_on_dim_mismatch(conn, home: Path, monkeypatch):
+    """--set-model 遇到維度不符不可切換 embedding_config。
+
+    維度不符與「算不出來」是同一類失敗。若只在寫入迴圈裡才判，設定已經換成新模型、而那些列
+    仍是舊模型的向量 → search 判模型不一致就**整體** fail-closed，比缺 embedding 更糟。
+    原子性契約（非 --force 絕不切換）必須把維度不符也算進去。
+    """
+    from memory_pg import embed as embedmod
+    _set_embed_cfg(conn, "old-model")
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="switch-mem", scope="global", description="要換模型的",
+                 body="\n內容。\n", kind="semantic")
+    conn.commit()
+
+    monkeypatch.setattr(embedmod, "embed_texts", lambda *a, **k: [[0.2] * 768])   # 宣告 1024，回 768
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["embed", "--set-model", "new-model", "--dim", "1024"]) == 1
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT model FROM embedding_config")
+        assert cur.fetchone()[0] == "old-model"       # 設定沒被換掉
+
+
+def test_auto_embed_skips_write_when_content_changed_meanwhile(conn, home: Path, monkeypatch):
+    """讀內容 → 呼叫 ollama → 寫回向量分屬不同交易，期間內容又被改過就不可寫入。
+
+    否則較慢的舊請求最後寫入，會讓新正文配上舊內容的向量；search 不比對 src_hash，
+    完全察覺不到。這裡用「embed_texts 執行期間直接改 DB」把競態變成可重現的。
+    """
+    from memory_pg import embed as embedmod
+    model = _set_embed_cfg(conn)
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="raced-mem", scope="global", description="會被插隊的",
+                 body="\n第一版。\n", kind="semantic")
+    conn.commit()
+
+    import psycopg
+    from memory_pg import config as cfgmod
+
+    def _slow_embed(*a, **k):
+        # 模擬另一個 edit 在 ollama 回來之前先落地（獨立連線，才是真的併行語意）
+        other = psycopg.connect(cfgmod.load(use_test_db=True).dsn, connect_timeout=3)
+        try:
+            with other.cursor() as c:
+                c.execute("UPDATE memories SET body=%s WHERE name='raced-mem'", ("\n第二版（別人改的）。\n",))
+            other.commit()
+        finally:
+            other.close()
+        return [[0.3] * 1024]
+
+    monkeypatch.setattr(embedmod, "embed_texts", _slow_embed)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["edit", "raced-mem", "--description", "本輪的描述", "--reason", "慢請求"]) == 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT body, embedding IS NULL FROM memories WHERE name='raced-mem'")
+        body, no_vec = cur.fetchone()
+    assert "第二版" in body            # 別人的改動還在
+    assert no_vec is True              # 本輪算出的向量對不上現況，沒有寫進去

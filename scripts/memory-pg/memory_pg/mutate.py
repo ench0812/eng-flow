@@ -89,7 +89,73 @@ def write(conn, cfg: Config, *, name: str, scope: str, description: str, body: s
             if not r:
                 raise MutateError(f"--tag 指向未登錄的 project: {slug}")
             cur.execute("INSERT INTO memory_projects(memory_id, project_id) VALUES (%s,%s)", (mid, r[0]))
+        _sync_wikilinks(cur, mid, body)
+        _backfill_inbound(cur, mid, name)
     return name
+
+
+def _backfill_inbound(cur, mid: str, name: str) -> None:
+    """把既有記憶指向這個名字的 dangling wikilink 接回來。
+
+    _sync_wikilinks 只處理「來源這一則」的出向連結，所以先寫 A（正文含 [[B]]）、後寫 B 時，
+    A 那一列永遠停在 target_id=NULL：audit 會永久報 `dangling_ref [[B]] in A`，同時把 B 報成
+    `orphan`（查不到 inbound）。兩個都是假警報而且清不掉——只能跑一次 full import 才會消。
+    importer 沒這個問題是因為它一次重建整張圖；逐則寫入沒有那個性質。
+
+    **不可用 UPDATE**：trg_links_immutable 只放行 target_id 由 NOT NULL 轉 NULL，反向會
+    RAISE EXCEPTION 'links_immutable'。所以是 DELETE 掉舊的 dangling 列再重新 INSERT。
+    解析範圍與 trg_link_scope 一致：global 目標任何人都能連，project 目標只有同專案能連。
+    """
+    cur.execute("SELECT scope::text, home_project_id FROM memories WHERE id=%s", (mid,))
+    scope, pid = cur.fetchone()
+    if scope == "global":
+        cond, extra = "TRUE", []
+    else:
+        cond, extra = "s.scope='project' AND s.home_project_id = %s", [pid]
+    cur.execute(
+        f"""DELETE FROM memory_links l USING memories s
+            WHERE l.source_id = s.id AND l.kind='wikilink' AND l.target_name = %s
+              AND l.target_id IS NULL AND l.source_id <> %s AND {cond}
+            RETURNING l.source_id""",
+        [name, mid] + extra,
+    )
+    for (sid,) in cur.fetchall():
+        cur.execute("INSERT INTO memory_links(source_id, target_name, target_id, kind) "
+                    "VALUES (%s,%s,%s,'wikilink') ON CONFLICT DO NOTHING", (sid, name, mid))
+
+
+
+def _sync_wikilinks(cur, mid: str, body: str) -> None:
+    """把正文的 [[target]] 同步進 memory_links(kind='wikilink')。
+
+    解析規則與 importer 相同：同 bank 優先，非 global 的來源可退回 global bank，跨專案不解析
+    （留 target_id=NULL，由 audit 報 dangling）。write/edit 都要呼叫——不呼叫的話連結圖就只是
+    import 當下的快照，orphan / dangling_ref 稽核會對著過期的圖做判斷（實測 2026-08-26：正文
+    55 個 wikilink，links 表只有 38 列）。
+    """
+    seen, names = set(), []
+    for m in fm.WIKILINK_RE.finditer(body or ""):
+        lid = m.group(1)
+        if fm.LINK_CONTROL_RE.search(lid) or lid in seen:
+            continue
+        seen.add(lid); names.append(lid)
+    cur.execute("SELECT scope, home_project_id, name FROM memories WHERE id=%s", (mid,))
+    scope, pid, self_name = cur.fetchone()
+    cur.execute("DELETE FROM memory_links WHERE source_id=%s AND kind='wikilink'", (mid,))
+    for lid in names:
+        if lid == self_name:
+            continue                      # 自我連結沒有語意，且 CHECK 會擋
+        r = None
+        if scope == "project":
+            cur.execute("SELECT id FROM memories WHERE name=%s AND scope='project' AND home_project_id=%s",
+                        (lid, pid))
+            r = cur.fetchone()
+        if r is None:
+            cur.execute("SELECT id FROM memories WHERE name=%s AND scope='global'", (lid,))
+            r = cur.fetchone()
+        cur.execute("INSERT INTO memory_links(source_id, target_name, target_id, kind) "
+                    "VALUES (%s,%s,%s,'wikilink') ON CONFLICT DO NOTHING",
+                    (mid, lid, r[0] if r else None))
 
 
 def _snapshot(cur, mid, reason):
@@ -107,7 +173,17 @@ def _get_mid(cur, name: str) -> str:
     return r[0]
 
 
-def edit(conn, cfg: Config, name: str, *, description: str | None, body: str | None, reason: str) -> str:
+KEEP = object()   # 「不動這個欄位」的哨兵，與「設成 NULL」區分開
+
+
+def edit(conn, cfg: Config, name: str, *, description: str | None, body: str | None, reason: str,
+         kind=KEEP, pin=KEEP, review_by=KEEP) -> str:
+    """改記憶。description/body 傳 None = 不動；kind/pin/review_by 用 KEEP 哨兵表示不動。
+
+    kind/pin/review_by 是**治理**欄位而非內容：kind 決定匯出索引的分組，pin 決定常駐成本，
+    review_by 決定到期覆核。原本只有 write 時能設，改不了就只能重建記憶（會掉 revisions 與
+    access 歷史），所以 edit 要能改。
+    """
     with conn.cursor() as cur:
         mid = _get_mid(cur, name)
         _snapshot(cur, mid, reason)
@@ -116,8 +192,21 @@ def edit(conn, cfg: Config, name: str, *, description: str | None, body: str | N
             sets.append("description = %s"); vals.append(description)
         if body is not None:
             sets.append("body = %s"); vals.append(body)
+        if kind is not KEEP:
+            sets.append("kind = %s"); vals.append(kind)
+        if review_by is not KEEP:
+            sets.append("review_by = %s"); vals.append(review_by or None)
+        if pin is not KEEP:
+            sets.append("pinned = %s"); vals.append(bool(pin))
+            # 沿用 write() 的慣例（pin 時 importance 4）。只在 importance 仍等於對向的預設值時動，
+            # 所以人工設成 1/2/5 的不會被碰；但 importance=4 分不出是 pin 帶來的還是人工設的，
+            # --unpin 會把那種也降回 3。importance 目前不參與排名，影響僅止於欄位語意。
+            sets.append("importance = CASE WHEN importance = %s THEN %s ELSE importance END")
+            vals.extend([3, 4] if pin else [4, 3])
         vals.append(mid)
         cur.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=%s", vals)
+        if body is not None:
+            _sync_wikilinks(cur, mid, body)
     return name
 
 

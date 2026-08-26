@@ -28,10 +28,28 @@ def test_dsn() -> str:
 
 
 @pytest.fixture
-def conn(test_dsn):
+def conn(test_dsn, monkeypatch, tmp_path):
+    """DB 連線。**同時**把 DSN 與 CLAUDE_HOME 釘在測試側。
+
+    `cli.main()` 走 `config.load(use_test_db=args.test_db)`，測試不帶 --test-db，所以擋住它連上
+    正式記憶庫的只有環境變數。本套已有 CLI 層的 mutating 測試（會 write/edit 並由 _auto_export
+    寫檔），要是有人寫 `def test_x(conn, tmp_path)` 忘了帶 `home`，那次執行就會改到使用者真正的
+    記憶庫並覆寫真實 bank——破壞性操作的目標要在測試層釘死（安全鐵律 5）。
+
+    釘在 `conn` 而不是 autouse：`test_differential_real_memories` 刻意要讀**真實** CLAUDE_HOME
+    的記憶檔跟 awk 對差分，autouse 會把它變成永遠 skip（實測踩過一次）。它不用 conn，正好分得開。
+    需要 bank 目錄的測試照樣帶 `home` fixture，它會再覆寫成自己的目錄，兩者不衝突。
+    """
     import psycopg
 
     from memory_pg import migrate
+
+    h = tmp_path / "conn-claude-home"
+    (h / "memory").mkdir(parents=True, exist_ok=True)
+    (h / "projects").mkdir(exist_ok=True)
+    monkeypatch.setenv("CLAUDE_HOME", str(h))
+    monkeypatch.setenv("MEMORY_PG_DSN", test_dsn)
+    monkeypatch.setenv("MEMORY_PG_TEST_DSN", test_dsn)
 
     try:
         c = psycopg.connect(test_dsn, connect_timeout=3)

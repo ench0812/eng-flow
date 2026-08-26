@@ -94,15 +94,39 @@ def render_memory(row: dict, *, canonical: bool = False) -> str:
     return canonical_frontmatter(row) + body
 
 
+_OPEN, _CLOSE = "（(", "）)"
+
+
+def _split_at(d: str) -> tuple[int, int] | None:
+    """回傳「標題／提要」的斷點索引；找不到安全斷點回 None。
+
+    只認**括號外**的分隔符。舊版是「前 60 字內找分隔符，找不到就硬切第 60 字」，兩條路都會
+    在括號中間斷開，索引行變成 `… → erro` ／ `r 5），review …` 這種讀不懂的東西（實測
+    2026-08-26 的 codex-windowsapps-pwsh-blocked 與 site-rose-assets）。索引是每個 session
+    都會載入的東西，寧可標題長一點，不要產生壞掉的尾巴。
+    """
+    depth = 0
+    for i, ch in enumerate(d):
+        if ch in _OPEN:
+            depth += 1
+        elif ch in _CLOSE:
+            depth = max(0, depth - 1)
+        elif depth == 0 and i > 0 and i <= 60:
+            for sep in ("——", "—", "；", "：", "，"):
+                if d.startswith(sep, i):
+                    return i, len(sep)      # 長度一起回，呼叫端不必再認一次哪個是雙字元
+        if i > 60:
+            break
+    return None
+
+
 def _topic_line(name: str, description: str) -> str:
     d = description.strip()
-    for sep in ("——", "—", "；", "，"):
-        i = d.find(sep)
-        if 0 < i <= 60:
-            return f"- [{d[:i]}]({name}.md) — {d[i + len(sep):].strip()}"
-    if len(d) > 60:
-        return f"- [{d[:60]}]({name}.md) — {d[60:].strip()}"
-    return f"- [{d}]({name}.md)"
+    hit = _split_at(d)
+    if hit is None:
+        return f"- [{d}]({name}.md)"
+    i, sep_len = hit
+    return f"- [{d[:i]}]({name}.md) — {d[i + sep_len:].strip()}"
 
 
 def render_index(pinned: list[dict], topics: list[dict]) -> str:

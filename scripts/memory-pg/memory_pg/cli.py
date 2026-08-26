@@ -11,8 +11,8 @@ from pathlib import Path
 import psycopg
 from psycopg import conninfo
 
-from . import __version__, config, db, migrate
-from .errors import EXIT_OK, EXIT_UNDETERMINED, MemoryError_
+from . import __version__, config, db, frontmatter as fm, migrate
+from .errors import EXIT_OK, EXIT_UNDETERMINED, MemoryError_, UsageError
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -219,6 +219,14 @@ def _cmd_embed(args: argparse.Namespace) -> int:
                 todo.append((name, text, h))
 
         vecs = embedmod.embed_texts(cfg, model, [t for _, t, _ in todo], timeout=120.0) if todo else []
+        # 維度不符與「算不出來」是同一類失敗，必須在下面的原子性檢查【之前】就併進 fail。
+        # 放到寫入迴圈裡才判的話，--set-model 遇到維度不符仍會切換 embedding_config，留下
+        # 「新設定 + 舊模型向量」——search 判模型不一致就整體 fail-closed，比缺 embedding 更糟。
+        for _i, _v in enumerate(vecs):
+            if _v is not None and len(_v) != dim:
+                print(f"WARN -: embed_dim_mismatch {todo[_i][0]} 回 {len(_v)} 維、設定為 {dim} 維，視同算不出來",
+                      file=sys.stderr)
+                vecs[_i] = None
         fail = sum(1 for v in vecs if v is None)
 
         # 原子性（R2/收斂問句）：切換模型時，若不是全部成功就【不切換設定】——
@@ -350,6 +358,118 @@ def _read_input(args) -> str:
     return ""
 
 
+def _review_by_arg(value: str | None):
+    """--review-by 的參數翻譯：未傳 → KEEP（不動）；'none' → None（清除）；其餘要是合法日期。
+
+    不驗的話 `--review-by 2026-13-45` 會一路送到 PG，由 psycopg 的 handler 接成 exit 1
+    「無法判定正確性」——但這是**用法錯**，契約上該是 exit 2。
+    """
+    from . import mutate
+    if value is None:
+        return mutate.KEEP
+    if value.lower() == "none":
+        return None
+    if not fm.date_ok(value):
+        raise UsageError(f"--review-by 不是合法日期（{value}），格式 YYYY-MM-DD", code="bad_date")
+    return value
+
+
+def _auto_embed(conn, cfg, names: list[str]) -> None:
+    """mutating 子命令後同步補算受影響記憶的 embedding（設計 A5：寫入時算）。
+
+    不做的話新寫/改的記憶在有人手動跑 embed 之前完全不進向量路，search 每次都印「缺 embedding」
+    並整體降級成全文單路——最需要被找到的（剛寫下的）反而召回最差。
+    失敗一律不致命：ollama 不在或回非有限值就留 NULL + 警示，由 `memory embed --pending` 補。
+    """
+    from . import embed as embedmod
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT model, dim, doc_prefix FROM embedding_config LIMIT 1")
+            row = cur.fetchone()
+        if not row:
+            return                       # 尚未設定模型，不是這條路徑該解的問題
+        model, dim, dprefix = row
+        todo = []
+        with conn.cursor() as cur:
+            for nm in names:
+                cur.execute("SELECT name, description, body, embedding_src_hash, embedding_model "
+                            "FROM memories WHERE name=%s AND status='active'", (nm,))
+                r = cur.fetchone()
+                if not r:
+                    continue
+                text = embedmod.build_embed_text(r[0], r[1], r[2], doc_prefix=dprefix)
+                h = embedmod.src_hash(text)
+                # 設計 A5 的重算判定。少了它，`edit x --pin` 這種內容沒變的治理型編輯也會打一次
+                # ollama；ollama 卡住時一個 pin 切換要等滿 timeout。
+                if r[3] == h and r[4] == model:
+                    continue
+                todo.append((r[0], text, h))
+        if not todo:
+            return
+        try:
+            # timeout 是【每次 HTTP 嘗試】的上限，不是總時長：embed_texts 整批失敗後會逐筆重試，
+            # 所以單則 write/edit 最壞會阻塞約 2×timeout。互動式 CLI 不該卡到一分鐘。
+            vecs = embedmod.embed_texts(cfg, model, [t for _, t, _ in todo], timeout=15.0)
+        except Exception as e:  # noqa: BLE001
+            # embed_texts 只吞 httpx.HTTPError / RetrievalUnavailable，其餘（ollama 回非 JSON、
+            # 結構不符、空陣列取 [0]）會往外拋。這裡必須降級成「全部算不出來」走下面的清除分支，
+            # 不能讓例外冒到函式外層——那樣只會印一行 WARN，而內容已改、舊向量還留著。
+            print(f"WARN -: embed_after_write 呼叫失敗（{type(e).__name__}: {e}）", file=sys.stderr)
+            vecs = [None] * len(todo)
+        with db.top_level_transaction(conn):
+            with conn.cursor() as cur:
+                # 讀內容 → 呼叫 ollama → 寫回向量分屬不同交易，中間可能有另一個 edit 改過同一則，
+                # 或有人跑了 embed --set-model。舊請求最後寫入的話，新正文會配上舊內容的向量、
+                # 或舊模型的向量重新落地；而 search 只看 IS NULL 與 model，不比對 src_hash，
+                # 兩種都察覺不到。以下用「寫入前重讀 + 條件成立才寫」把這個競態關掉。
+                cur.execute("SELECT model FROM embedding_config LIMIT 1")
+                live = cur.fetchone()
+                model_changed = not live or live[0] != model
+                if model_changed:
+                    print("WARN -: embed_after_write 期間 embedding 模型已變更，本次不寫入"
+                          "（稍後 memory embed --pending 補算）", file=sys.stderr)
+                pairs = [] if model_changed else list(zip(todo, vecs))
+                for (nm, _t, h), v in pairs:
+                    cur.execute("SELECT description, body FROM memories WHERE name=%s AND status='active' "
+                                "FOR UPDATE", (nm,))
+                    live_row = cur.fetchone()
+                    if not live_row:
+                        continue
+                    live_h = embedmod.src_hash(
+                        embedmod.build_embed_text(nm, live_row[0], live_row[1], doc_prefix=dprefix))
+                    if live_h != h:
+                        # 期間又被改過：這一輪的向量已經對不上現況，寫下去反而製造過期向量。
+                        # 那次 edit 自己的 _auto_embed 會處理，這裡什麼都不動。
+                        print(f"WARN -: embed_after_write {nm} 期間內容又被改過，本次不寫入"
+                              f"（稍後 memory embed --pending 補算）", file=sys.stderr)
+                        continue
+                    if v is not None and len(v) != dim:
+                        # 同名模型改版後輸出維度變了會走到這裡。embedding 欄位不帶維度，混維度
+                        # 寫得進去，但 hybrid search 一跑 `<=>` 就整體失敗——當成算不出來處理。
+                        print(f"WARN -: embed_dim_mismatch {nm} 回 {len(v)} 維、設定為 {dim} 維，不寫入",
+                              file=sys.stderr)
+                        v = None
+                    if v is None:
+                        # 算不出來時**必須清掉舊向量**：內容已經改了，舊向量是過期的，而
+                        # embedding_model 仍等於現行模型 → search 的檢查（只看 IS NULL 與 model
+                        # 是否一致）看不出異常，會拿舊內容的語意去召回新記憶，且完全不警示。
+                        # 清成 NULL 就退化成 search 會警示的「缺 embedding」，與 _cmd_embed 切換
+                        # 模型失敗時的處置一致。
+                        cur.execute("UPDATE memories SET embedding=NULL, embedding_model=NULL, "
+                                    "embedding_dim=NULL, embedding_src_hash=NULL, embedded_at=NULL "
+                                    "WHERE name=%s", (nm,))
+                        continue
+                    cur.execute("UPDATE memories SET embedding=%s, embedding_model=%s, embedding_dim=%s, "
+                                "embedding_src_hash=%s, embedded_at=now() WHERE name=%s",
+                                (str(v), model, dim, h, nm))
+        miss = sum(1 for v in vecs if v is None)
+        if miss:
+            print(f"WARN -: embed_after_write {miss}/{len(todo)} 列未算成（已清成缺 embedding，"
+                  f"稍後 memory embed --pending 補算）", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN -: embed_after_write 失敗（DB 已更新，稍後 memory embed --pending）: {e}", file=sys.stderr)
+
+
 def _auto_export(conn, cfg) -> None:
     """mutating 子命令後自動 export（產 md，不 commit）。export 失敗只警示，不回滾 DB。"""
     from . import exporter
@@ -382,6 +502,7 @@ def _cmd_write(args: argparse.Namespace) -> int:
             mutate.write(conn, cfg, name=name, scope=args.scope, description=desc, body=body,
                          kind=args.kind, pin=args.pin, review_by=args.review_by,
                          project_slug=_resolve_project(conn, args), tags=args.tag or [])
+        _auto_embed(conn, cfg, [name])
         _auto_export(conn, cfg)
         print(f"write {name}")
         return EXIT_OK
@@ -395,9 +516,26 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     conn = db.connect(cfg)
     try:
         db.assert_schema(conn)
-        _, desc, body = mutate._parse_input(args.name, _read_input(args)) if (args.file or not sys.stdin.isatty()) else (None, None, None)
+        # 依「有沒有拿到內容」判斷，**不可**依 stdin 是不是 tty：hook / CI / 管線下 isatty() 為 False，
+        # _read_input 讀到空字串，_parse_input 回一個只有換行的 body → 純治理型 edit（只給 --kind）會把正文
+        # 覆寫成一個換行、連 wikilink 列一起刪光，而且不報錯。實測 2026-08-26：
+        #   echo -n '' | memory edit x --kind decision --reason y  → 正文 44 bytes 變 1 byte
+        # （Windows 上 `< /dev/null` 的 isatty() 反而回 True，所以拿 /dev/null 測正好測不到。）
+        raw = _read_input(args)
+        if args.file and not raw.strip():
+            # 明確指定了檔案卻是空的：這幾乎都是弄錯檔名，不是「請把這則記憶清空」。
+            # 破壞性操作在意圖不明時一律 fail-closed（安全鐵律 5）。
+            raise UsageError(f"--file 指向的檔案沒有內容（{args.file}），拒絕執行——這通常是檔名弄錯，而不是真的要把這則記憶清空",
+                             code="empty_input")
+        _, desc, body = mutate._parse_input(args.name, raw) if raw.strip() else (None, None, None)
         with db.top_level_transaction(conn):
-            mutate.edit(conn, cfg, args.name, description=(args.description or desc), body=body, reason=args.reason)
+            # desc 為空字串 = 輸入是純 body（無 frontmatter），代表「不改 description」，不可當成要寫入空值
+            mutate.edit(conn, cfg, args.name, description=(args.description or desc or None), body=body,
+                        reason=args.reason,
+                        kind=(args.kind if args.kind else mutate.KEEP),
+                        pin=(True if args.pin else (False if args.unpin else mutate.KEEP)),
+                        review_by=_review_by_arg(args.review_by))
+        _auto_embed(conn, cfg, [args.name])
         _auto_export(conn, cfg)
         print(f"edit {args.name}")
         return EXIT_OK
@@ -418,6 +556,7 @@ def _cmd_learn(args: argparse.Namespace) -> int:
                          force=args.force, name=name, scope=args.scope, description=desc, body=body,
                          kind=args.kind, pin=args.pin, review_by=args.review_by,
                          project_slug=_resolve_project(conn, args), tags=args.tag or [])
+        _auto_embed(conn, cfg, [name])
         _auto_export(conn, cfg)
         print(f"learn {name}")
         return EXIT_OK
@@ -608,8 +747,13 @@ def build_parser() -> argparse.ArgumentParser:
     ev.set_defaults(fn=_cmd_eval)
 
     em = sub.add_parser("embed", help="用本機 ollama 算 embedding")
-    em.add_argument("--all", action="store_true", help="全部重算（換模型時）")
-    em.add_argument("--smoke", action="store_true", help="全部嵌一次檢查 finite/維度，不寫入")
+    # B5 契約是 embed [--pending|--all|--smoke]，三者互斥。用 group 讓矛盾組合變成 argparse
+    # 的用法錯（exit 2），而不是靜默照某一個走——--pending 本身是預設行為，不加 group 的話
+    # `--all --pending` 會安靜地走 --all。
+    emg = em.add_mutually_exclusive_group()
+    emg.add_argument("--all", action="store_true", help="全部重算（換模型時）")
+    emg.add_argument("--pending", action="store_true", help="只補算缺 embedding 或內容已變的列（預設行為）")
+    emg.add_argument("--smoke", action="store_true", help="全部嵌一次檢查 finite/維度，不寫入")
     em.add_argument("--set-model", help="設定現行 embedding 模型")
     em.add_argument("--dim", type=int, default=1024)
     em.add_argument("--query-prefix", default="")
@@ -643,10 +787,16 @@ def build_parser() -> argparse.ArgumentParser:
     _common_write(w)
     w.set_defaults(fn=_cmd_write)
 
-    ed = sub.add_parser("edit", help="改記憶內容（舊版進 revisions）")
+    ed = sub.add_parser("edit", help="改記憶內容或治理欄位（舊版進 revisions）")
     ed.add_argument("name")
     ed.add_argument("--description")
     ed.add_argument("--file")
+    ed.add_argument("--kind", choices=["semantic", "episodic", "procedural", "decision", "environment"],
+                    help="改分類（決定匯出索引的分組）")
+    g = ed.add_mutually_exclusive_group()
+    g.add_argument("--pin", action="store_true", help="設為常駐")
+    g.add_argument("--unpin", action="store_true", help="取消常駐")
+    ed.add_argument("--review-by", help="改到期覆核日（YYYY-MM-DD；傳 none 清除）")
     ed.add_argument("--reason", required=True)
     ed.set_defaults(fn=_cmd_edit)
 
