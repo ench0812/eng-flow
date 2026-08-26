@@ -344,8 +344,13 @@ def _cmd_export(args: argparse.Namespace) -> int:
         rep = exporter.run(conn, cfg, verify_dir=None, canonical=args.canonical)
         for w in rep.warnings:
             print(f"WARN -: {w}", file=sys.stderr)
-        print(f"export banks={rep.banks} files={rep.written}")
-        return EXIT_OK
+        # 與 _auto_export 用同一個判定，不可一處看回傳值、一處只等 exception。
+        # skipped（not_installed）不算失敗——單 repo 機器是合法安裝。
+        print(f"export banks={rep.banks} files={rep.written}"
+              + (f" skipped={len(rep.skipped_banks)}" if rep.skipped_banks else "")
+              + (f" partial={len(rep.partial_banks)}" if rep.partial_banks else "")
+              + (f" failed={len(rep.failed_banks)}" if rep.failed_banks else ""))
+        return EXIT_OK if rep.ok else EXIT_UNDETERMINED
     finally:
         conn.close()
 
@@ -470,13 +475,26 @@ def _auto_embed(conn, cfg, names: list[str]) -> None:
         print(f"WARN -: embed_after_write 失敗（DB 已更新，稍後 memory embed --pending）: {e}", file=sys.stderr)
 
 
-def _auto_export(conn, cfg) -> None:
-    """mutating 子命令後自動 export（產 md，不 commit）。export 失敗只警示，不回滾 DB。"""
+def _auto_export(conn, cfg) -> bool:
+    """mutating 子命令後自動 export（產 md，不 commit）。回傳是否成功。
+
+    **失敗要讓命令 exit 1**——DB 已更新而 Markdown/repo 尚未同步，回 0 會讓自動化誤以為
+    三個 repo 已一致。失敗有兩種形態，都要接：拋例外、以及正常回傳但 result.ok 為 False
+    （某個 bank partial/failed）。只捕例外會漏掉後者。
+    """
     from . import exporter
     try:
-        exporter.run(conn, cfg, verify_dir=None)
+        result = exporter.run(conn, cfg, verify_dir=None)
     except Exception as e:  # noqa: BLE001
-        print(f"WARN -: export_after_write 匯出失敗（DB 已更新，稍後手動 memory export）: {e}", file=sys.stderr)
+        print(f"WARN -: export_after_write DB 已更新、Markdown/repo 尚未同步（{e}）；"
+              f"排除問題後跑 memory export", file=sys.stderr)
+        return False
+    if not result.ok:
+        print(f"WARN -: export_after_write DB 已更新、Markdown/repo 尚未同步"
+              f"（partial={[str(b) for b in result.partial_banks]} "
+              f"failed={[str(b) for b in result.failed_banks]}）", file=sys.stderr)
+        return False
+    return True
 
 
 def _resolve_project(conn, args) -> str | None:
@@ -503,9 +521,9 @@ def _cmd_write(args: argparse.Namespace) -> int:
                          kind=args.kind, pin=args.pin, review_by=args.review_by,
                          project_slug=_resolve_project(conn, args), tags=args.tag or [])
         _auto_embed(conn, cfg, [name])
-        _auto_export(conn, cfg)
+        ok = _auto_export(conn, cfg)
         print(f"write {name}")
-        return EXIT_OK
+        return EXIT_OK if ok else EXIT_UNDETERMINED
     finally:
         conn.close()
 
@@ -536,9 +554,9 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                         pin=(True if args.pin else (False if args.unpin else mutate.KEEP)),
                         review_by=_review_by_arg(args.review_by))
         _auto_embed(conn, cfg, [args.name])
-        _auto_export(conn, cfg)
+        ok = _auto_export(conn, cfg)
         print(f"edit {args.name}")
-        return EXIT_OK
+        return EXIT_OK if ok else EXIT_UNDETERMINED
     finally:
         conn.close()
 
@@ -557,9 +575,9 @@ def _cmd_learn(args: argparse.Namespace) -> int:
                          kind=args.kind, pin=args.pin, review_by=args.review_by,
                          project_slug=_resolve_project(conn, args), tags=args.tag or [])
         _auto_embed(conn, cfg, [name])
-        _auto_export(conn, cfg)
+        ok = _auto_export(conn, cfg)
         print(f"learn {name}")
-        return EXIT_OK
+        return EXIT_OK if ok else EXIT_UNDETERMINED
     finally:
         conn.close()
 
@@ -572,9 +590,9 @@ def _cmd_forget(args: argparse.Namespace) -> int:
         db.assert_schema(conn)
         with db.top_level_transaction(conn):
             mutate.forget(conn, cfg, args.name, reason=args.reason, status=args.status)
-        _auto_export(conn, cfg)
+        ok = _auto_export(conn, cfg)
         print(f"forget {args.name} → {args.status}")
-        return EXIT_OK
+        return EXIT_OK if ok else EXIT_UNDETERMINED
     finally:
         conn.close()
 
@@ -587,9 +605,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         db.assert_schema(conn)
         with db.top_level_transaction(conn):
             mutate.verify(conn, cfg, args.name, method=args.method, extend_days=args.extend_days)
-        _auto_export(conn, cfg)
+        ok = _auto_export(conn, cfg)
         print(f"verify {args.name}")
-        return EXIT_OK
+        return EXIT_OK if ok else EXIT_UNDETERMINED
     finally:
         conn.close()
 

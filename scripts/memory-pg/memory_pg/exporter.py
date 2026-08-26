@@ -14,6 +14,7 @@ from pathlib import Path
 
 import psycopg
 
+from . import projects as projmod
 from .config import Config
 from .errors import MemoryError_
 
@@ -46,10 +47,24 @@ class ExportReport:
     banks: int = 0
     diffs: list[FileDiff] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # bank 分類。skipped 是 not_installed——單 repo 機器（只 clone 通用 repo）是合法安裝，
+    # 把它算成失敗會讓 export 永遠 exit 1，所以 skipped 不進 ok 的判定。
+    written_banks: list[Path] = field(default_factory=list)
+    skipped_banks: list[Path] = field(default_factory=list)
+    partial_banks: list[Path] = field(default_factory=list)
+    failed_banks: list[Path] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.partial_banks and not self.failed_banks
 
     @property
     def memory_mismatches(self) -> list[FileDiff]:
         return [d for d in self.diffs if d.status in ("differ", "missing_in_bank", "unmanaged")]
+
+
+# 計畫與 codex 討論時用的名字；同一個型別，保留別名避免兩套稱呼。
+ExportResult = ExportReport
 
 
 def canonical_frontmatter(row: dict) -> str:
@@ -129,16 +144,23 @@ def _topic_line(name: str, description: str) -> str:
     return f"- [{d[:i]}]({name}.md) — {d[i + sep_len:].strip()}"
 
 
-def render_index(pinned: list[dict], topics: list[dict]) -> str:
-    out = ["# Memory Index", "", "<!-- PINNED:BEGIN -->"]
-    for r in sorted(pinned, key=lambda r: r["name"].encode()):
-        body = r["body"]
-        if not body.endswith("\n"):
-            body += "\n"
-        out.append(f"<!-- PINNED:ITEM {r['name']} -->")
-        out.append(body.rstrip("\n"))
-    out.append("<!-- PINNED:END -->")
-    out.append("")
+def render_index(pinned: list[dict], topics: list[dict], *, with_pinned: bool = True) -> str:
+    """with_pinned=False 用於 memory-work/MEMORY.md。
+
+    工作庫不產 PINNED 區：沒有任何常駐 include 會載入它（通用 CLAUDE.md 不得相依工作 repo），
+    產了只會讓人誤以為已常駐。要常駐就給 tag，由該專案的 MEMORY.md 載入。
+    """
+    out = ["# Memory Index", ""]
+    if with_pinned:
+        out.append("<!-- PINNED:BEGIN -->")
+        for r in sorted(pinned, key=lambda r: r["name"].encode()):
+            body = r["body"]
+            if not body.endswith(chr(10)):
+                body += chr(10)
+            out.append(f"<!-- PINNED:ITEM {r['name']} -->")
+            out.append(body.rstrip(chr(10)))
+        out.append("<!-- PINNED:END -->")
+        out.append("")
     out.append("<!-- TOPICS:BEGIN -->")
     if not topics:
         out.append("主題：（尚未分類）")
@@ -168,7 +190,8 @@ def _pinned_block(text: str) -> str:
 def _load(conn: psycopg.Connection) -> tuple[list[dict], dict[str, dict]]:
     with conn.cursor() as cur:
         cur.execute(
-            """SELECT m.id, m.name, m.description, m.body, m.file_path, m.scope, m.home_project_id,
+            """SELECT m.id, m.name, m.description, m.body, m.file_path, m.scope::text AS scope,
+                      m.home_project_id,
                       m.kind::text, m.legacy_type, m.status::text, m.pinned, m.review_by, m.origin_session_id,
                       m.node_type, m.frontmatter_raw, m.extra_frontmatter, m.updated_at,
                       p.slug, p.bank_path,
@@ -217,13 +240,40 @@ def run(conn: psycopg.Connection, cfg: Config, *, verify_dir: Path | None, canon
 
     # 分 bank
     by_bank: dict[Path, list[dict]] = {}
+    bank_scope: dict[Path, str] = {}
     for r in rows:
-        bank = Path(r["bank_path"]) if r["bank_path"] else cfg.bank_global
+        # 四路：project 看 projects.bank_path，其餘三個 scope 各有固定的 bank。
+        bank = Path(r["bank_path"]) if r["scope"] == "project" else cfg.bank_for_scope(r["scope"])
         by_bank.setdefault(bank, []).append(r)
+        bank_scope[bank] = r["scope"]
     # 沒有記憶但有 project 列的 bank 也要處理（產生空索引與否交由 scan 的「安靜」原則：不產生）
     all_banks = set(by_bank)
     all_banks.add(cfg.bank_global)
     rep.banks = len(by_bank)
+
+    # preflight：not_installed 的 bank 整個跳過且**不自動 mkdir**——自動重建會讓
+    # 「repo 沒 clone」看起來像「bank 是空的」，接著 import 的 delete-absent 就會把
+    # 那個 scope 的記憶當成「檔案都不見了」而刪掉。
+    skipped: set[Path] = set()
+    if verify_dir is None:
+        for sc in ("global", "machine", "work"):
+            b = cfg.bank_for_scope(sc)
+            st = cfg.bank_presence(sc)
+            if st == "not_installed":
+                skipped.add(b)
+                rep.skipped_banks.append(b)
+            elif st != "installed":
+                rep.failed_banks.append(b)
+                rep.warnings.append(f"bank_{st} {b}")
+    by_bank = {b: rs for b, rs in by_bank.items() if b not in skipped}
+
+    # 被 tag 的專案即使自己沒有記憶，也要產索引——否則 tag 到該專案的 pinned 記憶
+    # （global 或 work）就沒有載入路徑，常駐會靜默落空。
+    for slug in {s for r in rows if r["pinned"] and r["status"] == "active"
+                 and r["scope"] in ("global", "work") for s in (r["tags"] or [])}:
+        proj = next((v for v in projects.values() if v["slug"] == slug), None)
+        if proj and proj["bank_path"]:
+            by_bank.setdefault(Path(proj["bank_path"]), [])
 
     # 未認領檔案檢查（bank 內存在、DB 沒有）— 只對真正的 bank
     for bank, rs in by_bank.items():
@@ -238,23 +288,37 @@ def run(conn: psycopg.Connection, cfg: Config, *, verify_dir: Path | None, canon
         names = ", ".join(str(d.path) for d in rep.diffs if d.status == "unmanaged")
         raise ExportAborted(f"bank 內有未認領的檔案（未經 import）: {names}。先 memory import 認領，或移走它們。")
 
-    # 全域 pinned 且有標籤 → 只進被標的專案索引；無標籤 → 進全域索引
-    global_rows = by_bank.get(cfg.bank_global, [])
-    global_pinned_untagged = [r for r in global_rows if r["pinned"] and r["status"] == "active" and not r["tags"]]
-    global_pinned_tagged: dict[str, list[dict]] = {}
-    for r in global_rows:
-        if r["pinned"] and r["status"] == "active" and r["tags"]:
+    # 有標籤的 pinned → 只進被標的專案索引；無標籤 → 進自己的庫索引（互斥不重複）。
+    # 來源由 global 擴為 (global, work)：site-rose-* 這類案場記憶轉成 work 之後仍要常駐在
+    # 被標的專案，否則 2026-08-26 建立的命中率改善會退步。
+    tagged_pinned: dict[str, list[dict]] = {}
+    untagged_pinned: dict[Path, list[dict]] = {}
+    for r in rows:
+        if not (r["pinned"] and r["status"] == "active" and r["scope"] in ("global", "work")):
+            continue
+        if r["tags"]:
             for slug in r["tags"]:
-                global_pinned_tagged.setdefault(slug, []).append(r)
+                tagged_pinned.setdefault(slug, []).append(r)
+        else:
+            untagged_pinned.setdefault(cfg.bank_for_scope(r["scope"]), []).append(r)
 
     for bank, rs in by_bank.items():
         root = target_root(bank)
         root.mkdir(parents=True, exist_ok=True)
+        bank_written = 0
+        bank_failed: list[str] = []
         for r in rs:
             data = render_memory(r, canonical=canonical).encode("utf-8", errors="surrogateescape")
             out = root / f"{r['name']}.md"
             if verify_dir is None:
-                _atomic_write(out, data)
+                try:
+                    _atomic_write(out, data)
+                except OSError as e:
+                    # 現行的原子性是【逐檔 rename】，不是整個 bank 同時切換：中途失敗會留下
+                    # 部分更新的 bank，所以要能回報 partial，不可宣稱整 bank 原子。
+                    bank_failed.append(f"{out}: {e}")
+                    continue
+                bank_written += 1
             else:
                 out.write_bytes(data)
                 actual = bank / f"{r['name']}.md"
@@ -263,15 +327,25 @@ def run(conn: psycopg.Connection, cfg: Config, *, verify_dir: Path | None, canon
                 else:
                     rep.diffs.append(FileDiff(actual, "same" if actual.read_bytes() == data else "differ"))
             rep.written += 1
+        if verify_dir is None:
+            if bank_failed and bank_written:
+                rep.partial_banks.append(bank)
+                rep.warnings.append(f"bank_partial {bank}: {len(bank_failed)} 個檔寫入失敗")
+            elif bank_failed:
+                rep.failed_banks.append(bank)
+                rep.warnings.append(f"bank_failed {bank}: {bank_failed[0]}")
+            else:
+                rep.written_banks.append(bank)
         # index
-        slug = rs[0]["slug"] if rs and rs[0]["slug"] else None
+        slug = rs[0]["slug"] if rs and rs[0]["slug"] else projmod.slug_from_bank(bank)
         pinned = [r for r in rs if r["pinned"] and r["status"] == "active"]
         if slug:
-            pinned = pinned + global_pinned_tagged.get(slug, [])
-        elif bank == cfg.bank_global:
-            pinned = global_pinned_untagged
+            pinned = pinned + tagged_pinned.get(slug, [])
+        elif bank in untagged_pinned or bank_scope.get(bank) in ("global", "work"):
+            pinned = untagged_pinned.get(bank, [])
         topics = [r for r in rs if r["status"] == "active" and not r["pinned"]]
-        idx = render_index(pinned, topics)
+        # 工作庫不產 PINNED 區（沒有常駐載入路徑，見 render_index 的說明）
+        idx = render_index(pinned, topics, with_pinned=bank != cfg.bank_work)
         blk = _pinned_block(idx)
         if len(blk.splitlines()) > INDEX_BUDGET_LINES or len(blk.encode()) > INDEX_BUDGET_BYTES:
             rep.warnings.append(f"index_over_budget {bank}: PINNED 區 {len(blk.splitlines())} 行 / {len(blk.encode())} bytes")

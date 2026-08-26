@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
+import shutil
+import sys
+
 from pathlib import Path
 
 import pytest
 
-from conftest import write_memory  # noqa: E402
+from conftest import seed_banks, write_memory  # noqa: E402
 
 from memory_pg import config, exporter, importer  # noqa: E402
 
@@ -260,3 +264,96 @@ def test_import_forbidden_direction_stays_dangling_not_abort(conn, home: Path):
         assert cur.fetchone()[0] == 1                       # 有落地，沒 abort
         cur.execute("SELECT target_id IS NULL FROM memory_links WHERE target_name='m-target'")
         assert cur.fetchone()[0] is True                    # 但那條是 dangling
+
+
+# ---------- Task 4：匯出面四路由 + ExportResult ----------
+
+def test_export_routes_by_scope(conn, home: Path):
+    from memory_pg import mutate
+    seed_banks(home)
+    for scope in ("global", "machine", "work"):
+        mutate.write(conn, _cfg(), name=f"e-{scope}", scope=scope, description=f"{scope}",
+                     body="\nb\n", kind="semantic")
+    conn.commit()
+    exporter.run(conn, _cfg(), verify_dir=None)
+    assert (home / "memory" / "e-global.md").exists()
+    assert (home / "memory-machine" / "e-machine.md").exists()
+    assert (home / "memory-work" / "e-work.md").exists()
+    assert (home / "memory-machine" / "MEMORY.md").exists()
+    assert (home / "memory-work" / "MEMORY.md").exists()
+
+
+def test_work_index_has_no_pinned_section(conn, home: Path):
+    """memory-work/MEMORY.md 不產 PINNED——沒有任何常駐 include 會載入它，
+    產了只會讓人誤以為已常駐。"""
+    from memory_pg import mutate
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="w-pin", scope="work", description="工作的",
+                 body="\nb\n", kind="semantic", pin=True)
+    conn.commit()
+    exporter.run(conn, _cfg(), verify_dir=None)
+    text = (home / "memory-work" / "MEMORY.md").read_text(encoding="utf-8")
+    assert "PINNED:BEGIN" not in text
+    assert "TOPICS:BEGIN" in text
+
+
+def test_project_index_includes_work_tagged(conn, home: Path):
+    """work + pinned + tagged 要出現在該專案的 PINNED——site-rose-* 轉 work 後仍要常駐。"""
+    from memory_pg import mutate
+    seed_banks(home)
+    (home / "projects" / "D--Projects-A" / "memory").mkdir(parents=True, exist_ok=True)
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    mutate.write(conn, _cfg(), name="w-tagged", scope="work", description="案場的",
+                 body="\nb\n", kind="environment", pin=True, tags=["D--Projects-A"])
+    conn.commit()
+    exporter.run(conn, _cfg(), verify_dir=None)
+    idx = (home / "projects" / "D--Projects-A" / "memory" / "MEMORY.md")
+    assert "PINNED:ITEM w-tagged" in idx.read_text(encoding="utf-8")
+
+
+def test_export_skipped_bank_is_not_failure(conn, home: Path, monkeypatch):
+    """not_installed 是合法狀態（單 repo 機器只 clone 通用 repo），export 應 exit 0。"""
+    from memory_pg import cli
+    shutil.rmtree(home / "memory-work", ignore_errors=True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["export"]) == 0
+
+
+def test_export_partial_failure_exits_1(conn, home: Path, monkeypatch):
+    """一個 bank 中途寫入失敗 → partial，整體 exit 1。"""
+    from memory_pg import cli, mutate
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="p-a", scope="machine", description="本機A", body="\nb\n")
+    mutate.write(conn, _cfg(), name="p-b", scope="machine", description="本機B", body="\nb\n")
+    conn.commit()
+    real = exporter._atomic_write
+    def boom(path, data):
+        if path.name == "p-b.md":
+            raise OSError("模擬不可寫")
+        return real(path, data)
+    monkeypatch.setattr(exporter, "_atomic_write", boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["export"]) == 1
+
+
+def test_auto_export_failure_exits_1(conn, home: Path, tmp_path, monkeypatch, capsys):
+    """run() 回傳失敗分類時 write 也必須 exit 1——不是只有拋例外才算失敗。
+
+    用真實輸入檔而不是 /dev/null：Windows 上 /dev/null 可能在 exporter 之前就失敗，
+    那樣測試會因為別的原因通過，根本沒觸及目標分支。
+    """
+    from memory_pg import cli
+    seed_banks(home)
+    f = tmp_path / "b.md"
+    f.write_text("\n內容。\n", encoding="utf-8")
+    rep = exporter.ExportReport()
+    rep.failed_banks.append(Path("x"))
+    monkeypatch.setattr(exporter, "run", lambda *a, **k: rep)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["write", "--name", "ae", "--scope", "global",
+                     "--description", "描述", "--file", str(f)]) == 1
+    assert "export_after_write" in capsys.readouterr().err
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='ae'")
+        assert cur.fetchone()[0] == 1        # DB 已更新，只是 md 沒同步
