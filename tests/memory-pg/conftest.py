@@ -62,10 +62,26 @@ def conn(test_dsn, monkeypatch, tmp_path):
             "memory_projects, memories, projects, embedding_config RESTART IDENTITY CASCADE"
         )
     c.commit()
-    yield c
-    if not c.closed:          # 有測試會刻意 close 來驗證跨連線持久化
-        c.rollback()
-        c.close()
+    real_home = Path.home() / ".claude"
+    try:
+        yield c
+    finally:
+        # 連線一定要先關——teardown 裡先拋錯會讓連線洩漏，累積到 PG 連線數上限後
+        # 整個測試套件會卡在下一次 connect（實測踩過）。
+        if not c.closed:          # 有測試會刻意 close 來驗證跨連線持久化
+            c.rollback()
+            c.close()
+        # 不變量：測試結束時 CLAUDE_HOME 不可以指回【真實的】記憶庫。
+        # 實測 2026-08-26：`monkeypatch.undo()` 會撤銷該測試的所有 monkeypatch，包含
+        # fixture 釘的 CLAUDE_HOME，於是測試後半寫進真實的 ~/.claude/memory-work——
+        # 而且還「通過」，因為它在真實 home 裡找到了那個檔案。假通過比失敗更糟。
+        # 這裡只驗「不是真實 home」，不驗「等於某個特定值」：home fixture 會在 conn 之後
+        # 再覆寫一次，兩者都是合法的測試用目錄。
+        actual = os.environ.get("CLAUDE_HOME")
+        if actual and Path(actual).resolve() == real_home.resolve():
+            raise AssertionError(
+                "CLAUDE_HOME 在測試中被改回真實的 ~/.claude——這條路徑會寫到真實記憶庫。"
+                "若用了 monkeypatch.undo()，改成只還原你自己設定的那一項")
 
 
 @pytest.fixture

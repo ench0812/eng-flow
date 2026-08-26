@@ -171,3 +171,9 @@ def plan(conn, cfg: Config, name: str, *, to_scope: str, project: str | None,
     return MovePlan(name, old_scope, to_scope, old_path, new_path, old_tags, new_tags,
                     old_slug, project, affected_banks=sorted(affected),
                     blockers=b, is_noop=is_noop)
+
+# 狀態機與 journal 在 move_state.py（分檔是因為 plan 要能被 move_state 匯入而不成環）。
+# 這裡 re-export，讓呼叫端只認得 memory_pg.move 一個入口。
+def run(conn, cfg, name, **kw):
+    from .move_state import run as _run
+    return _run(conn, cfg, name, **kw)

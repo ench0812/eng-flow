@@ -151,3 +151,120 @@ def test_plan_affected_banks_include_tag_changes(conn, home: Path):
     p = move.plan(conn, _cfg(), "mv6", to_scope="work", project=None, clear_tags=False)
     assert home / "memory-work" in p.affected_banks
     assert (home / "projects" / "D--Projects-IntelliPark" / "memory") in p.affected_banks
+
+
+# ---------- Task 7B：狀態機與續跑 ----------
+
+PHASES = ["staged", "db_committed", "installed", "old_parked", "indexes_written"]
+
+
+def _fail_after(phase: str):
+    """在指定 phase 的 checkpoint【之後】拋錯——journal 已記到該 phase。回傳還原函式。
+
+    **不用 monkeypatch.setattr + undo()**：`monkeypatch.undo()` 會撤銷該測試的【所有】
+    monkeypatch，包含 conftest 的 `conn`/`home` fixture 釘住的 CLAUDE_HOME 與 DSN。
+    實測 2026-08-26：續跑因此寫進【真實的】~/.claude/memory-work，而測試還「通過」——
+    因為它在真實 home 裡找到了那個檔案。假通過比失敗更糟。
+    """
+    from memory_pg import move_state
+    real = move_state._checkpoint
+
+    def hook(jp, state):
+        real(jp, state)
+        if state["phase"] == phase:
+            raise RuntimeError(f"模擬中斷於 {phase} 之後")
+    move_state._checkpoint = hook
+    return lambda: setattr(move_state, "_checkpoint", real)
+
+
+def _fail_before(phase: str):
+    """副作用已完成、journal 尚未更新時中斷——最容易被漏掉的形態。回傳還原函式。
+
+    此時 journal 的 phase 落後一格，續跑若照 phase 盲目重做就會出事
+    （例如再 rename 一次已經不存在的舊檔）。
+    """
+    from memory_pg import move_state
+    real = move_state._checkpoint
+
+    def hook(jp, state):
+        if state["phase"] == phase:
+            raise RuntimeError(f"模擬中斷於 {phase} 的 checkpoint 之前")
+        real(jp, state)
+    move_state._checkpoint = hook
+    return lambda: setattr(move_state, "_checkpoint", real)
+
+
+@pytest.mark.parametrize("phase", PHASES)
+@pytest.mark.parametrize("mode", ["after", "before"])
+def test_move_resumes_from_each_interrupt(conn, home: Path, phase, mode):
+    """每個中斷點都要能續跑收斂，且連跑兩次冪等。"""
+    seed_banks(home)
+    n = f"mv-{phase}-{mode}"
+    mutate.write(conn, _cfg(), name=n, scope="global", description="要搬的", body="\nb\n")
+    conn.commit()
+    from memory_pg import exporter
+    exporter.run(conn, _cfg(), verify_dir=None)      # 讓舊檔真的存在，貼近 CLI 的實際流程
+    restore = (_fail_after if mode == "after" else _fail_before)(phase)
+    try:
+        with pytest.raises(RuntimeError):
+            move.run(conn, _cfg(), n, to_scope="work", project=None, clear_tags=False,
+                     reason="測試")
+    finally:
+        restore()
+    move.run(conn, _cfg(), n, to_scope="work", project=None, clear_tags=False, reason="測試")
+    move.run(conn, _cfg(), n, to_scope="work", project=None, clear_tags=False, reason="測試")
+    assert (home / "memory-work" / f"{n}.md").exists()
+    assert not (home / "memory" / f"{n}.md").exists()
+    assert not list((home / "memory").glob("*.move-old"))
+    assert not list((home / "cache" / "move-scope").glob("*.json"))
+    with conn.cursor() as cur:
+        cur.execute("SELECT scope::text, file_path FROM memories WHERE name=%s", (n,))
+        sc, fp = cur.fetchone()
+    assert sc == "work" and str(home / "memory-work") in fp
+
+
+def test_stale_staging_is_regenerated(conn, home: Path):
+    """`.new` 的 hash 與現況不符時必須重產，不可沿用。"""
+    from memory_pg import move_state
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="stale", scope="global", description="要搬的", body="\nb\n")
+    conn.commit()
+    (home / "memory-work" / "stale.md.new").write_text("過期內容", encoding="utf-8")
+    jp = move_state.journal_path(_cfg(), "stale")
+    jp.parent.mkdir(parents=True, exist_ok=True)
+    jp.write_text(json.dumps({
+        "name": "stale", "phase": "staged", "content_sha256": "0" * 64,
+        "old_path": str(home / "memory" / "stale.md"),
+        "new_path": str(home / "memory-work" / "stale.md"),
+        "old_scope": "global", "new_scope": "work", "old_tags": [], "new_tags": [],
+        "old_slug": None, "new_slug": None, "affected_banks": []}), encoding="utf-8")
+    move.run(conn, _cfg(), "stale", to_scope="work", project=None, clear_tags=False, reason="x")
+    assert "過期內容" not in (home / "memory-work" / "stale.md").read_text(encoding="utf-8")
+
+
+def test_inconsistent_file_state_is_reported_not_guessed(conn, home: Path):
+    """舊檔與 .move-old 同時存在 → 明確報錯，不猜測。"""
+    from memory_pg import move_state
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="incon", scope="global", description="x", body="\nb\n")
+    conn.commit()
+    from memory_pg import exporter
+    exporter.run(conn, _cfg(), verify_dir=None)          # 讓舊檔真的存在
+    (home / "memory" / ("incon.md" + move_state.PARKED_SUFFIX)).write_text("另一份", encoding="utf-8")
+    with pytest.raises(move.MoveError, match="inconsistent_state"):
+        move.run(conn, _cfg(), "incon", to_scope="work", project=None,
+                 clear_tags=False, reason="x")
+
+
+def test_move_blocked_raises_with_all_blockers(conn, home: Path):
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="btgt", scope="global", description="目標", body="\nb\n")
+    mutate.write(conn, _cfg(), name="bsrc", scope="global", description="來源",
+                 body="\n見 [[btgt]]。\n")
+    conn.commit()
+    with pytest.raises(move.MoveError, match="bsrc"):
+        move.run(conn, _cfg(), "btgt", to_scope="machine", project=None,
+                 clear_tags=False, reason="x")
+    with conn.cursor() as cur:
+        cur.execute("SELECT scope::text FROM memories WHERE name='btgt'")
+        assert cur.fetchone()[0] == "global"          # 完全沒動
