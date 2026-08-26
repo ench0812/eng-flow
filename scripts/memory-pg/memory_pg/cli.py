@@ -288,6 +288,37 @@ def _embed_smoke(conn, cfg, model, dim) -> int:
     return 1 if bad else EXIT_OK
 
 
+def _cmd_move_scope(args: argparse.Namespace) -> int:
+    """把記憶搬到另一個 scope（等同搬到另一個 repo）。
+
+    先 plan（純規劃、零寫入）並印出變更摘要；blockers 非空時**逐條**印出後 exit 1
+    ——只印第一條會讓人修完一輪又撞下一條。
+    """
+    from . import move
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        p = move.plan(conn, cfg, args.name, to_scope=args.to, project=args.project,
+                      clear_tags=args.clear_tags)
+        if p.blockers:
+            for b in p.blockers:
+                print(f"WARN -: move_blocked {b}", file=sys.stderr)
+            return EXIT_UNDETERMINED
+        if p.is_noop:
+            print(f"move-scope {args.name}: 已經是 {args.to}，無事可做")
+            return EXIT_OK
+        print(f"move-scope {p.name}: {p.old_scope} → {p.new_scope}")
+        print(f"  路徑 {p.old_path} → {p.new_path}")
+        print(f"  tags {p.old_tags} → {p.new_tags}")
+        move.run(conn, cfg, args.name, to_scope=args.to, project=args.project,
+                 clear_tags=args.clear_tags, reason=args.reason)
+        print(f"move-scope {p.name} 完成")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
 def _cmd_purge(args, cfg, conn) -> int:
     """卸載後清理：刪掉某個已卸載分割區在 DB 的殘留列。
 
@@ -877,6 +908,15 @@ def build_parser() -> argparse.ArgumentParser:
     ed.add_argument("--review-by", help="改到期覆核日（YYYY-MM-DD；傳 none 清除）")
     ed.add_argument("--reason", required=True)
     ed.set_defaults(fn=_cmd_edit)
+
+    mv = sub.add_parser("move-scope", help="把記憶搬到另一個 scope（等同搬到另一個 repo）")
+    mv.add_argument("name")
+    mv.add_argument("--to", required=True, choices=["global", "machine", "work", "project"])
+    mv.add_argument("--project", help="--to project 時必填；其餘 scope 不得給")
+    mv.add_argument("--clear-tags", action="store_true",
+                    help="project → work/global 時不保留原 home project 的 affinity")
+    mv.add_argument("--reason", required=True)
+    mv.set_defaults(fn=_cmd_move_scope)
 
     ln = sub.add_parser("learn", help="新增記憶 + 治理（supersedes/confirms/dup 偵測）")
     _common_write(ln)

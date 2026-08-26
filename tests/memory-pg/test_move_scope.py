@@ -268,3 +268,102 @@ def test_move_blocked_raises_with_all_blockers(conn, home: Path):
     with conn.cursor() as cur:
         cur.execute("SELECT scope::text FROM memories WHERE name='btgt'")
         assert cur.fetchone()[0] == "global"          # 完全沒動
+
+
+# ---------- Task 7C：CLI ----------
+
+def test_cli_move_scope_end_to_end(conn, home: Path, monkeypatch):
+    from memory_pg import cli, exporter
+    _seed_projects(conn, home)
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="mv-cli", scope="global", description="要搬的",
+                 body="\nb\n", tags=["D--Projects-IntelliPark"])
+    conn.commit()
+    exporter.run(conn, _cfg(), verify_dir=None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["move-scope", "mv-cli", "--to", "machine", "--reason", "本機事實"]) == 0
+    assert (home / "memory-machine" / "mv-cli.md").exists()
+    assert not (home / "memory" / "mv-cli.md").exists()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memory_projects mp JOIN memories m ON m.id=mp.memory_id "
+                    "WHERE m.name='mv-cli'")
+        assert cur.fetchone()[0] == 0                 # machine 不得持有 tag
+        cur.execute("SELECT reason FROM memory_revisions r JOIN memories m ON m.id=r.memory_id "
+                    "WHERE m.name='mv-cli' ORDER BY r.id DESC LIMIT 1")
+        reason = cur.fetchone()[0]
+    assert "global" in reason and "D--Projects-IntelliPark" in reason   # 舊 scope 與舊 tag 都留痕
+
+
+@pytest.mark.parametrize("argv,frag", [
+    (["move-scope", "mv-cli", "--to", "project", "--reason", "x"], "--project"),
+    (["move-scope", "mv-cli", "--to", "machine", "--project", "D--Projects-IntelliPark",
+      "--reason", "x"], "不得給"),
+    (["move-scope", "nonexistent", "--to", "work", "--reason", "x"], "找不到"),
+])
+def test_cli_move_scope_usage_errors(conn, home: Path, monkeypatch, capsys, argv, frag):
+    from memory_pg import cli
+    _seed_projects(conn, home)
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="mv-cli", scope="global", description="x", body="\nb\n")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(argv) == 1
+    assert frag in capsys.readouterr().err
+
+
+def test_cli_move_scope_prints_every_blocker(conn, home: Path, monkeypatch, capsys):
+    """inbound blocker 要逐條列出，不是只印第一條。"""
+    from memory_pg import cli
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="btgt", scope="global", description="目標", body="\nb\n")
+    for i in (1, 2):
+        mutate.write(conn, _cfg(), name=f"bsrc{i}", scope="global", description=f"來源{i}",
+                     body="\n見 [[btgt]]。\n")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["move-scope", "btgt", "--to", "machine", "--reason", "x"]) == 1
+    err = capsys.readouterr().err
+    assert "bsrc1" in err and "bsrc2" in err
+
+
+def test_cli_move_scope_noop_is_success(conn, home: Path, monkeypatch):
+    from memory_pg import cli
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="same", scope="global", description="x", body="\nb\n")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["move-scope", "same", "--to", "global", "--reason", "x"]) == 0
+
+
+def test_cli_move_scope_clear_tags(conn, home: Path, monkeypatch):
+    """project → work 加 --clear-tags 時不保留 affinity。"""
+    from memory_pg import cli, exporter
+    _seed_projects(conn, home)
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="ct", scope="project", description="專案的", body="\nb\n",
+                 project_slug="D--Projects-IntelliPark")
+    conn.commit()
+    exporter.run(conn, _cfg(), verify_dir=None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["move-scope", "ct", "--to", "work", "--clear-tags", "--reason", "x"]) == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memory_projects mp JOIN memories m ON m.id=mp.memory_id "
+                    "WHERE m.name='ct'")
+        assert cur.fetchone()[0] == 0
+
+
+def test_cli_move_project_to_work_keeps_affinity(conn, home: Path, monkeypatch):
+    """不給 --clear-tags 時，原 home project 要被保留成 tag（維持常駐注入範圍）。"""
+    from memory_pg import cli, exporter
+    _seed_projects(conn, home)
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="keep", scope="project", description="專案的", body="\nb\n",
+                 project_slug="D--Projects-IntelliPark")
+    conn.commit()
+    exporter.run(conn, _cfg(), verify_dir=None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["move-scope", "keep", "--to", "work", "--reason", "跨專案"]) == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT p.slug FROM memory_projects mp JOIN memories m ON m.id=mp.memory_id "
+                    "JOIN projects p ON p.id=mp.project_id WHERE m.name='keep'")
+        assert [r[0] for r in cur.fetchall()] == ["D--Projects-IntelliPark"]
