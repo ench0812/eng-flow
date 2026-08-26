@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
+import shutil
 import sys
 
 from pathlib import Path
 
 import pytest
 
-from conftest import write_memory  # noqa: E402
+from conftest import seed_banks, write_memory  # noqa: E402
 
 from memory_pg import cli, config, exporter, importer, mutate  # noqa: E402
 
@@ -528,3 +529,75 @@ def test_auto_embed_skips_write_when_content_changed_meanwhile(conn, home: Path,
         body, no_vec = cur.fetchone()
     assert "第二版" in body            # 別人的改動還在
     assert no_vec is True              # 本輪算出的向量對不上現況，沒有寫進去
+
+
+# ---------- Task 2：bank presence + 四 scope 寫入 ----------
+
+def test_write_and_learn_route_four_scopes(conn, home: Path):
+    """machine / work 不要求 --project、home_project_id 為 NULL、落到各自 bank。"""
+    _seed_projects(conn, home)
+    seed_banks(home)
+    for scope in ("global", "machine", "work"):
+        mutate.write(conn, _cfg(), name=f"r-{scope}", scope=scope,
+                     description=f"{scope} 的", body="\nb\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT name, scope::text, home_project_id, file_path FROM memories "
+                    "WHERE name LIKE 'r-%' ORDER BY name")
+        rows = {r[0]: r for r in cur.fetchall()}
+    assert rows["r-global"][1:3] == ("global", None)
+    assert rows["r-machine"][1:3] == ("machine", None)
+    assert rows["r-work"][1:3] == ("work", None)
+    assert str(home / "memory-machine") in rows["r-machine"][3]
+    assert str(home / "memory-work") in rows["r-work"][3]
+
+
+@pytest.mark.parametrize("scope", ["machine", "work"])
+def test_write_refuses_when_bank_not_installed(conn, home: Path, tmp_path, monkeypatch, scope):
+    """bank not_installed 時必須 exit 2 且 DB 不得新增任何列。
+
+    否則會出現「DB 有記憶、repo 沒檔案、命令回成功」——export 對 not_installed 是跳過且
+    exit 0，不會有任何訊號。
+    """
+    from memory_pg import cli
+    shutil.rmtree(home / f"memory-{scope}", ignore_errors=True)
+    f = tmp_path / "b.md"
+    f.write_text("\n內容。\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    name = f"nb-{scope}"
+    assert cli.main(["write", "--name", name, "--scope", scope,
+                     "--description", "描述", "--file", str(f)]) == 2
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name=%s", (name,))
+        assert cur.fetchone()[0] == 0
+
+
+def test_write_refuses_when_bank_unavailable(conn, home: Path, tmp_path, monkeypatch):
+    """bank 路徑存在但不是目錄 → unavailable → exit 1，零寫入。"""
+    from memory_pg import cli
+    shutil.rmtree(home / "memory-work", ignore_errors=True)
+    (home / "memory-work").write_text("我是檔案不是目錄", encoding="utf-8")
+    f = tmp_path / "b.md"
+    f.write_text("\n內容。\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["write", "--name", "nu", "--scope", "work",
+                     "--description", "描述", "--file", str(f)]) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='nu'")
+        assert cur.fetchone()[0] == 0
+
+
+def test_dup_candidates_scoped_exactly(conn, home: Path):
+    """重複偵測只比同 scope：machine 與 global 是不同的庫，描述相同不算重複。"""
+    _seed_projects(conn, home)
+    desc = "完全一樣的描述——用來觸發 Jaccard"
+    mutate.write(conn, _cfg(), name="dup-global", scope="global", description=desc, body="\nb\n")
+    conn.commit()
+    assert mutate.dup_candidates(conn, "machine", None, desc) == []
+    assert [n for n, _ in mutate.dup_candidates(conn, "global", None, desc)] == ["dup-global"]
+
+
+def test_unknown_scope_rejected(conn, home: Path):
+    _seed_projects(conn, home)
+    with pytest.raises(Exception, match="沒有單一 bank 的 scope|未知的 scope"):
+        mutate.write(conn, _cfg(), name="bad", scope="nonsense", description="x", body="\nb\n")

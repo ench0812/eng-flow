@@ -775,7 +775,8 @@ def build_parser() -> argparse.ArgumentParser:
     def _common_write(sp):
         sp.add_argument("--name")
         sp.add_argument("--description")
-        sp.add_argument("--scope", default="project", choices=["global", "project"])
+        sp.add_argument("--scope", default="project",
+                        choices=["global", "machine", "work", "project"])
         sp.add_argument("--project", help="project scope 的 slug（省略則需在已登錄專案的 cwd）")
         sp.add_argument("--kind", choices=["semantic", "episodic", "procedural", "decision", "environment"])
         sp.add_argument("--pin", action="store_true")

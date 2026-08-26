@@ -90,3 +90,13 @@ def write_memory(bank: Path, name: str, description: str, body: str = "\n正文�
     p = bank / f"{name}.md"
     p.write_text(text, encoding="utf-8", newline="")
     return p
+
+
+def seed_banks(home):
+    """建出 machine / work 兩個 bank 目錄。
+
+    寫入面對這兩個 scope 會先檢查 bank presence（not_installed 一律拒寫），所以任何
+    會 write machine/work 的測試都要先建目錄，否則得到的是 exit 2 而不是預期的行為。
+    """
+    for d in ("memory-machine", "memory-work"):
+        (home / d).mkdir(parents=True, exist_ok=True)

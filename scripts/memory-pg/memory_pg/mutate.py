@@ -15,7 +15,7 @@ import psycopg
 from . import frontmatter as fm
 from . import projects as projmod
 from .config import Config
-from .errors import UsageError
+from .errors import MemoryError_, UsageError
 
 DUP_JACCARD = 0.35
 DUP_DESC_CAP = 300
@@ -25,14 +25,36 @@ class MutateError(UsageError):
     code = "mutate"
 
 
+class BankStateError(MemoryError_):
+    """bank 狀態不明（unavailable / damaged_install）→ exit 1。
+
+    與 not_installed 的 UsageError（exit 2）刻意分開：
+      not_installed = 設定沒做完，使用者知道怎麼修 → 用法錯
+      unavailable   = bank 可能有內容但讀不到，**無法判定正確性** → 契約規定 exit 1
+    """
+    code = "bank_state"
+
+
 def _bigrams(s: str) -> set[str]:
     s = s[:DUP_DESC_CAP]
     return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else ({s} if s else set())
 
 
 def _bank_and_path(cfg: Config, conn, scope: str, name: str, project_slug: str | None):
-    if scope == "global":
-        return None, str((cfg.bank_global / f"{name}.md"))
+    # global / machine / work 各自單一 bank、home_project_id 為 NULL；只有 project 要 slug。
+    if scope in ("global", "machine", "work"):
+        st = cfg.bank_presence(scope)
+        if st == "not_installed":
+            # 拒寫而不是照寫：export 對 not_installed 是「跳過且 exit 0」，照寫的話會變成
+            # 「DB 有記憶、repo 沒檔案、命令回成功」——沒有任何訊號的不一致。
+            raise UsageError(
+                f"{scope} 的 bank（{cfg.bank_for_scope(scope)}）尚未安裝，拒絕寫入。"
+                f"先跑 `claude-repos.sh install --repo {scope}`", code="bank_not_installed")
+        if st != "installed":
+            raise BankStateError(f"{scope} 的 bank 狀態是 {st}，拒絕寫入（先排除安裝問題）")
+        return None, str(cfg.bank_for_scope(scope) / f"{name}.md")
+    if scope != "project":
+        raise MutateError(f"未知的 scope: {scope}")
     if not project_slug:
         raise MutateError("project scope 需要 --project <slug>")
     with conn.cursor() as cur:
@@ -212,11 +234,14 @@ def edit(conn, cfg: Config, name: str, *, description: str | None, body: str | N
 
 def dup_candidates(conn, scope: str, project_slug: str | None, description: str) -> list[tuple[str, float]]:
     with conn.cursor() as cur:
-        if scope == "global":
-            cur.execute("SELECT name, description FROM memories WHERE scope='global' AND status='active'")
-        else:
-            cur.execute("SELECT m.name, m.description FROM memories m JOIN projects p ON p.id=m.home_project_id "
+        # 精確比對 scope：machine 與 global 是不同的庫，描述相同不算重複。
+        if scope == "project":
+            cur.execute("SELECT m.name, m.description FROM memories m "
+                        "JOIN projects p ON p.id=m.home_project_id "
                         "WHERE m.status='active' AND p.slug=%s", (project_slug,))
+        else:
+            cur.execute("SELECT name, description FROM memories "
+                        "WHERE scope=%s AND status='active'", (scope,))
         rows = cur.fetchall()
     a = _bigrams(description)
     out = []
