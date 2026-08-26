@@ -18,6 +18,7 @@ from pathlib import Path
 import psycopg
 
 from . import exporter
+from . import projects as projmod
 from .config import Config
 
 DUP_JACCARD = 0.35
@@ -74,15 +75,31 @@ def run(conn: psycopg.Connection, cfg: Config) -> AuditReport:
         for fp, name, rb in cur.fetchall():
             rep.findings.append(Finding("WARN", fp, "overdue", f"{name} review_by={rb}"))
 
-        # dangling_ref（WARN）
+        # dangling_ref / forbidden_ref（WARN）
+        #
+        # 兩者在 DB 裡長得一樣（target_id IS NULL），但意思完全不同，要分開報：
+        #   dangling_ref  目標**不存在**——打錯字，或引用了還沒寫的記憶
+        #   forbidden_ref 目標**存在，但這個方向不允許**（跨 repo / 跨專案）
+        # 非撰寫路徑（backfill、import）刻意把後者留成 dangling 而不拋錯（拋錯會讓
+        # 「B 專案建不了 foo，只因為 A 專案有一條過期的 [[foo]]」這種附帶損害發生），
+        # 資訊由這裡承接——責任歸在真正該改的來源記憶身上。
         cur.execute(
-            """SELECT s.file_path, s.name, l.kind::text, l.target_name
-               FROM memory_links l JOIN memories s ON s.id = l.source_id
+            """SELECT s.file_path, s.name, l.kind::text, l.target_name,
+                      t.scope::text AS tscope, s.scope::text AS sscope
+               FROM memory_links l
+               JOIN memories s ON s.id = l.source_id
+               LEFT JOIN memories t ON t.name = l.target_name AND t.status = 'active'
                WHERE l.target_id IS NULL ORDER BY s.name, l.target_name"""
         )
-        for fp, name, kind, tgt in cur.fetchall():
-            detail = f"[[{tgt}]] in {name}" if kind == "wikilink" else f"{kind}={tgt} in {name}"
-            rep.findings.append(Finding("WARN", fp, "dangling_ref", detail))
+        for fp, name, kind, tgt, tscope, sscope in cur.fetchall():
+            ref = f"[[{tgt}]]" if kind == "wikilink" else f"{kind}={tgt}"
+            if tscope is None:
+                rep.findings.append(Finding("WARN", fp, "dangling_ref", f"{ref} in {name}"))
+            else:
+                rep.findings.append(Finding(
+                    "WARN", fp, "forbidden_ref",
+                    f"{ref} in {name}：{tgt} 的 scope 是 {tscope}，不允許從 {sscope} 連過去"
+                    f"（改成純文字提及）"))
 
         # relation_mismatch（WARN）—— 觸發器平時擋住，這裡是最後防線（多重取代者/自我取代殘留）
         cur.execute(
@@ -110,6 +127,26 @@ def run(conn: psycopg.Connection, cfg: Config) -> AuditReport:
         for fp, name in orphans:
             rep.findings.append(Finding("SUGGEST", fp, "orphan", f"{name} no_inbound_link_and_not_pinned"))
         rep.findings.append(Finding("INFO", "-", "orphan_total", str(len(orphans))))
+
+        # work 的 tag 規則（work 的常駐只有一條路徑：被 tag 的專案索引）
+        cur.execute(
+            """SELECT file_path, name, pinned FROM memories m
+               WHERE m.status='active' AND m.scope='work'
+                 AND NOT EXISTS (SELECT 1 FROM memory_projects mp WHERE mp.memory_id=m.id)
+               ORDER BY name"""
+        )
+        for fp, name, pinned in cur.fetchall():
+            if pinned:
+                # memory-work/MEMORY.md 刻意不產 PINNED 區（沒有任何常駐 include 會載入它），
+                # 所以 untagged 的 work 就算 pin 了也不會常駐——那是會誤導人的狀態。
+                rep.findings.append(Finding(
+                    "WARN", fp, "pinned_work_without_tag",
+                    f"{name} 是 pinned 的 work 卻沒有 tag，實際不會常駐。"
+                    f"要常駐就至少標一個 project，否則取消 pin"))
+            else:
+                rep.findings.append(Finding(
+                    "SUGGEST", fp, "work_without_tag",
+                    f"{name} 是 work 卻沒有 tag，通常表示它其實該放 global，或忘了標專案"))
 
         # split_candidate（SUGGEST）
         cur.execute(
@@ -160,9 +197,62 @@ def run(conn: psycopg.Connection, cfg: Config) -> AuditReport:
     except exporter.ExportAborted as e:
         rep.findings.append(Finding("WARN", "-", "unmanaged_file", str(e)))
 
+    # bank 內的 wikilink 方向複驗（防手改 bank 繞過 DB 觸發器）
+    _bank_link_directions(conn, cfg, rep)
+
     # claude_md_dangling
     _claude_md(conn, cfg, rep)
     return rep
+
+
+def _bank_link_directions(conn: psycopg.Connection, cfg: Config, rep: AuditReport) -> None:
+    """直接讀 bank 的 md，檢查正文裡的 wikilink 方向是否合法。
+
+    DB 觸發器擋得住經由 CLI 的寫入，擋不住有人直接編輯 bank 檔案（Obsidian、手改）。
+    那些改動要到下一次 import 才會進 DB，而 import 對禁止方向是留 dangling 不 abort
+    ——所以在此之前，唯一會發聲的就是這條檢查。
+    """
+    from . import bank as bankmod
+    from . import frontmatter as fm
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT name, scope::text, home_project_id FROM memories WHERE status='active'")
+        by_name = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+        cur.execute("SELECT slug, id FROM projects")
+        pid_of = dict(cur.fetchall())
+
+    banks, _rej = bankmod.discover(cfg.home)
+    for b in banks:
+        slug = projmod.slug_from_bank(b)
+        if b == cfg.bank_global:
+            s_scope, s_home = "global", None
+        elif b == cfg.bank_machine:
+            s_scope, s_home = "machine", None
+        elif b == cfg.bank_work:
+            s_scope, s_home = "work", None
+        else:
+            s_scope, s_home = "project", pid_of.get(slug)
+        for f in sorted(b.glob("*.md")):
+            if f.name == "MEMORY.md" or f.name.startswith("."):
+                continue
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for m in fm.WIKILINK_RE.finditer(text):
+                tgt = m.group(1)
+                if tgt not in by_name or tgt == f.stem:
+                    continue                      # 不存在的交給 dangling_ref 那條
+                t_scope, t_home = by_name[tgt]
+                with conn.cursor() as cur:
+                    cur.execute("SELECT link_allowed(%s::memory_scope, %s::uuid, "
+                                "%s::memory_scope, %s::uuid, 'wikilink')",
+                                (s_scope, s_home, t_scope, t_home))
+                    if not cur.fetchone()[0]:
+                        rep.findings.append(Finding(
+                            "WARN", str(f), "cross_repo_link",
+                            f"[[{tgt}]] in {f.stem}：{tgt} 的 scope 是 {t_scope}，"
+                            f"不允許從 {s_scope} 連過去"))
 
 
 def _claude_md(conn: psycopg.Connection, cfg: Config, rep: AuditReport) -> None:
