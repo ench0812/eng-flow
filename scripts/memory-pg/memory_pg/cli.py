@@ -118,7 +118,10 @@ def _cmd_search(args: argparse.Namespace) -> int:
         res = searchmod.search(
             conn, cfg, args.query,
             cwd=_os.getcwd(),
-            scope=("all" if args.all else args.scope),
+            scope=args.scope,
+            project=args.project,
+            current_only=args.current_project,
+            all_scopes=args.all,
             k=args.k,
             include_superseded=args.all_status,
             mode=args.mode,
@@ -794,8 +797,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("search", help="hybrid 檢索（沿用 TSV 三欄契約）")
     s.add_argument("query")
-    s.add_argument("--scope", help="global | <project_key>；預設為目前專案 + global")
-    s.add_argument("--all", action="store_true", help="所有 scope（不限目前專案）")
+    # 四個過濾參數互斥。舊版的 `--scope` 把任何非 global 的值當成 project slug，於是
+    # `--scope machine` 既可能是 enum 也可能是名叫 machine 的專案——語義不可判定。
+    sg = s.add_mutually_exclusive_group()
+    sg.add_argument("--scope", choices=["global", "machine", "work"], help="只查該 scope")
+    sg.add_argument("--project", metavar="SLUG", help="只查指定專案")
+    sg.add_argument("--current-project", action="store_true", help="只查目前專案")
+    sg.add_argument("--all", action="store_true", help="全部，含其他專案")
     s.add_argument("--all-status", action="store_true", help="含已取代/deprecated")
     s.add_argument("--mode", choices=["hybrid", "fts"], default="hybrid")
     s.add_argument("--degrade", action="store_true", help="向量路不可用時降為 fts，不 fail-closed")

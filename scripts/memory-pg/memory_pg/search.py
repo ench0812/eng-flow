@@ -150,7 +150,10 @@ def search(
     query: str,
     *,
     cwd: str | None = None,
-    scope: str | None = None,          # None=current+global；'all'；'global'；或某 project_key
+    scope: str | None = None,          # 'global' | 'machine' | 'work'（只查該 enum scope）
+    project: str | None = None,        # 只查指定專案（slug）
+    current_only: bool = False,        # 只查目前專案
+    all_scopes: bool = False,          # 全部，含其他專案
     k: int = 10,
     include_superseded: bool = False,
     mode: str = "hybrid",              # hybrid | fts
@@ -198,7 +201,7 @@ def search(
     eff_mode = "hybrid" if use_vec else "fts"
 
     # scope 過濾（在排名之前）
-    scope_sql, scope_params = _scope_filter(scope, pk)
+    scope_sql, scope_params = _scope_filter(scope, project, current_only, all_scopes, pk)
 
     id_hit_expr = "(m.name = %(q)s OR m.name ILIKE '%%'||%(q)s||'%%')" if ID_RE.match(query.strip()) else "false"
 
@@ -285,19 +288,35 @@ def search(
                         model=model, warnings=warnings)
 
 
-def _scope_filter(scope: str | None, pk: str | None) -> tuple[str, dict]:
-    if scope == "all":
+NON_PROJECT_SCOPES = "('global','machine','work')"
+
+
+def _scope_filter(scope: str | None, project: str | None, current_only: bool,
+                  all_scopes: bool, pk: str | None) -> tuple[str, dict]:
+    """可見性過濾。
+
+    **scope 管的是歸屬（匯出到哪個 bank／屬於哪個 repo），不是可見性。** 預設可見範圍是
+    「目前專案 + 所有非專案特定的記憶」，也就是 project(當前) ∪ global ∪ machine ∪ work。
+    不這樣做會直接退步：2026-08-26 實測，把案場位址升成全域可見之後，一個查過 3 次都零命中
+    的查詢才變成從任何目錄查都排第一；若 work 只在被 tag 的專案內可見，那個改善就沒了。
+
+    vis CTE 只有 memories m，沒有 join projects——用子查詢比對，不能寫 p.slug。
+    """
+    if all_scopes:
         return "true", {}
-    if scope == "global":
-        return "m.scope = 'global'", {}
-    if scope and scope not in ("all", "global"):    # 指定某 project_key
-        # vis CTE 只有 memories m，沒有 join projects——用子查詢比對，不能寫 p.slug
-        return ("(m.scope = 'global' OR m.home_project_id = (SELECT id FROM projects WHERE slug = %(pk)s))",
-                {"pk": scope})
-    # 預設：目前專案 + 全域
+    if scope:                                        # 只查該 enum scope
+        return "m.scope = %(sc)s", {"sc": scope}
+    if project or current_only:
+        key = project or pk
+        if not key:
+            # 不在已登錄專案卻要求「只查專案」→ 明確查無，不悄悄擴大範圍
+            return "false", {}
+        return ("m.home_project_id = (SELECT id FROM projects WHERE slug = %(pk)s)", {"pk": key})
     if pk:
-        return "(m.scope = 'global' OR m.home_project_id = (SELECT id FROM projects WHERE slug = %(pk)s))", {"pk": pk}
-    return "m.scope = 'global'", {}
+        return (f"(m.scope IN {NON_PROJECT_SCOPES} "
+                " OR m.home_project_id = (SELECT id FROM projects WHERE slug = %(pk)s))",
+                {"pk": pk})
+    return f"m.scope IN {NON_PROJECT_SCOPES}", {}
 
 
 def log_access(conn: psycopg.Connection, *, event: str, cwd: str | None, keyword: str,
