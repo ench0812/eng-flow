@@ -122,29 +122,53 @@ def _backfill_inbound(cur, mid: str, name: str) -> None:
     _sync_wikilinks 只處理「來源這一則」的出向連結，所以先寫 A（正文含 [[B]]）、後寫 B 時，
     A 那一列永遠停在 target_id=NULL：audit 會永久報 `dangling_ref [[B]] in A`，同時把 B 報成
     `orphan`（查不到 inbound）。兩個都是假警報而且清不掉——只能跑一次 full import 才會消。
-    importer 沒這個問題是因為它一次重建整張圖；逐則寫入沒有那個性質。
 
     **不可用 UPDATE**：trg_links_immutable 只放行 target_id 由 NOT NULL 轉 NULL，反向會
     RAISE EXCEPTION 'links_immutable'。所以是 DELETE 掉舊的 dangling 列再重新 INSERT。
-    解析範圍與 trg_link_scope 一致：global 目標任何人都能連，project 目標只有同專案能連。
+
+    **方向不允許的列刻意留在 dangling，不拋錯**——這裡與來源側（_resolve_link_target）刻意
+    不同，理由是誤傷範圍：
+      來源側是使用者「正在寫 [[x]]」，拋錯即時、可行動、就在他手上那則。
+      這裡是「別人的記憶引用了我正要建立的名字」。拋錯會讓 B 專案建不了 `foo`，只因為
+      A 專案有一條過期的 [[foo]]——那是與本次寫入無關的附帶損害。
+    資訊沒有流失：audit 會把「目標存在但方向不允許」報成 `forbidden_ref`（WARN），與
+    「目標不存在」的 `dangling_ref` 分開，責任也歸在真正該改的那一則（來源）身上。
     """
     cur.execute("SELECT scope::text, home_project_id FROM memories WHERE id=%s", (mid,))
-    scope, pid = cur.fetchone()
-    if scope == "global":
-        cond, extra = "TRUE", []
-    else:
-        cond, extra = "s.scope='project' AND s.home_project_id = %s", [pid]
+    t_scope, t_home = cur.fetchone()
     cur.execute(
-        f"""DELETE FROM memory_links l USING memories s
+        """DELETE FROM memory_links l USING memories s
             WHERE l.source_id = s.id AND l.kind='wikilink' AND l.target_name = %s
-              AND l.target_id IS NULL AND l.source_id <> %s AND {cond}
+              AND l.target_id IS NULL AND l.source_id <> %s
+              AND link_allowed(s.scope, s.home_project_id, %s::memory_scope, %s::uuid, 'wikilink')
             RETURNING l.source_id""",
-        [name, mid] + extra,
+        (name, mid, t_scope, t_home),
     )
     for (sid,) in cur.fetchall():
         cur.execute("INSERT INTO memory_links(source_id, target_name, target_id, kind) "
                     "VALUES (%s,%s,%s,'wikilink') ON CONFLICT DO NOTHING", (sid, name, mid))
 
+
+
+def _resolve_link_target(cur, src_scope: str, src_home, lid: str):
+    """三分支：不存在 → None（dangling）；存在但方向禁止 → 拋錯；允許 → id。
+
+    **必須在全庫查**（name 全域唯一），不可只在允許的 scope 內搜尋——那會把「已知但禁止」
+    降級成「未知」，寫成 target_id=NULL 之後 trigger 對 NULL 直接放行，命令會成功，
+    最後只由 audit 報一個 dangling。那與「這個方向不允許」的語義完全不同。
+    """
+    cur.execute("SELECT id, scope::text, home_project_id FROM memories WHERE name=%s", (lid,))
+    row = cur.fetchone()
+    if not row:
+        return None                                   # 真的不存在 → dangling
+    tid, t_scope, t_home = row
+    cur.execute("SELECT link_allowed(%s::memory_scope, %s::uuid, %s::memory_scope, "
+                "%s::uuid, 'wikilink')", (src_scope, src_home, t_scope, t_home))
+    if not cur.fetchone()[0]:
+        raise MutateError(
+            f"cross_repo_link: {lid} 的 scope 是 {t_scope}，不允許從 {src_scope} 連過去。"
+            f"要提到它請用純文字（反引號），不要用 wikilink")
+    return tid
 
 
 def _sync_wikilinks(cur, mid: str, body: str) -> None:
@@ -161,23 +185,15 @@ def _sync_wikilinks(cur, mid: str, body: str) -> None:
         if fm.LINK_CONTROL_RE.search(lid) or lid in seen:
             continue
         seen.add(lid); names.append(lid)
-    cur.execute("SELECT scope, home_project_id, name FROM memories WHERE id=%s", (mid,))
+    cur.execute("SELECT scope::text, home_project_id, name FROM memories WHERE id=%s", (mid,))
     scope, pid, self_name = cur.fetchone()
     cur.execute("DELETE FROM memory_links WHERE source_id=%s AND kind='wikilink'", (mid,))
     for lid in names:
         if lid == self_name:
             continue                      # 自我連結沒有語意，且 CHECK 會擋
-        r = None
-        if scope == "project":
-            cur.execute("SELECT id FROM memories WHERE name=%s AND scope='project' AND home_project_id=%s",
-                        (lid, pid))
-            r = cur.fetchone()
-        if r is None:
-            cur.execute("SELECT id FROM memories WHERE name=%s AND scope='global'", (lid,))
-            r = cur.fetchone()
+        tid = _resolve_link_target(cur, scope, pid, lid)
         cur.execute("INSERT INTO memory_links(source_id, target_name, target_id, kind) "
-                    "VALUES (%s,%s,%s,'wikilink') ON CONFLICT DO NOTHING",
-                    (mid, lid, r[0] if r else None))
+                    "VALUES (%s,%s,%s,'wikilink') ON CONFLICT DO NOTHING", (mid, lid, tid))
 
 
 def _snapshot(cur, mid, reason):

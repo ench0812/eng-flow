@@ -230,3 +230,33 @@ def test_topic_line_split_boundaries(desc, expect_title, expect_hook):
         # 標題 + 分隔符 + 提要要能還原出原句，不可掉字
         assert desc.startswith(title) and desc.endswith(hook)
         assert len(desc) - len(title) - len(hook) in (1, 2)   # 單字元或「——」
+
+
+def test_import_resolves_newly_allowed_project_to_work(conn, home: Path):
+    """project → work 是 0002 新開放的方向；舊 resolve 只查「同 bank 或 global」會誤判成
+    dangling。這一條釘住新規則允許的方向真的解析得到。"""
+    write_memory(home / "memory-work", "w-target", "工作的")
+    write_memory(home / "projects" / "D--Projects-A" / "memory", "p-src", "專案的",
+                 body="\n見 [[w-target]]。\n")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT target_id IS NOT NULL FROM memory_links WHERE target_name='w-target'")
+        assert cur.fetchone()[0] is True
+
+
+def test_import_forbidden_direction_stays_dangling_not_abort(conn, home: Path):
+    """import 是復原路徑：bank 裡一條舊的跨庫引用不可讓整批 abort。
+
+    與來源側刻意不同——那條引用是既有資料，不是使用者此刻正在寫的；abort 會讓復原機制
+    在最需要它的時候失效。資訊由 audit 的 forbidden_ref 承接。
+    """
+    write_memory(home / "memory-machine", "m-target", "本機的")
+    write_memory(home / "memory", "g-src", "全域的", body="\n見 [[m-target]]。\n")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='g-src'")
+        assert cur.fetchone()[0] == 1                       # 有落地，沒 abort
+        cur.execute("SELECT target_id IS NULL FROM memory_links WHERE target_name='m-target'")
+        assert cur.fetchone()[0] is True                    # 但那條是 dangling

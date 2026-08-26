@@ -34,12 +34,18 @@ def _has_symlink_component(bank: Path, home: Path) -> bool:
 
 
 def discover(home: Path) -> tuple[list[Path], list[tuple[str, str]]]:
-    """回傳 (banks, rejected)。順序：全域庫、各專案庫（依路徑排序）。"""
+    """回傳 (banks, rejected)。順序：全域、本機、工作、各專案庫（依路徑排序）。
+
+    四個 bank 都要收。少收 machine/work 的後果不是「查不到」而是**刪資料**：importer 的
+    delete-absent 會把「DB 有、本次掃描沒出現」的列刪掉，沒掃到的 scope 等於被判定為
+    「檔案都不見了」。
+    """
     banks: list[Path] = []
     rejected: list[tuple[str, str]] = []
-    g = home / "memory"
-    if g.is_dir():
-        banks.append(g)
+    for name in ("memory", "memory-machine", "memory-work"):
+        b = home / name
+        if b.is_dir():
+            banks.append(b)
     projects = home / "projects"
     if projects.exists() and not projects.is_dir():
         rejected.append(("unreadable_bank", str(projects)))

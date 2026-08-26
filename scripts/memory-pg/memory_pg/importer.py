@@ -30,7 +30,7 @@ class ImportAborted(MemoryError_):
 @dataclass
 class Item:
     bank: Path
-    scope: str                  # 'global' | 'project'
+    scope: str                  # 'global' | 'machine' | 'work' | 'project'
     slug: str | None
     path: Path
     parsed: fm.Parsed
@@ -89,7 +89,16 @@ def build_model(cfg: Config) -> tuple[list[Item], list[str]]:
         for code, path in s.rejected:
             problems.append(f"{code} {path}")
         slug = projmod.slug_from_bank(b)
-        scope = "global" if b == cfg.bank_global else "project"
+        # 四路判定。舊版是「不是 global 就是 project」，那會把 memory-machine/ 與
+        # memory-work/ 一律誤判成專案庫（slug 為 None → 後續建 project 時整批炸）。
+        if b == cfg.bank_global:
+            scope = "global"
+        elif b == cfg.bank_machine:
+            scope = "machine"
+        elif b == cfg.bank_work:
+            scope = "work"
+        else:
+            scope = "project"
         for f in s.files:
             # id 全域唯一（PG 為本體後，id 是 TSV/MCP/ wikilink 的鍵）。兩個 bank 同名不是
             # 「同一則記憶的兩份」而是碰撞——靜默 upsert 會讓後者覆寫前者的 scope/路徑/內容，
@@ -108,8 +117,43 @@ def build_model(cfg: Config) -> tuple[list[Item], list[str]]:
     by_bank: dict[tuple[Path, str], Item] = {(it.bank, it.parsed.stem): it for it in items}
     global_bank = cfg.bank_global
 
+    by_name: dict[str, Item] = {it.parsed.stem: it for it in items}
+
+    def _allowed(src: Item, tgt: Item) -> bool:
+        """與 DB 的 link_allowed 同一套判準（純 Python 版，import 階段還沒進 DB）。
+
+        判準：持有來源 repo 的人是否必然也持有目標 repo。
+        """
+        if tgt.scope == "global":
+            return True
+        if tgt.scope == "machine":
+            return src.scope == "machine"
+        if tgt.scope == "work":
+            return src.scope in ("work", "project")
+        if tgt.scope == "project":
+            return src.scope == "work" or (src.scope == "project" and src.slug == tgt.slug)
+        return False
+
+    def resolve_target(it: Item, name: str) -> str | None:
+        """依 scope 規則解析 wikilink 目標；不允許或不存在都回 None（寫成 dangling）。
+
+        **不在這裡 abort**，與來源側（mutate 的 _resolve_link_target 會拋錯）刻意不同：
+        import 是**復原路徑**（從 bank 重建 DB）。因為 bank 裡一條舊的跨庫引用就整批 abort，
+        等於讓復原機制在最需要它的時候失效——而那條引用是既有資料，不是使用者此刻正在寫的。
+        原則：**撰寫路徑拋錯（即時、可行動、只影響那一則）；非撰寫路徑留 dangling**，
+        由 audit 的 `forbidden_ref` 把「目標存在但方向不允許」與「目標不存在」分開報，
+        責任歸在真正該改的來源記憶身上，資訊不流失。
+
+        舊版只查「同 bank 或 global bank」，所以 project → work 這種**新規則允許**的方向
+        會解析不到而變成假 dangling；這裡改用完整的 scope 判準。
+        """
+        tgt = by_name.get(name)
+        if tgt is None or not _allowed(it, tgt):
+            return None
+        return name
+
     def resolve(it: Item, name: str) -> str | None:
-        """同庫 → 全域庫；禁跨專案（與 memory-checks.awk resolve() 相同）。"""
+        """supersedes 專用：同庫才算解析得到（取代關係不可跨庫）。"""
         if (it.bank, name) in by_bank:
             return name
         if it.bank != global_bank and (global_bank, name) in by_bank:
@@ -119,7 +163,7 @@ def build_model(cfg: Config) -> tuple[list[Item], list[str]]:
     derived_supby: dict[tuple[Path, str], list[str]] = {}
     for it in items:
         for lid in it.parsed.links:
-            it.wikilinks.append((lid, resolve(it, lid)))
+            it.wikilinks.append((lid, resolve_target(it, lid)))
         for old in it.parsed.supersedes:
             # 取代關係必須同庫（cross_bank 是 relation_mismatch，不是 dangling）
             if (it.bank, old) in by_bank:
@@ -232,6 +276,7 @@ def write(conn: psycopg.Connection, cfg: Config, items: list[Item], *, dry_run: 
                         "INSERT INTO memory_sources(memory_id, kind, ref, available) VALUES (%s,'session',%s,%s)",
                         (mem_id[(it.bank, p.stem)], str(tp), tp.exists()),
                     )
+            by_id_name = {stem: v for (_b, stem), v in mem_id.items()}
             rep.memories = len(mem_id)
 
             # links：先刪本批記憶的舊連結（觸發器會把被取代者還原），再依序重建
@@ -244,7 +289,10 @@ def write(conn: psycopg.Connection, cfg: Config, items: list[Item], *, dry_run: 
                 for tname, resolved in it.wikilinks:
                     tid = None
                     if resolved:
-                        tid = mem_id.get((it.bank, resolved)) or mem_id.get((global_bank, resolved))
+                        # 按【名稱】查，不按 bank 查：name 全域唯一，而 resolve_target 已經
+                        # 用 scope 規則判過方向。舊版只找同 bank 或 global bank，會讓
+                        # project → work 這種新規則允許的方向解析得到名字卻拿不到 id。
+                        tid = by_id_name.get(resolved)
                     cur.execute(
                         """INSERT INTO memory_links(source_id, target_name, target_id, kind)
                            VALUES (%s,%s,%s,'wikilink') ON CONFLICT DO NOTHING""",

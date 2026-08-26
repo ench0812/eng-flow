@@ -601,3 +601,70 @@ def test_unknown_scope_rejected(conn, home: Path):
     _seed_projects(conn, home)
     with pytest.raises(Exception, match="沒有單一 bank 的 scope|未知的 scope"):
         mutate.write(conn, _cfg(), name="bad", scope="nonsense", description="x", body="\nb\n")
+
+
+# ---------- Task 3：resolver 三分支 ----------
+
+def test_resolver_forbidden_is_error_not_dangling(conn, home: Path):
+    """來源側：目標存在但方向禁止 → 整筆 rollback，不可降級成 dangling。
+
+    若 resolver 只在允許範圍內搜尋，「已知但禁止」會被當成「未知」寫成 target_id=NULL，
+    trigger 對 NULL 直接放行，於是命令成功、audit 只報 dangling——與「禁止」的語義不符。
+    """
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="mach-only", scope="machine", description="本機的",
+                 body="\nb\n", kind="semantic")
+    conn.commit()
+    with pytest.raises(mutate.MutateError, match="cross_repo_link"):
+        mutate.write(conn, _cfg(), name="g-bad", scope="global", description="全域的",
+                     body="\n引用 [[mach-only]]。\n", kind="semantic")
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='g-bad'")
+        assert cur.fetchone()[0] == 0
+
+
+def test_resolver_unknown_stays_dangling(conn, home: Path):
+    """目標不存在仍是 dangling，交給 audit 報——與「禁止」是兩件事。"""
+    mutate.write(conn, _cfg(), name="g-unknown", scope="global", description="全域的",
+                 body="\n引用 [[nobody-here]]。\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT target_id IS NULL FROM memory_links WHERE target_name='nobody-here'")
+        assert cur.fetchone()[0] is True
+
+
+def test_backfill_forbidden_stays_dangling_without_blocking_creation(conn, home: Path):
+    """目標側：建立目標時，別人那條禁止方向的 dangling 不可阻擋本次寫入。
+
+    與來源側刻意不同——拋錯會讓「B 建不了 foo，只因為 A 有一條過期的 [[foo]]」，
+    那是與本次寫入無關的附帶損害。資訊由 audit 的 forbidden_ref 承接。
+    """
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="g-waiting", scope="global", description="等目標的",
+                 body="\n引用 [[later]]。\n", kind="semantic")
+    conn.commit()
+    mutate.write(conn, _cfg(), name="later", scope="machine", description="本機的",
+                 body="\nb\n", kind="semantic")          # 不得被擋下
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='later'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT target_id IS NULL FROM memory_links WHERE target_name='later'")
+        assert cur.fetchone()[0] is True                 # 那條仍是 dangling
+
+
+def test_backfill_allowed_direction_links_up(conn, home: Path):
+    """project 的 dangling 指向後來建立的 work 目標 → 正確 backfill 成非 NULL。"""
+    _seed_projects(conn, home)
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="p-waiting", scope="project", description="專案的",
+                 body="\n引用 [[w-later]]。\n", kind="semantic",
+                 project_slug="D--Projects-IntelliPark")
+    conn.commit()
+    mutate.write(conn, _cfg(), name="w-later", scope="work", description="工作的",
+                 body="\nb\n", kind="semantic")
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT target_id IS NOT NULL FROM memory_links WHERE target_name='w-later'")
+        assert cur.fetchone()[0] is True
