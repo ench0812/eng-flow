@@ -357,3 +357,166 @@ def test_auto_export_failure_exits_1(conn, home: Path, tmp_path, monkeypatch, ca
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM memories WHERE name='ae'")
         assert cur.fetchone()[0] == 1        # DB 已更新，只是 md 沒同步
+
+
+# ---------- Task 5：同步分割區 ----------
+
+def test_import_missing_optional_bank_does_not_delete(conn, home: Path):
+    """work bank not_installed 時，import 不得刪除 DB 內既有的 work 列。"""
+    from memory_pg import mutate
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="w-keep", scope="work", description="工作的", body="\nb\n")
+    conn.commit()
+    shutil.rmtree(home / "memory-work")            # 模擬工作 repo 沒 clone
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='w-keep'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_import_one_project_bank_does_not_delete_others(conn, home: Path):
+    """刪除授權的最小單位是同步分割區：project 是 (scope, home_project_id)。
+
+    掃到一個專案就以 scope='project' 授權刪除，會把其他未出現的專案一併掃掉。
+    """
+    pa = home / "projects" / "D--Projects-A" / "memory"
+    pb = home / "projects" / "D--Projects-B" / "memory"
+    write_memory(pa, "a-mem", "A 的")
+    write_memory(pb, "b-mem", "B 的")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    shutil.rmtree(pb.parent)                        # B 專案整個目錄消失
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='b-mem'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_import_same_partition_still_deletes(conn, home: Path):
+    """同一分割區內「檔案沒了 = 記憶被刪」的語義不變。"""
+    g = home / "memory"
+    write_memory(g, "g-a", "A")
+    write_memory(g, "g-b", "B")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    (g / "g-b.md").unlink()
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='g-b'")
+        assert cur.fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("argv", [
+    ["import", "--purge-scope", "work"],
+    ["import", "--purge-scope", "work", "--yes"],
+])
+def test_purge_rejected_while_installed(conn, home: Path, monkeypatch, argv):
+    """bank 仍 installed 時 purge 一律拒絕：只刪 DB 會被下一次 import 從 md 復活。"""
+    from memory_pg import cli, mutate
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="w-purge", scope="work", description="工作的", body="\nb\n")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(argv) == 2
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='w-purge'")
+        assert cur.fetchone()[0] == 1
+
+
+def test_purge_scope_after_uninstall(conn, home: Path, monkeypatch, capsys):
+    from memory_pg import cli, mutate
+    seed_banks(home)
+    mutate.write(conn, _cfg(), name="w-purge", scope="work", description="工作的", body="\nb\n")
+    conn.commit()
+    shutil.rmtree(home / "memory-work")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["import", "--purge-scope", "work"]) == 2        # 缺 --yes
+    assert "w-purge" in capsys.readouterr().out                      # 但要先列出清單
+    assert cli.main(["import", "--purge-scope", "work", "--yes"]) == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='w-purge'")
+        assert cur.fetchone()[0] == 0
+
+
+def test_purge_project_and_all_projects(conn, home: Path, monkeypatch):
+    from memory_pg import cli
+    pa = home / "projects" / "D--Projects-A" / "memory"
+    pb = home / "projects" / "D--Projects-B" / "memory"
+    write_memory(pa, "a-mem", "A")
+    write_memory(pb, "b-mem", "B")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    shutil.rmtree(pa.parent)
+    shutil.rmtree(pb.parent)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert cli.main(["import", "--purge-project", "D--Projects-A", "--yes"]) == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='b-mem'")
+        assert cur.fetchone()[0] == 1                                # 只刪 A
+    assert cli.main(["import", "--purge-all-projects", "--yes"]) == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE scope='project'")
+        assert cur.fetchone()[0] == 0
+
+
+# ---------- Task 5：presence 四態必須窮舉 ----------
+
+def _count_all(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories")
+        return cur.fetchone()[0]
+
+
+def test_presence_damaged_install_aborts(conn, home: Path, monkeypatch):
+    """git dir 在、bank 目錄不在 → 安裝損壞，整批 exit 1，不得當成空 bank。"""
+    from memory_pg import cli
+    seed_banks(home)
+    write_memory(home / "memory", "g-keep", "全域的")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    shutil.rmtree(home / "memory-machine")
+    (home.parent / ".claude-machine.git").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    before = _count_all(conn)
+    assert cli.main(["import"]) == 1
+    assert _count_all(conn) == before                 # 零寫入零刪除
+
+
+def test_presence_path_is_regular_file(conn, home: Path, monkeypatch):
+    """bank 路徑存在但不是目錄 → unavailable → exit 1，零寫入零刪除。"""
+    from memory_pg import cli
+    seed_banks(home)
+    write_memory(home / "memory", "g-keep2", "全域的")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    shutil.rmtree(home / "memory-work")
+    (home / "memory-work").write_text("我是檔案不是目錄", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    before = _count_all(conn)
+    assert cli.main(["import"]) == 1
+    assert _count_all(conn) == before
+
+
+def test_project_bank_absent_is_not_damaged_install(conn, home: Path, monkeypatch):
+    """工作 git dir 存在，但某個 project bank 缺席 → 不得推導為 damaged_install。
+
+    部分 clone、新專案尚未建庫都是合法的；判成失敗會讓那些機器連 import 都跑不了。
+    """
+    from memory_pg import cli
+    seed_banks(home)
+    (home.parent / ".claude-work.git").mkdir(parents=True, exist_ok=True)
+    write_memory(home / "projects" / "D--Projects-A" / "memory", "a-mem", "A")
+    importer.run(conn, _cfg(), dry_run=False)
+    conn.commit()
+    shutil.rmtree(home / "projects" / "D--Projects-A")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    # --no-verify：專案目錄在本機被刪掉之後，DB 仍有該專案的列，export --verify 必然報
+    # missing_in_bank。那是「這台機器沒有那個目錄」的正確反映，不是 import 的問題；
+    # 這一則要釘的是【import 不得刪資料，也不得判成 damaged_install】。
+    assert cli.main(["import", "--no-verify"]) == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE name='a-mem'")
+        assert cur.fetchone()[0] == 1                 # 且沒被刪

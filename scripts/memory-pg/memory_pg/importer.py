@@ -78,6 +78,13 @@ def _parse_modified(v: str | None) -> datetime | None:
 def build_model(cfg: Config) -> tuple[list[Item], list[str]]:
     """回傳 (items, fatal_problems)。fatal 非空 → 呼叫端 abort。"""
     problems: list[str] = []
+    # presence 守門：discover 只會「沒收到」缺席的 bank，分不出「未安裝」與「安裝損壞」。
+    # damaged_install（git dir 在、bank 目錄不在）若不擋，該 scope 會被當成空 bank，
+    # 接著 delete-absent 就把它的記憶全刪掉。unavailable 同理——狀態未知時 fail-closed。
+    for sc in ("global", "machine", "work"):
+        st = cfg.bank_presence(sc)
+        if st in ("damaged_install", "unavailable"):
+            problems.append(f"bank_{st} {cfg.bank_for_scope(sc)}")
     banks, rejected = bankmod.discover(cfg.home)
     for code, path in rejected:
         problems.append(f"{code} {path}")
@@ -309,13 +316,31 @@ def write(conn: psycopg.Connection, cfg: Config, items: list[Item], *, dry_run: 
                     n += 1
             rep.links = n
 
-            # 完整同步：import 是 bank→DB 的權威同步，不是只 upsert。已從 bank 刪除的記憶
-            # （DB 有、這批沒有）必須在同一交易內刪掉，否則 export 會把它重新寫回 bank。
-            # 前提成立：discover/scan 的任一拒收都已讓 build_model abort（problems 非空），
-            # 走到這裡代表 bank 集合是完整的，delete-absent 才安全。
+            # 完整同步，但**刪除授權的最小單位是「同步分割區」，不是整個庫**。
+            #
+            # 三個 repo 可以獨立存在之後，「掃描時沒看到」有三種意思：未安裝、暫時讀不到、
+            # 真的被刪。舊版的 `DELETE ... id <> ALL(kept)` 把三者混為一談——只 clone 通用
+            # repo 的機器跑一次 import，就會把 machine/work/所有專案的記憶全刪掉。
+            #
+            # 分割區：global / machine / work 各以 scope 為單位；**project 以
+            # (scope, home_project_id) 為單位**，因為 project 對應多個 bank——掃到一個專案
+            # 就以 scope='project' 授權刪除，會把其他未出現的專案一併掃掉。
+            # 這是安全鐵律 4：「還不知道」與「確認不需要」是兩件事，無法判斷時 fail-closed。
             kept = list(mem_id.values())
-            cur.execute("DELETE FROM memories WHERE id <> ALL(%s)", (kept,))
-            rep.deleted = cur.rowcount
+            scanned_scopes = sorted({it.scope for it in items if it.scope != "project"})
+            scanned_pids = sorted({proj_id[it.slug] for it in items
+                                   if it.scope == "project" and it.slug in proj_id})
+            deleted = 0
+            if scanned_scopes:
+                cur.execute("DELETE FROM memories WHERE scope = ANY(%s) AND id <> ALL(%s)",
+                            (scanned_scopes, kept))
+                deleted += cur.rowcount
+            if scanned_pids:
+                cur.execute("DELETE FROM memories WHERE scope='project' "
+                            "AND home_project_id = ANY(%s) AND id <> ALL(%s)",
+                            (scanned_pids, kept))
+                deleted += cur.rowcount
+            rep.deleted = deleted
         if dry_run:
             raise _DryRun()
     return rep

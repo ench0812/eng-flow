@@ -12,7 +12,7 @@ import psycopg
 from psycopg import conninfo
 
 from . import __version__, config, db, frontmatter as fm, migrate
-from .errors import EXIT_OK, EXIT_UNDETERMINED, MemoryError_, UsageError
+from .errors import EXIT_OK, EXIT_UNDETERMINED, EXIT_USAGE, MemoryError_, UsageError
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -285,6 +285,47 @@ def _embed_smoke(conn, cfg, model, dim) -> int:
     return 1 if bad else EXIT_OK
 
 
+def _cmd_purge(args, cfg, conn) -> int:
+    """卸載後清理：刪掉某個已卸載分割區在 DB 的殘留列。
+
+    **presence 必須是 not_installed 才允許**。bank 仍 installed 時只刪 DB，下一次 import
+    會從 md 把它復活；若順手連 bank 一起刪，等於刪掉仍受版控的檔案——不可逆範圍變得不清楚。
+    真有「同時清 DB 與 bank」的需求，另設語義明確的破壞性命令，不沿用 purge。
+    unavailable / damaged_install 一律禁止（狀態未知時不做不可逆操作，安全鐵律 4）。
+    """
+    where, params, label = [], [], []
+    for sc in (args.purge_scope or []):
+        st = cfg.bank_presence(sc)
+        if st != "not_installed":
+            print(f"WARN -: purge_refused {sc} 的 bank 狀態是 {st}，只有 not_installed 才允許 purge。"
+                  f"要清 DB 請先卸載該 repo", file=sys.stderr)
+            return EXIT_USAGE
+        where.append("scope = %s"); params.append(sc); label.append(sc)
+    slugs = list(args.purge_project or [])
+    if args.purge_all_projects:
+        where.append("scope = 'project'"); label.append("所有專案")
+    elif slugs:
+        where.append("home_project_id IN (SELECT id FROM projects WHERE slug = ANY(%s))")
+        params.append(slugs); label.append(",".join(slugs))
+    cond = " OR ".join(where)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT name FROM memories WHERE {cond} ORDER BY name", params)
+        names = [r[0] for r in cur.fetchall()]
+    print(f"purge 將刪除 {len(names)} 則（{'; '.join(label)}）：")
+    for n in names:
+        print(f"  {n}")
+    if not args.yes:
+        print("WARN -: purge_needs_yes 這是不可逆操作，確認清單無誤後加 --yes 執行",
+              file=sys.stderr)
+        return EXIT_USAGE
+    with db.top_level_transaction(conn):
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM memories WHERE {cond}", params)
+            n = cur.rowcount
+    print(f"purge deleted={n}")
+    return EXIT_OK
+
+
 def _cmd_import(args: argparse.Namespace) -> int:
     from . import exporter, importer
 
@@ -292,6 +333,8 @@ def _cmd_import(args: argparse.Namespace) -> int:
     conn = db.connect(cfg)
     try:
         db.assert_schema(conn)
+        if args.purge_scope or args.purge_project or args.purge_all_projects:
+            return _cmd_purge(args, cfg, conn)
         rep = importer.run(conn, cfg, dry_run=args.dry_run)
         for w in rep.warnings:
             print(f"WARN -: {w}", file=sys.stderr)
@@ -783,6 +826,14 @@ def build_parser() -> argparse.ArgumentParser:
     i = sub.add_parser("import", help="把 Markdown bank 匯入 PG（單一交易；來源有誤整批不寫）")
     i.add_argument("--dry-run", action="store_true", help="只驗證與統計，rollback 不寫入")
     i.add_argument("--no-verify", action="store_true", help="匯入後不跑 export --verify")
+    i.add_argument("--purge-scope", choices=["global", "machine", "work"], action="append",
+                   help="卸載後清理：刪除該 scope 在 DB 的殘留列（要求 bank 為 not_installed）")
+    i.add_argument("--purge-project", action="append", metavar="SLUG",
+                   help="卸載後清理單一專案（可多次）")
+    i.add_argument("--purge-all-projects", action="store_true",
+                   help="卸載後清理所有專案。獨立旗標而非 --purge-project 的特例值："
+                        "--purge-project 是 append，不帶值會在解析階段就報缺值")
+    i.add_argument("--yes", action="store_true", help="確認執行 purge（不可逆）")
     i.set_defaults(fn=_cmd_import)
 
     e = sub.add_parser("export", help="從 PG 產生 Markdown bank（記憶檔 + MEMORY.md）")
