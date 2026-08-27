@@ -289,6 +289,65 @@ def test_cli_meta_only_edit_with_non_tty_stdin_keeps_body(conn, home: Path, monk
     assert links == 1
 
 
+def test_cli_edit_refuses_inherited_nonempty_stdin(conn, home: Path, monkeypatch):
+    """繼承到的非空 stdin 不可被當成新正文（2026-08-26 實際毀掉一則記憶）。
+
+    炸掉的寫法是 `while read -r n k; do memory edit "$n" --kind "$k" --reason r; done <<< "$MAP"`：
+    第一次呼叫把 heredoc 剩下的行整段吃成新正文，迴圈也因 stdin 被吸乾只跑一輪，
+    卻印 ok=1。**audit 在定義上看不出來**——正文有內容、連結沒斷。所以只能在 CLI 層 fail-closed。
+    """
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="loop-victim", scope="global", description="會被迴圈掃到的",
+                 body="\n原本的正文，不可以被 stdin 蓋掉。\n", kind="semantic")
+    conn.commit()
+    leftover = "other-mem procedural\nthird-mem decision\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(leftover))
+    assert sys.stdin.isatty() is False
+
+    assert cli.main(["edit", "loop-victim", "--kind", "decision", "--reason", "只補分類"]) == 2
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT kind::text, body FROM memories WHERE name='loop-victim'")
+        kind, body = cur.fetchone()
+    # 拒絕要是「整個不做」，不能只擋正文卻把 kind 改掉——那會留下半套狀態。
+    assert kind == "semantic"
+    assert "原本的正文" in body
+    assert "other-mem" not in body
+
+
+def test_cli_edit_stdin_flag_is_the_explicit_way(conn, home: Path, monkeypatch):
+    """正控組：明講 --stdin 時 stdin 就是新正文，上一個測試擋的不是「stdin 永遠不能用」。
+
+    沒有這一組，把 `_read_input` 改成永遠回空字串也會讓上面那個測試通過——
+    那種修法會讓 `memory edit --stdin` 靜默失效（判準見記憶 verification-must-discriminate）。
+    """
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="stdin-ok", scope="global", description="舊描述",
+                 body="\n舊正文。\n", kind="semantic")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("新正文從 stdin 進來。\n"))
+
+    assert cli.main(["edit", "stdin-ok", "--stdin", "--reason", "換正文"]) == 0
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT body FROM memories WHERE name='stdin-ok'")
+        assert "新正文從 stdin 進來" in cur.fetchone()[0]
+
+
+def test_cli_edit_refuses_empty_stdin_flag(conn, home: Path, monkeypatch):
+    """--stdin 卻讀到空的：與 --file 指到空檔同一個理由，不當成「請清空」。"""
+    _seed_projects(conn, home)
+    mutate.write(conn, _cfg(), name="stdin-empty", scope="global", description="有內容",
+                 body="\n原本的正文。\n", kind="semantic")
+    conn.commit()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("   \n"))
+
+    assert cli.main(["edit", "stdin-empty", "--stdin", "--reason", "手滑"]) == 2
+    with conn.cursor() as cur:
+        cur.execute("SELECT body FROM memories WHERE name='stdin-empty'")
+        assert "原本的正文" in cur.fetchone()[0]
+
+
 def test_cli_edit_refuses_empty_file(conn, home: Path, tmp_path: Path, monkeypatch):
     """--file 指向空檔是用法錯（2），不可靜默把記憶清空。"""
     _seed_projects(conn, home)

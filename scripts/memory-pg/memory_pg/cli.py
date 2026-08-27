@@ -622,6 +622,25 @@ def _cmd_edit(args: argparse.Namespace) -> int:
             # 破壞性操作在意圖不明時一律 fail-closed（安全鐵律 5）。
             raise UsageError(f"--file 指向的檔案沒有內容（{args.file}），拒絕執行——這通常是檔名弄錯，而不是真的要把這則記憶清空",
                              code="empty_input")
+        if args.stdin and not raw.strip():
+            # 明講了要從 stdin 讀正文卻什麼都沒讀到——與上面同一個理由，不當成「請清空」。
+            raise UsageError("--stdin 沒有讀到任何內容，拒絕執行——要清空正文請明確給一個有內容的 --file",
+                             code="empty_input")
+        if raw.strip() and not args.file and not args.stdin:
+            # **繼承到的 stdin 不等於「這是新正文」。** edit 的正文是選填的，所以「stdin 剛好非空」
+            # 這件事完全無法區分「我要換正文」與「我只是在迴圈/管線裡」。實測 2026-08-26：
+            #   while read -r n k; do memory edit "$n" --kind "$k" --reason r; done <<< "$MAP"
+            # 第一次呼叫把 heredoc 剩下的 71 行整段當成新正文寫進第一則記憶（479 → 2557 字），
+            # 迴圈也因 stdin 被吸乾只跑一輪，卻印出 ok=1、audit 全綠——正文有內容、連結沒斷，
+            # 稽核在定義上看不出來。要靠 revisions 才救得回來。
+            # 因此改成 fail-closed：意圖必須明講。write/learn 不受影響（它們的正文是必填的，
+            # 拿錯內容會生出一則看得見的新記憶，不是把既有的抹掉）。
+            preview = raw.strip().splitlines()[0][:60]
+            raise UsageError(
+                "edit 從繼承到的 stdin 讀到內容，但沒有 --file / --stdin，無法判斷這是不是你要的新正文，拒絕執行"
+                f"（第一行：{preview!r}）。"
+                "要換正文請用 --file <path>，或明講 --stdin；只是要改 kind/pin/review-by 就加 </dev/null 把 stdin 關掉。",
+                code="ambiguous_stdin")
         _, desc, body = mutate._parse_input(args.name, raw) if raw.strip() else (None, None, None)
         with db.top_level_transaction(conn):
             # desc 為空字串 = 輸入是純 body（無 frontmatter），代表「不改 description」，不可當成要寫入空值
@@ -899,7 +918,10 @@ def build_parser() -> argparse.ArgumentParser:
     ed = sub.add_parser("edit", help="改記憶內容或治理欄位（舊版進 revisions）")
     ed.add_argument("name")
     ed.add_argument("--description")
-    ed.add_argument("--file")
+    ed.add_argument("--file", help="從 md 檔換掉正文（完整 frontmatter 或純 body）")
+    ed.add_argument("--stdin", action="store_true",
+                    help="明講要從 stdin 讀新正文。不給這個也不給 --file 時，stdin 若非空一律拒絕執行"
+                         "（繼承到的 stdin 分不出是不是新正文）；純治理型編輯請加 </dev/null")
     ed.add_argument("--kind", choices=["semantic", "episodic", "procedural", "decision", "environment"],
                     help="改分類（決定匯出索引的分組）")
     g = ed.add_mutually_exclusive_group()
