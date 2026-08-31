@@ -241,6 +241,32 @@ diff_delta_per_file() {  # $1=上一輪 diff 快照 $2=本輪 diff
     }' "$1" "$2"
 }
 
+# --- codex 能力邊界宣告(三種 prompt 共用;2026-08-31 新增) ---
+# 為什麼要明講: 實測 codex 0.148.0 在 `--sandbox read-only` 下讀得到工作根內任何檔案、本機
+# 其他 repo 的絕對路徑、以及 git log/show/blame——三項都逐一驗過(含未列入 config.toml
+# `[projects]` trust 清單的 repo)。但 diff 模式的 prompt 從來沒告訴它這件事(doc 模式一直
+# 都有那句「你有唯讀檔案權限」),於是它把自己當成「只拿到一份 diff 的 reviewer」,給出未經
+# 查證的推論,甚至回報「沒有 repo 存取權」。能力一直都在,缺的只是宣告。
+# 網路則是真的沒有: sandbox 內連 api.github.com:443 被拒(「存取權限不足」),所以 gh / 任何
+# HTTP 一律不可用。要開網路得降到 danger-full-access,那等於放棄唯讀保證——不做,改成
+# 明確告訴它「需要遠端資料就講出來,由呼叫端取」。
+# 【已讀】/【推論】標註是本次改動的重點: 沒有它,查證與臆測在輸出裡長得一模一樣,呼叫端無從
+# 分辨哪幾條需要自己回頭核對(這正是 verification-must-discriminate 的形態)。
+access_note() {  # $1=工作根絕對路徑
+  cat <<EOF
+你在唯讀沙箱內執行,shell 工具的工作根是 $1。你【可以且應該】用工具查證,不要只憑手上的片段推論:
+  - 讀取工作根內任何檔案(相關的實際程式碼、呼叫端、型別定義、既有測試與設定)
+  - 讀取本機其他 repo 的【絕對路徑】(跨服務接縫審查要比對對端契約就自己去讀)
+  - 跑 git log / git show / git blame 取得歷史脈絡
+禁止修改任何檔案——唯讀是硬性的,但唯讀不代表你只能看送進來的那份內容。
+你【沒有網路】: GitHub 遠端、gh 指令、任何 HTTP 都連不上。需要遠端資料(PR 討論、上游 repo、
+未 fetch 的分支)時,在回覆中明講你需要什麼、由呼叫端取來,不要拿猜測當依據下結論。
+每一項發現都要標明依據,標在嚴重度後面:
+  【已讀】= 你實際讀過相關原始碼/歷史確認過; 【推論】= 僅由送進來的片段推得、未經查證。
+能查證的一律去查,不要用【推論】規避查證;查了仍無法確定就標【推論】並說明卡在哪裡。
+EOF
+}
+
 # JSON 取數(只取第一個匹配;usage 物件是扁平的整數欄位,不需要 jq)
 jnum() {
   printf '%s' "$1" | grep -o "\"$2\":[0-9]*" | head -1 | cut -d: -f2
@@ -431,22 +457,29 @@ SKIP_GIT_FLAG=""
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if [ "$DOC_MODE" -eq 1 ]; then
     # codex exec 在非 git 目錄會報 "Not inside a trusted directory";sandbox 已是
-    # read-only 續跑無風險,但 codex 無 repo 上下文可交叉比對(plan 模式讀不到 Spec: 上游檔)。
+    # read-only,續跑無風險。
     SKIP_GIT_FLAG="--skip-git-repo-check"
-    echo "[codex-review] 注意: 不在 git repo 內,doc 模式續跑(--skip-git-repo-check);codex 無 repo 上下文可讀。" >&2
+    # 2026-08-31 訂正: 舊註解與訊息都寫「codex 無 repo 上下文可讀/可交叉比對」,那是錯的
+    # ——唯讀沙箱下它照樣讀得到本目錄與任何絕對路徑(實測)。真正缺的只有 git 歷史,以及
+    # 「相對路徑基準不是 repo 根」(plan 的 `Spec:` 若寫相對路徑就會落空,寫絕對路徑則讀得到)。
+    echo "[codex-review] 注意: 不在 git repo 內,doc 模式續跑(--skip-git-repo-check)。codex 仍可讀本目錄與絕對路徑,但沒有 git 歷史可查;plan 的 Spec: 上游檔請用絕對路徑。" >&2
   else
     echo "[codex-review] SKIP: 目前不在 git repo 內。" >&2
     exit 0
   fi
 fi
 
+# 工作根: 三種 prompt 的 access_note 都要用,所以在這裡就算好(原本定義在下方 ledger 段,
+# 對 prompt 組裝而言太晚)。中間沒有任何改變 cwd 的動作,值與原位置相同。
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
 if [ "$DOC_MODE" -eq 1 ]; then
   # ---------- doc 模式: spec/plan 共議(co-design)諮詢 ----------
   if [ "$KIND" = "spec" ]; then
     read -r -d '' PROMPT_BODY <<'EOF'
 你是第二位共同設計者(co-designer)。第一位設計者(Claude)已完成需求釐清並寫出這份設計文件
-(design spec)草稿,即 stdin 的完整內容;文件路徑在本訊息開頭。你有唯讀檔案權限,可自行讀取
-repo 內程式碼與文件驗證假設,但禁止修改任何檔案。
+(design spec)草稿,即 stdin 的完整內容;文件路徑在本訊息開頭。你的能力邊界見本訊息開頭的說明
+——設計是否落地得了,要靠實際讀 codebase 判斷,不要只憑文件內容想像。
 你的任務不是挑錯,是把設計變得更好。請提出三類貢獻,每項都要給具體建議內容:
   a. 補充: 遺漏的需求、邊界情況、錯誤路徑、狀態轉換(附建議加入的條文)
   b. 替代: 更好的做法(附方案描述與取捨比較)
@@ -472,10 +505,10 @@ EOF
   else
     read -r -d '' PROMPT_BODY <<'EOF'
 你是第二位共同設計者(co-designer)。第一位設計者(Claude)已依已核准的 spec 寫出這份實作計畫
-(implementation plan)草稿,即 stdin 的完整內容;文件路徑在本訊息開頭。你有唯讀檔案權限,
-禁止修改任何檔案。
+(implementation plan)草稿,即 stdin 的完整內容;文件路徑在本訊息開頭。你的能力邊界見本訊息
+開頭的說明。
 第一步: 找到計畫開頭的「Spec:」行,讀取該 design doc 作為交叉比對基準;若沒有 Spec: 行或
-檔案讀不到,明確註明這點,並僅就計畫本身共議。
+檔案讀不到,明確註明這點,並僅就計畫本身共議。相對路徑請以本訊息開頭給的工作根為基準解析。
 你的任務不是挑錯,是讓這份計畫更能被零上下文的執行者一次做對。請提出三類貢獻,每項都要給
 具體建議內容:
   a. 補充: 遺漏的 task、步驟、測試或驗證(附建議加入的內容)
@@ -501,6 +534,7 @@ EOF
   fi
   # 文件路徑經變數插值放在引導行,不進 heredoc —— prompt 本體保持零展開
   REVIEW_PROMPT="待審文件路徑: ${DOC}(類型: ${KIND})。stdin 為其完整內容。
+$(access_note "$REPO_ROOT")
 ${PROMPT_BODY}"
   # 只附最後一輪 Cross-Check Log(見 trim_crosscheck_log 的說明):
   # 舊行為是整份重送,實測讓 payload 在 12 輪內從 4,929 長到 26,758 字元。
@@ -590,10 +624,14 @@ else
   fi
 
   # --- 第二意見 review prompt(人類可讀) ---
-  read -r -d '' REVIEW_PROMPT <<'EOF'
+  # 改用 PROMPT_BODY + 引導行組裝(對齊 doc 模式): 工作根路徑要插值,而 prompt 本體必須維持
+  # quoted heredoc 的零展開——diff 內容裡的 $ 與反引號不能被 shell 碰到。
+  read -r -d '' PROMPT_BODY <<'EOF'
 你是獨立的第二位 code reviewer。第一輪五軸 review 已完成、所有 required/critical 已修正。
-針對以下這次變更的 git diff,只回報「前一輪可能遺漏的問題」或「值得調整的建議」,不重述已明顯正確的部分。
-逐項標明嚴重度並附「檔案:行 + 具體理由」,順序由重到輕:
+針對這次變更的 git diff(在 stdin),只回報「前一輪可能遺漏的問題」或「值得調整的建議」,不重述已明顯正確的部分。
+diff 只是變更片段,不是全部事實: 改動點周圍的程式碼、呼叫端、既有測試與型別定義都在工作根裡,
+判斷「這個改動會不會壞」通常需要讀它們——請善用工具查證後再下判斷。
+逐項標明嚴重度並附「檔案:行 + 依據標註 + 具體理由」,順序由重到輕:
   Critical(阻斷合併) / Required(合併前必修) / Optional(建議) / Nit(可忽略) / FYI
 五個檢查軸: 正確性(邊界、錯誤路徑、測試覆蓋) / 可讀性與簡潔 / 架構(重複、邊界、循環相依) /
   安全(硬編 secrets、輸入驗證、輸出編碼、authz、加密演算法) / 效能(N+1、無界迴圈、同步阻塞)。
@@ -602,6 +640,8 @@ else
 變更風險最大者。若已無足以改變這次變更的問題,寫「收斂問句:無」;不要為了湊問題而發明新議題。
 你是唯讀第二意見,禁止修改任何檔案。
 EOF
+  REVIEW_PROMPT="$(access_note "$REPO_ROOT")
+${PROMPT_BODY}"
   PAYLOAD="$DIFF"
   SRC_INFO="base=$BASE (merge-base=${MB:0:12})"
 fi
@@ -614,7 +654,6 @@ fi
 #     resume: input 14,943 / cached 14,080 → 未快取   863   (未快取 input 降 82%)
 # 狀態只放在 $CODEX_REVIEW_STATE,不碰 repo、不碰待審文件——文件裡的 Cross-Check Log 仍是
 # 收斂協議的權威來源,ledger 只補上 diff 模式先前完全沒有的輪次概念。
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 if [ "$DOC_MODE" -eq 1 ]; then
   MODE_NAME="doc"; LEDGER_TARGET="$DOC"; WARN_AT="$CONVERGE_WARN_ROUNDS"
 else
@@ -712,7 +751,8 @@ RESUME_PROMPT="這是同一份待審對象的下一輪諮詢(第 ${ROUND_NO} 輪
 請沿用先前的檢查面向與輸出格式(嚴重度由重到輕),只回報兩類: (a) 這些變更帶來的新問題; (b) 先前指出但仍未解決的問題。已解決的不必重述。
 若兩類都沒有,直接回「無重大遺漏」。
 回覆最後必須以單獨一行作結:「收斂問句:<你認為最關鍵的一個未決問題>」——只能提一個;已無足以改變產出的問題就寫「收斂問句:無」,不要為了湊問題而擴大範圍。
-你是唯讀第二意見,禁止修改任何檔案。"
+能力邊界與依據標註規則同先前輪次(整段不重送以省 token): 可用 shell 工具讀工作根內任何檔案、
+其他 repo 的絕對路徑與 git 歷史來查證;無網路;每項發現標【已讀】或【推論】。唯讀,禁止修改任何檔案。"
 
 # --- 送出前的輸入長度守門(2026-08-12 新增) ---
 # 為什麼要在送出前擋: codex 對超長 payload 是在 turn/start 就拒絕,跑都沒跑。等它回錯誤才發現,
@@ -767,6 +807,20 @@ LAST_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-last-$$.txt")"
 
 trap 'rm -f "$ERR_FILE" "$RC_FILE" "$JSON_FILE" "$LAST_FILE"' EXIT
 
+# --- codex 的實際 cwd 必須等於 access_note 宣告的工作根(2026-08-31,codex 自身複查抓到) ---
+# 從 repo 【子目錄】呼叫本腳本時,codex exec 的 cwd 是呼叫端的 cwd 而不是 repo 根,於是
+# access_note 宣告的路徑與它實際看到的不一致——相對路徑(plan 的 `Spec:` 行)會落在子目錄,
+# 而 prompt 還信誓旦旦說工作根是別的地方。宣告與事實不符比不宣告更糟。
+# fresh 用 codex 的正式介面 --cd(實測 0.148.0 可用,且吃得下 git rev-parse 回的正斜線路徑);
+# `codex exec resume` 【沒有】這個旗標(實測 --help 只有 --skip-git-repo-check / --ephemeral),
+# 所以另外實際 cd 一次把兩條路徑都蓋住。此時 PAYLOAD 已算完,後續只寫絕對路徑的 state,cd 安全。
+# fail-closed: 工作根進不去代表宣告的前提不成立,不可帶著錯的宣告去諮詢。
+if ! cd "$REPO_ROOT" 2>/dev/null; then
+  echo "[codex-review] FAILED: 無法進入工作根 $REPO_ROOT,複查沒有發生——呼叫端不得視為已複查。" >&2
+  emit_telemetry FAILED
+  exit 1
+fi
+
 # 為什麼改用 --json: 人類模式只印 `tokens used <總數>`,拿不到 cached/input 拆分,
 # 沒有拆分就沒有 cache hit rate 可言。--json 的 turn.completed 事件帶
 # {input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens,
@@ -795,6 +849,7 @@ EPHEMERAL_FLAG=""
     else
       printf '%s\n' "$SEND_PAYLOAD" \
         | "$CODEX_BIN" exec --sandbox read-only --json -o "$LAST_FILE" $EPHEMERAL_FLAG $SKIP_GIT_FLAG \
+            --cd "$REPO_ROOT" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT"
     fi
     echo "${PIPESTATUS[1]}" > "$RC_FILE"
@@ -876,6 +931,45 @@ fi
 if ! grep -qE "^收斂問句[:：][[:space:]]*[^[:space:]]" "$OUT_FILE" 2>/dev/null; then
   echo "[codex-review] 注意: 回覆未附行首「收斂問句:」行(協議要求)。視為「收斂問句:無」——依預設收斂停止,不得據此續輪。" >&2
 fi
+
+# --- codex 的 shell 工具是否失敗過(2026-08-31 新增) ---
+# 為什麼要偵測: 工具呼叫失敗時 codex 【不會中止】,它拿手上的 diff/文件繼續作答——輸出看起來
+# 完全正常、照樣有嚴重度與收斂問句,只是所有「需要讀原始碼才能確認」的判斷都退化成臆測。
+# 這台機器上實測遇過兩種,根因不同:
+#   CreateProcessAsUserW failed: 5              WindowsApps 版 pwsh 的 ACL(已修,但升版/換機會復發)
+#   CreateProcessWithLogonW failed: 267 +
+#   "Failed to create unified exec process"     間歇性;同一目錄重跑即恢復,不是路徑或 ACL 問題
+# 刻意【不】升成 FAILED: review 本體仍是有效的第二意見,丟掉它懲罰過當;要的是讓呼叫端知道
+# 「這一輪的查證深度打折」。與 prompt 裡的【已讀】/【推論】標註互補——那個靠 codex 自律,
+# 這個是腳本的客觀觀測,兩者對不上時以這裡為準。
+TOOL_FAIL_PAT='exec_command failed for|CreateProcess[A-Za-z]* failed|Failed to create unified exec process'
+# 【必須先剔除看起來像 diff 的行】,理由與 is_rate_limited 的 429 判定完全相同(見該函式註解):
+# 待審 diff 本身可能含這些字串——本次改動的 diff 就含,因為註解裡引用了實際錯誤訊息。
+# 0.148.0 的 --json 模式不把 payload 回顯到 stderr,但既有測試記錄 0.144.x 會,而腳本要能
+# 跨版本用;靠「當前版本剛好不回顯」等於把正確性寄託在一個沒人保證的實作細節上。
+TOOL_FAIL_LINES="$(grep -vE '^(@@|\+\+\+|---|diff --git|index [0-9a-f]+\.\.|[+-])' "$ERR_FILE" 2>/dev/null \
+                   | grep -E "$TOOL_FAIL_PAT" 2>/dev/null)"
+if [ -n "$TOOL_FAIL_LINES" ]; then
+  echo "[codex-review] 警示: codex 的 shell 工具至少失敗過一次——它可能【沒有真的讀到 repo】,本輪意見的查證深度要打折。" >&2
+  # 【不印原始行】: 那些訊息帶著失敗指令的完整命令列(形如 error=exec_command failed for
+  # `<整條指令>`),而指令參數可能含 token/密碼——印出去就是把憑證寫進 console 與呼叫端的
+  # 記錄,踩安全鐵律 #2。只印錯誤類型與 OS 錯誤碼: 那是診斷真正需要的部分(5=ACL、
+  # 267=ERROR_DIRECTORY),且不含任何使用者資料。
+  echo "  失敗類型與次數(刻意不印原始指令,避免把含憑證的命令列寫進 log):" >&2
+  printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE "$TOOL_FAIL_PAT" | sort | uniq -c \
+    | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
+  CODES="$(printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE 'failed: [0-9]+' | sort -u | tr '\n' ' ')"
+  [ -n "$CODES" ] && echo "    OS 錯誤碼: $CODES" >&2
+  echo "  處置: 標【推論】的項目照常看待;標【已讀】的項目要自己回頭核對,它可能根本沒讀成。" >&2
+  echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\"" >&2
+fi
+# 【已知的偵測缺口,刻意留著】: 上面只掃 stderr。codex 也會把失敗以對話內容回饋給模型
+# ——2026-08-28 的 rollout 樣本裡形如 {"type":"input_text","text":"Script error:\nexec_command
+# failed for `…`"} ——這條路徑在 --json 的 stdout(JSON_FILE)裡,stderr 不一定同時有。
+# 沒有一併掃 JSON_FILE 的理由: review 本體(agent_message)也在同一份 JSONL 裡,而它完全可能
+# 引用這些字串——本次改動的複查回覆自己就引用了,盲掃必然誤報,而誤報幾次之後這行警示就會
+# 被當雜訊略過,比沒有還糟。要正確做需要 `codex exec --json` stdout 的實際失敗事件樣本
+# (不是 orca session 的 rollout 格式,兩者不保證相同),取得樣本前不動。
 
 # 複查確實發生 → 推進 ledger、留 payload 快照給下一輪算 delta,並記一筆用量。
 persist_ledger
