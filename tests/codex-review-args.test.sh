@@ -519,6 +519,25 @@ ok "C1: 還原某檔後仍須複查"           has "round=2" "$C1_2"
 ok "C1: 還原某檔不得誤判為相同"       hasnt "完全相同" "$C1_2"
 ok "C1: 真正沒改動才 SKIP"            has "SKIP: 送出內容與上一輪" "$C1_3"
 
+# --- 工作根固定(2026-08-31,codex 第二輪複查指出缺測) ---
+# 命題: 從 repo【子目錄】呼叫時,codex 的工作根必須被釘在 repo 根,而且 prompt 裡宣告的
+# 路徑要與實際傳出去的一致。兩者都要驗——只驗其中一個,另一邊漂掉時測試照樣綠。
+# 為什麼值得一條回歸: 症狀是「plan 的 `Spec:` 相對路徑落在子目錄」,而 prompt 還宣告工作根是
+# repo 根;這種宣告與事實不符的狀態,只有真的花額度跑一次 codex 才看得出來,靜態上完全正常。
+# `codex exec resume` 沒有 --cd 旗標(實測 0.148.0),所以腳本另外實際 cd 一次涵蓋它。
+C1TOP="$( cd "$C1R" && git rev-parse --show-toplevel )"
+mkdir -p "$C1R/sub"; : > "$ARGV"
+CD_OUT="$( cd "$C1R/sub" && PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$STUB2/lgcd" \
+           CODEX_REVIEW_LOG="$STUB2/ucd.tsv" bash "$SCRIPT" --severity required --base main 2>&1 )"
+ok "cwd: 子目錄呼叫仍完成"        has "完成(" "$CD_OUT"
+ok "cwd: fresh 分支帶 --cd"       has "^--cd$" "$(cat "$ARGV")"
+ok "cwd: --cd 的值是 repo 根"     test "$(awk '/^--cd$/{getline; print; exit}' "$ARGV")" = "$C1TOP"
+# 這一條【直接比對兩個值】,不是各自比對常數: 兩邊同時漂到別的路徑時,分別斷言會雙雙通過而
+# 這條會紅——「宣告與事實不符」本來就是兩者之間的關係,不是任一方的絕對值。
+ok "cwd: prompt 宣告 == --cd 實傳" test \
+  "$(sed -n 's/.*工作根是 \([^。]*\)。.*/\1/p' "$ARGV" | head -1)" \
+  = "$(awk '/^--cd$/{getline; print; exit}' "$ARGV")"
+
 rm -rf "$STUB2"
 
 rm -rf "$STUB"
