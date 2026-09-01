@@ -252,18 +252,49 @@ diff_delta_per_file() {  # $1=上一輪 diff 快照 $2=本輪 diff
 # 明確告訴它「需要遠端資料就講出來,由呼叫端取」。
 # 【已讀】/【推論】標註是本次改動的重點: 沒有它,查證與臆測在輸出裡長得一模一樣,呼叫端無從
 # 分辨哪幾條需要自己回頭核對(這正是 verification-must-discriminate 的形態)。
+#
+# 【讀取範圍是 prompt 層的約束,不是沙箱層的】(2026-08-31 使用者裁定 + 實測)。
+# 裁定: codex 的用途是第二意見,不是由它來做分析——所以查證要是少數幾次目標明確的讀取。
+# 動機是實測到的成本形態: 決定 input 的不是 payload 大小,是它讀了什麼、往返幾次。同一份
+# 遙測裡 sent=756,561 與 sent=1,588 兩筆的未快取 input 幾乎相同(402,617 / 375,216);而某次
+# 為了查證一個問題去翻 \$CODEX_HOME/sessions 的 rollout jsonl,總 input 衝到 398 萬。
+# 【硬性機制實測不生效,不要再試一次】: codex 0.148.0 認得 `permissions.filesystem` config
+# (--strict-config 通過,對照組的不存在 key 會報 unknown configuration field),但實際行為
+# 【完全沒有改變】——設了 permissions.filesystem."<絕對路徑>"="deny" 之後 codex 照樣讀到那個檔。
+# `codex exec` 也沒有 `-P/--permission-profile`(那是 `codex sandbox` 的旗標)。
+# 所以「config 被接受」在這件事上沒有鑑別力,不可據以宣稱已限制。
+# 順帶: CODEX_REVIEW_EXCLUDE 只過濾【送出的 diff】,對 codex 主動去讀什麼一樣無效。
+# prompt 政策版本: access_note 的內容(能力宣告、讀取範圍、依據標註)每次【實質】變更就 +1。
+# 用途只有一個,但很關鍵(2026-08-31 codex 複查抓到): resume 沿用舊 session 的對話歷史,而 resume
+# 輪的 prompt 只說「規則同先前輪次」——若那個 session 建立於舊政策,新加的讀取限制在那一輪
+# 【等於不存在】,而且外表完全看不出來。版本不符就退 fresh 重送全文。
+PROMPT_POLICY_VERSION=2
+
 access_note() {  # $1=工作根絕對路徑
   cat <<EOF
-你在唯讀沙箱內執行,shell 工具的工作根是 $1。你【可以且應該】用工具查證,不要只憑手上的片段推論:
-  - 讀取工作根內任何檔案(相關的實際程式碼、呼叫端、型別定義、既有測試與設定)
-  - 讀取本機其他 repo 的【絕對路徑】(跨服務接縫審查要比對對端契約就自己去讀)
-  - 跑 git log / git show / git blame 取得歷史脈絡
-禁止修改任何檔案——唯讀是硬性的,但唯讀不代表你只能看送進來的那份內容。
-你【沒有網路】: GitHub 遠端、gh 指令、任何 HTTP 都連不上。需要遠端資料(PR 討論、上游 repo、
-未 fetch 的分支)時,在回覆中明講你需要什麼、由呼叫端取來,不要拿猜測當依據下結論。
+你在唯讀沙箱內執行,shell 工具的工作根是 $1。
+
+【你的角色是第二意見,不是分析者】——查證的目的是確認手上這份待審內容,不是理解整個系統。
+所以查證應該是【少數幾次目標明確的讀取】,不是遍歷或探索。
+
+該讀(需要就直接讀,不要只憑片段推論):
+  - 待審內容實際觸及的檔案,以及它們的直接呼叫端、被呼叫者、型別定義、既有測試與設定
+  - git log / git show / git blame — 針對上述檔案取歷史脈絡
+【不要】讀(與本次判斷無關,只會拖長往返並淹沒重點):
+  - log、session/rollout 記錄、dump、快取、暫存、任何工具的內部狀態目錄
+  - 建置產物與相依目錄(dist / build / out / node_modules / vendor / target)、二進位
+  - 【未被待審內容觸及的】lockfile。注意: 待審內容裡若【有】lockfile 變更,那是供應鏈完整性的
+    一部分,必須照常審——只有 repo 裡沒被動到的 lockfile 不必去讀
+  - 大型資料檔(數十 KB 以上的 JSON/JSONL/CSV/fixture)——需要知道它的形狀就讀開頭幾行,不要整份讀
+  - 工作根【以外】的路徑,除非本訊息明確給了那個路徑
+禁止修改任何檔案。
+你【沒有網路】: GitHub 遠端、gh 指令、任何 HTTP 都連不上。
+需要上面範圍外的東西(遠端 PR 討論、上游 repo、未 fetch 的分支、某個大檔的完整內容)時,
+【講出你需要什麼、為什麼需要】,由呼叫端取來給你,不要自己繞路去找,也不要拿猜測當依據下結論。
+
 每一項發現都要標明依據,標在嚴重度後面:
   【已讀】= 你實際讀過相關原始碼/歷史確認過; 【推論】= 僅由送進來的片段推得、未經查證。
-能查證的一律去查,不要用【推論】規避查證;查了仍無法確定就標【推論】並說明卡在哪裡。
+範圍內能查證的一律去查,不要用【推論】規避查證;查了仍無法確定就標【推論】並說明卡在哪裡。
 EOF
 }
 
@@ -344,6 +375,7 @@ persist_ledger() {
        echo "session_id=$sid"
        echo "model=$MODEL"
        echo "effort=$EFFORT"
+       echo "prompt_policy=$PROMPT_POLICY_VERSION"
        [ -n "$hint" ] && echo "resume_ttl_hint=$hint"
        true
      } > "$tmp" 2>/dev/null; then
@@ -719,6 +751,7 @@ if [ "$PREV_ROUNDS" -gt 0 ] && [ -s "$SNAP_FILE" ] \
     fi
     PREV_ID="$(state_get "$STATE_FILE" session_id)"
     PREV_TS="$(state_get "$STATE_FILE" last_ts)"
+    PREV_POLICY="$(state_get "$STATE_FILE" prompt_policy)"
     case "$PREV_TS" in ''|*[!0-9]*) PREV_TS=0 ;; esac
     AGE=$(( $(now_ts) - PREV_TS ))
     # 每條複查線各自的 TTL 修正值: 上一次 resume 沒吃到歷史快取時,由 persist_ledger 寫入
@@ -735,6 +768,10 @@ if [ "$PREV_ROUNDS" -gt 0 ] && [ -s "$SNAP_FILE" ] \
     elif [ "$(printf '%s' "$DELTA" | wc -m | tr -d '[:space:]')" -ge "$(printf '%s' "$PAYLOAD" | wc -m | tr -d '[:space:]')" ]; then
       # delta 不比全文小就沒有 resume 的意義(小文件的 unified diff 常比原文還長),退 fresh。
       echo "[codex-review] 注意: 增量不比全文小,resume 沒有效益,本輪走 fresh 送全文。" >&2
+    elif [ "${PREV_POLICY:-}" != "$PROMPT_POLICY_VERSION" ]; then
+      # 舊 session 的對話歷史裡是舊版 access_note,而 resume 輪只說「規則同先前輪次」——
+      # 那一輪會沿用舊政策,新的讀取範圍限制靜默失效。省 token 不值得換掉這個。
+      echo "[codex-review] 注意: 這條複查線的 session 建立於 prompt 政策 v${PREV_POLICY:-未記錄}(現行 v$PROMPT_POLICY_VERSION),本輪走 fresh 送全文——resume 會沿用舊政策的對話歷史,新的限制不會生效。" >&2
     elif [ -n "$PREV_ID" ] && [ "$AGE" -ge 0 ] && [ "$AGE" -lt "$EFF_TTL" ]; then
       SESSION_MODE="resume"; RESUME_ID="$PREV_ID"; RESUME_AGE="$AGE"
     elif [ -n "$PREV_ID" ]; then
@@ -751,8 +788,9 @@ RESUME_PROMPT="這是同一份待審對象的下一輪諮詢(第 ${ROUND_NO} 輪
 請沿用先前的檢查面向與輸出格式(嚴重度由重到輕),只回報兩類: (a) 這些變更帶來的新問題; (b) 先前指出但仍未解決的問題。已解決的不必重述。
 若兩類都沒有,直接回「無重大遺漏」。
 回覆最後必須以單獨一行作結:「收斂問句:<你認為最關鍵的一個未決問題>」——只能提一個;已無足以改變產出的問題就寫「收斂問句:無」,不要為了湊問題而擴大範圍。
-能力邊界與依據標註規則同先前輪次(整段不重送以省 token): 可用 shell 工具讀工作根內任何檔案、
-其他 repo 的絕對路徑與 git 歷史來查證;無網路;每項發現標【已讀】或【推論】。唯讀,禁止修改任何檔案。"
+角色、讀取範圍與依據標註規則同先前輪次(整段不重送以省 token): 你是第二意見不是分析者,
+查證限於待審內容觸及的檔案及其直接關聯,不讀 log/產生物/大型資料檔/工作根以外的路徑;
+需要範圍外的東西就講出來由呼叫端取;無網路;每項發現標【已讀】或【推論】。唯讀,禁止修改任何檔案。"
 
 # --- 送出前的輸入長度守門(2026-08-12 新增) ---
 # 為什麼要在送出前擋: codex 對超長 payload 是在 turn/start 就拒絕,跑都沒跑。等它回錯誤才發現,
