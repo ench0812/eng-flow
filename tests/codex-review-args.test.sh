@@ -499,6 +499,37 @@ ok "resume: 超出窗口 → 明講並退 fresh" has "超出快取窗口" "$O_E"
 ok "resume: 退 fresh 後照常完成"       has "fresh round=" "$O_E"
 ok "resume: 退 fresh 不帶 resume 子指令" hasnt "^resume$" "$(cat "$ARGV")"
 
+# --- prompt 政策版本(2026-08-31,codex 複查抓到) ---
+# 命題: resume 沿用舊 session 的對話歷史,而 resume 輪的 prompt 只說「規則同先前輪次」。
+# 若那個 session 建立於舊版 access_note,新加的讀取範圍限制在該輪【等於不存在】,且外表
+# 完全看不出來——省 token 不值得換掉這個,版本不符必須退 fresh。
+mk_doc7 v5; : > "$ARGV"
+run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999 >/dev/null   # 先建立一個本版政策的 session
+mk_doc7 v6
+for f in "$LG7"/*.state; do   # 竄改成舊政策,模擬跨版本的 session。
+  # 不用 sed -i,理由同 :326(BSD sed 需要備份後綴,在 macOS 直接報錯)。這裡更麻煩的是後果:
+  # 腳本沒開 set -e,sed 失敗後 state 仍是現行版本,下面三條會實際走 resume 而失敗——
+  # 紅的地方會指向 policy gate,但真正壞的是這一行,診斷會被帶往完全錯誤的方向。
+  { echo "prompt_policy=1"; grep -v '^prompt_policy=' "$f"; } > "$f.tmp" && mv "$f.tmp" "$f"
+done
+O_P="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"
+ok "policy: 版本不符要明講"       has "prompt 政策 v1" "$O_P"
+ok "policy: 版本不符退 fresh"     has "fresh round=" "$O_P"
+ok "policy: 版本不符不走 resume"  hasnt "resume(" "$O_P"
+
+# --- 讀取範圍限制確實進入 prompt(而不是只寫在腳本註解裡) ---
+# 【自己跑一輪確定的 fresh】,不可沿用上面那輪的 ARGV: 那樣就變成靠「上一個測試恰好走了
+# fresh」才通過——實測過,把 policy 檢查停掉之後這三條會跟著紅,而它們根本不該對 policy
+# 邏輯敏感。測試之間的隱性耦合會讓失敗指向錯的地方。
+mk_doc7 v7; : > "$ARGV"
+run7 IGNORE=1 >/dev/null
+ok "範圍: prompt 有角色定位"      has "第二意見,不是分析者" "$(cat "$ARGV")"
+ok "範圍: prompt 有負面清單"      has "session/rollout 記錄" "$(cat "$ARGV")"
+# lockfile 的例外必須在場: 腳本的 CODEX_REVIEW_EXCLUDE 刻意【不】排除 lockfile(供應鏈完整性),
+# 所以待審 diff 裡的 lockfile 變更會被送進去。若讀取範圍無條件寫「不要讀 lockfile」,
+# prompt 就與 payload 自相矛盾——這正是本輪 codex 抓到的 Required。
+ok "範圍: lockfile 例外在場"      has "必須照常審" "$(cat "$ARGV")"
+
 
 # --- C1 回歸(2026-08-24 review 抓到的 Critical) ---
 # 「上一輪有、本輪已還原」的檔案不會出現在本輪 diff 裡,所以 per-file delta 為空。
