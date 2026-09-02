@@ -5,6 +5,7 @@ Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能
 | Tier | Model | Effort | 用途 | How |
 |------|-------|--------|------|-----|
 | **Session** | 主線（settings.json `model`） | `high`（settings.json `effortLevel`） | 編排、架構決策、需求拆解 | 不由 `agent()` 設定；改 settings |
+| **D** | fable（`claude-fable-5-1`） | 繼承 session（見下） | **只有** mao-brainstorm 2.5 與 mao-plan Draft Stage 的起草 — 一次性，不參與後續 | `model:"fable"` |
 | **A** | opus（繼承主線） | `high` | 平行深度任務、跨模組驗證 — **節制使用** | Omit `model` + `effort:'high'` |
 | **B1** | sonnet | `high` | 複雜商業邏輯、演算法 — 執行層首選工程師 | `model:"sonnet"` + `effort:'high'` |
 | **B2** | sonnet | `medium` | Spec 明確的實作、標準重構 | `model:"sonnet"` + `effort:'medium'` |
@@ -12,13 +13,27 @@ Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能
 
 B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想出解法（演算法、跨模組互動、狀態機、並行/交易邏輯）→ B1；解法已寫在 spec/plan 裡、只是落地成 code → B2。C 層刻意不設 effort——樣板與文件不需要推理預算，交給模型自己的預設。
 
+**D 層不是「比 A 更強的通用層」**（2026-09-01 加）。Fable 5.1 確實是更強的模型，但它在這張表裡**只有兩個合法呼叫點**：mao-brainstorm 的 Draft Stage（方案取捨＋設計骨架）與 mao-plan 的 Draft Stage（依賴圖＋切片＋task 骨架）。理由是成本形狀而非能力：
+
+| | Input $/MTok | Output $/MTok |
+|---|---|---|
+| `claude-fable-5-1` | 10.00 | 50.00 |
+| `claude-opus-5` | 5.00 | 25.00 |
+
+貴一倍，而且**貴在 output**。起草階段最吃判斷（依賴順序、切片邊界、task 顆粒度、接縫風險）而 output 量小；補完階段最吃 output（每個 task 的完整測試碼與實作碼）而判斷已經定案。所以 D 層只承接前者，後者留給主線。**不要因為某個任務「很難」就升到 D**——那是 A 層的用途；D 是階段性的，不是難度性的。
+
+**D 層一次性、不參與後續**：起草交付後 Fable 就退出，codex 共議、收斂、修訂全部由主線負責。它也不看 codex 的回覆——共議是主線與 codex 兩方。
+
+**Effort 的已知限制（不要假裝已解決）**：Agent tool 只有 `model` 參數、**沒有 `effort`**，所以 D 層派工的 effort 繼承 session 的 `effortLevel`。這違反本文件「除 C 層外一律明寫」的規則，是工具限制不是疏忽。要明寫得改走 Workflow `agent()` 的 `opts.effort` 或具名 agent 的 frontmatter——skill 刻意不那樣做，因為它要能在沒有本機 `~/.claude/agents/` 的機器上照跑。**Fable 5.1 的 thinking 恆開**（`{type:"disabled"}` 與 `budget_tokens` 都回 400），所以「沒明寫 effort」不等於「沒有推理預算」，只等於「用 session 的檔位」。
+
 ## Rules
 
 - **mao-execute pipeline**: implement 依任務性質選 B1 或 B2（plan 標記 architecture-level / high-uncertainty 的升 A）；spec-review / code-review 走 B2，安全 / 認證 / 資料完整性相關的升 A。
 - **mao-review reviewer dispatch**: default B2（`model:"sonnet"` + `effort:'medium'`）。High-risk changes (security, auth, data integrity) → A（omit `model` + `effort:'high'`）。
 - **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=A, root-cause-debugger=A, implementer=B2（其定義就是「依明確 spec 落地」）, mechanical-scanner=C。These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
 - **Effort 寫在哪**：Workflow `agent()` 用 `opts.effort`；`~/.claude/agents/*.md` 用 frontmatter `effort:`。除 C 層外一律明寫——session 有自己的 effortLevel，omit 會讓 stage 悄悄繼承它、失去分層的意義。
-- When unsure: 升 tier（B2→B1→A），不要拆開 model 與 effort 的配對去單獨拉 effort；也不要用降 model 來省成本（能力降級是反向操作）。確定機械化才進 C。
+- **Draft stage dispatch**: mao-brainstorm 2.5 與 mao-plan Draft Stage 走 D（`model:"fable"`），一次，之後不再出現。Fable 不可用時由主線自己走完該階段並在交付時講一句，**不要為此停下來問使用者**——它是加速器不是必要條件。
+- When unsure: 升 tier（B2→B1→A），不要拆開 model 與 effort 的配對去單獨拉 effort；也不要用降 model 來省成本（能力降級是反向操作）。確定機械化才進 C。**D 不在這條階梯上**——它是階段性的路由，不是「A 之上的一格」，任務難度再高也不是升 D 的理由。
 - **沿革**：2026-08-05 曾把 implement stage 單獨校準為 `effort:'high'`（理由：high→xhigh 對範疇明確任務邊際效益遞減、每輪思考延遲照付，平行化省下的時間不該被吃回去）。該結論已被本版吸收成 **B1**——差別是現在由「任務不確定性」決定 implement 走 B1 還是 B2，而不是整條 implement stage 一律 high。
 
 ## Codex Cross-Family Consultation (gpt-5.6)

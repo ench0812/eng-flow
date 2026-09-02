@@ -53,7 +53,48 @@ Expected: FAIL with "specific message"
 
 Names and signatures introduced by one task must match verbatim in every later task that consumes them.
 
+## Draft Stage — Fable 5.1 起草骨架
+
+**第一輪的結構由 Fable 5.1 起草，之後它就退出。** 後續的補完、codex 共議、收斂與交付一律由主線模型（Opus）負責——Fable **只在這一步出現一次**，不參與任何後續輪次，也不看 codex 的回覆。
+
+分工的理由是成本形狀：Fable 5.1 是 $10/$50 per MTok（Opus 5 是 $5/$25），**貴的是 output**。而 plan 裡最吃 output 的是每個 task 的完整程式碼，最吃**判斷**的是依賴順序、垂直切片邊界、task 顆粒度與接縫風險。所以讓 Fable 只產出後者的骨架，程式碼留給 Opus 填。
+
+**Dispatch**（在 repomix 打包完、你已讀過相關模組之後）:
+
+```
+Agent(
+  subagent_type: "general-purpose",
+  model: "fable",
+  description: "Draft plan skeleton",
+  prompt: <見下方 brief 規格>
+)
+```
+
+Brief 控制在 150 行內，內容是：spec 路徑（要它自己讀）、要動的模組路徑、已定案的約束、以及這份 SKILL.md 的 `## Planning Process` 三步（Map Dependencies / Slice Vertically / Size Tasks）與垂直切片判準。**不要把整份 spec 貼進 brief**——給路徑讓它讀。
+
+**Fable 交付的骨架**，每個 task 一段，**不含任何程式碼**：
+
+```markdown
+### Task N: [Title]
+**Files:** Create: `path` / Modify: `path:line` / Test: `path`
+**依賴:** Task M（理由）
+**驗收:** 具體可執行的判準（誰送什麼 → 誰收到什麼 → 哪裡看得到結果）
+**風險:** 接縫／不確定性／需要注意的既有行為
+```
+加上開頭的依賴圖與切片理由，以及 `## Not yet specified`（照 Fog Rule）。
+
+**你（Opus）接手後做三件事，順序不可調**：
+1. **先審骨架再補程式碼**——切片邊界錯了的話，補進去的程式碼全部要重寫。用 `## Planning Process` 的判準檢查：每一片寫不寫得出「誰送什麼 → 誰收到什麼 → 哪裡看得到結果」？有沒有哪片要等另一片才驗得起來（那條界線就切錯了）？
+2. **補完每個 task 的完整測試碼與實作碼**，遵守 `## No Placeholders — Ever`。骨架裡的檔案路徑與簽章是你的起點，不是不可改的定案——發現它引用了不存在的檔或簽章就改掉並記一句。
+3. **存檔後才進 Codex Co-Design Loop**。那個 loop 是 Opus 與 codex 兩方，Fable 不在裡面。
+
+**限制（誠實記錄，不要當成已解決）**：Agent tool 只有 `model` 參數、**沒有 `effort`**，所以這一次派工的 effort 繼承 session 的 `effortLevel`（本工作區是 `high`）。要明確指定 effort 只能改走 Workflow 的 `agent()` 或具名 agent 的 frontmatter；這裡刻意不那樣做，因為 skill 要能在沒有本機 `~/.claude/agents/` 的機器上照跑。
+
+**Fable 不可用時**（未開通、派工失敗、使用者不要）：直接由 Opus 自己走完 `## Planning Process`，在交付時講一句「本次未經 Fable 起草」。這一步是加速器，不是必要條件——不要因為它不可用就停下來問。
+
 ## Planning Process
+
+> 這三步的**初稿**來自上面的 Draft Stage；你的職責是審核、修正、補完，不是重跑一遍。Fable 未參與時才由你從頭做。
 
 > 零上下文規劃前，先 `repomix --include "<要動的模組 glob>"` 打包相關模組，建立全庫理解再拆任務——避免 plan 引用不存在的檔/簽章。見 `references/repomix.md`
 

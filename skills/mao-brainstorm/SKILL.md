@@ -24,7 +24,30 @@ Do NOT write any code, scaffold, or take implementation actions until you have p
 - Focus on: purpose, constraints, success criteria
 - Surface your assumptions before writing anything
 
+### 2.5 Draft Stage — Fable 5.1 起草方案與設計骨架
+
+**在 Clarify 收斂之後、向使用者提方案之前**，把方案探索交給 Fable 5.1 起草一次，之後它就退出。順序不可提前：Fable 是 subagent，**它沒有與使用者互動的通道**，所以需求還沒釐清時派工只會拿到一份建立在猜測上的設計。
+
+分工理由見 mao-plan 的同名章節（成本形狀相同：Fable $10/$50 vs Opus $5/$25，貴的是 output）。這裡讓它做的是最吃架構判斷、output 量又小的部分——方案取捨與設計骨架，不是完整 spec 文字。
+
+```
+Agent(subagent_type: "general-purpose", model: "fable",
+      description: "Draft design approaches", prompt: <brief>)
+```
+
+Brief（150 行內）給：已釐清的需求與約束（Clarify 的結論，不是逐輪對話）、要動的模組路徑（讓它自己讀，不要貼程式碼）、明確的 out-of-scope。
+
+**Fable 交付**：
+- **2-3 個方案**，每個附「怎麼做／代價／什麼情況下它是對的」與**推薦哪一個、為什麼**
+- **推薦方案的設計骨架**：架構、元件邊界、資料流、錯誤路徑、狀態轉換、測試策略要點——**條列骨架，不是成文的 spec**
+- 它認為需要使用者裁決的開放問題
+
+**你（Opus）接手**：先自己審一遍骨架（不是照抄——它沒參與 Clarify 的對話，可能誤解了某個約束），再進第 3 步向使用者呈現。第 4、5 步的成文與逐節確認由你做，第 6 步的 codex 共議是你與 codex 兩方，**Fable 不參與後續任何一輪**，也不看 codex 的回覆。
+
+**限制**：Agent tool 沒有 `effort` 參數，這次派工繼承 session 的 `effortLevel`。**Fable 不可用時**直接由你自己走第 3 步，交付時講一句「本次未經 Fable 起草」——這是加速器不是必要條件。
+
 ### 3. Propose 2-3 Approaches
+- 起點是 Draft Stage 的方案；你負責驗證與調整，不是原封轉述（Fable 沒聽過 Clarify 的對話）
 - Present with trade-offs and your recommendation
 - Lead with recommended option and explain why
 
