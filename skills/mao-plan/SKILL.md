@@ -57,7 +57,7 @@ Names and signatures introduced by one task must match verbatim in every later t
 
 **第一輪的結構由 Fable 5.1 起草，之後它就退出。** 後續的補完、codex 共議、收斂與交付一律由主線模型（Opus）負責——Fable **只在這一步出現一次**，不參與任何後續輪次，也不看 codex 的回覆。
 
-分工的理由是成本形狀：Fable 5.1 是 $10/$50 per MTok（Opus 5 是 $5/$25），**貴的是 output**。而 plan 裡最吃 output 的是每個 task 的完整程式碼，最吃**判斷**的是依賴順序、垂直切片邊界、task 顆粒度與接縫風險。所以讓 Fable 只產出後者的骨架，程式碼留給 Opus 填。
+**為什麼是這一步**：切片邊界與依賴順序**沒有快速的驗證迴路**——錯了不會當場報錯，要等實作到一半、或跨服務兩側都蓋完才浮現，而那時的返工成本是本 skill 記錄的 48.5%。判準與成本說明的完整版在 `references/model-routing.md` 的 D 層段落，此處不重述。
 
 **Dispatch**（在 repomix 打包完、你已讀過相關模組之後）:
 
@@ -70,27 +70,31 @@ Agent(
 )
 ```
 
-Brief 控制在 150 行內，內容是：spec 路徑（要它自己讀）、要動的模組路徑、已定案的約束、以及這份 SKILL.md 的 `## Planning Process` 三步（Map Dependencies / Slice Vertically / Size Tasks）與垂直切片判準。**不要把整份 spec 貼進 brief**——給路徑讓它讀。
+**Brief 給目標，不要給模板。** D 層的 brief 規則與其他 tier 相反——Fable 5.1 對過度規定的 prompt 反而產出更差，所以**不要**寫欄位模板、逐步指示或行數上限（其他 tier 的 150 行限制是為了壓冷啟成本，這裡不適用）。給它：
 
-**Fable 交付的骨架**，每個 task 一段，**不含任何程式碼**：
+- spec 的**路徑**（讓它自己讀，不要貼內容）、要動的模組路徑、已定案的約束、明確的 out-of-scope
+- 目標一句話：**把這份 spec 拆成一組任務與它們的依賴關係，讓零上下文的執行者不必回頭問就能開工、也讓接手的主線一眼看得出哪一片切錯了**
+  （刻意**不說「序列」**——那個詞預設線性，但垂直切片之間常有可平行的分支，用它會讓起草者不去標出併行機會）
+- 判準：本 skill 的 Slice Vertically 與 Size Tasks 兩節（給節名讓它讀本檔，不要複製過去）
+- **界線**：產出會由主線補完程式碼，所以**不寫函式本體、測試碼、或任何可執行的實作**；但**型別與函式簽章要寫**——那是介面定案，屬於判斷而不是打字，而且主線接手時本來就要拿它當起點（見下方接手第 2 點）
 
-```markdown
-### Task N: [Title]
-**Files:** Create: `path` / Modify: `path:line` / Test: `path`
-**依賴:** Task M（理由）
-**驗收:** 具體可執行的判準（誰送什麼 → 誰收到什麼 → 哪裡看得到結果）
-**風險:** 接縫／不確定性／需要注意的既有行為
-```
-加上開頭的依賴圖與切片理由，以及 `## Not yet specified`（照 Fog Rule）。
+**自我檢查用的完整性清單**——不是文件結構，**順序也不代表章節順序**，格式由你接手時整理：
+
+- 每個 task 動哪些檔案？相依於哪個 task、為什麼？
+- 怎麼驗證它完成了——「誰送什麼 → 誰收到什麼 → 哪裡看得到結果」？
+- 這片的風險在哪：跨服務接縫？既有行為？不確定的假設？
+- 整體的依賴圖長什麼樣，為什麼這樣切而不是那樣切？
+- **哪些片可以併行、併行的前提是什麼**（例如共用的 wire 契約要先定案）？這直接餵給主線接手後的派工顆粒度判斷。
+- 哪些東西現在**還定不下來**（照 Fog Rule 的判準：問題能不能精確陳述），該進 `## Not yet specified`？
 
 **你（Opus）接手後做三件事，順序不可調**：
 1. **先審骨架再補程式碼**——切片邊界錯了的話，補進去的程式碼全部要重寫。用 `## Planning Process` 的判準檢查：每一片寫不寫得出「誰送什麼 → 誰收到什麼 → 哪裡看得到結果」？有沒有哪片要等另一片才驗得起來（那條界線就切錯了）？
 2. **補完每個 task 的完整測試碼與實作碼**，遵守 `## No Placeholders — Ever`。骨架裡的檔案路徑與簽章是你的起點，不是不可改的定案——發現它引用了不存在的檔或簽章就改掉並記一句。
 3. **存檔後才進 Codex Co-Design Loop**。那個 loop 是 Opus 與 codex 兩方，Fable 不在裡面。
 
-**限制（誠實記錄，不要當成已解決）**：Agent tool 只有 `model` 參數、**沒有 `effort`**，所以這一次派工的 effort 繼承 session 的 `effortLevel`（本工作區是 `high`）。要明確指定 effort 只能改走 Workflow 的 `agent()` 或具名 agent 的 frontmatter；這裡刻意不那樣做，因為 skill 要能在沒有本機 `~/.claude/agents/` 的機器上照跑。
+**兩個硬限制**（詳見 `references/model-routing.md`）：Agent tool 沒有 `effort` 參數，所以這次派工的 effort 繼承 session；Fable 5.1 在 ZDR 組織不可用，會回 400。
 
-**Fable 不可用時**（未開通、派工失敗、使用者不要）：直接由 Opus 自己走完 `## Planning Process`，在交付時講一句「本次未經 Fable 起草」。這一步是加速器，不是必要條件——不要因為它不可用就停下來問。
+**Fable 不可用時**（未開通、ZDR、派工失敗、使用者不要）：直接由 Opus 自己走完 `## Planning Process`，在交付時講一句「本次未經 Fable 起草」。這一步是加速器，不是必要條件——不要因為它不可用就停下來問。
 
 ## Planning Process
 
