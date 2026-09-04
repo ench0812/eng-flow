@@ -43,9 +43,15 @@ def _finite_vec(v) -> bool:
         and any(x != 0 for x in v)
 
 
+# 模型常駐時間。request 的 keep_alive 覆蓋 ollama 服務端的 OLLAMA_KEEP_ALIVE，所以只能在這裡設。
+# -1 = 永不卸載：冷啟一次 4.76s、熱查詢 0.29s，而查詢端 timeout 只有幾秒，卸載後的第一次
+# search 會直接失敗（向量路 fail-closed）。代價是 bge-m3 常駐 664 MB（本機實測，在 GPU 上）。
+KEEP_ALIVE = -1
+
+
 def _post(url: str, model: str, inputs: list[str], timeout: float) -> list[list[float]]:
     r = httpx.post(f"{url}/api/embed", json={"model": model, "input": inputs,
-                                             "truncate": True, "keep_alive": "1h"}, timeout=timeout)
+                                             "truncate": True, "keep_alive": KEEP_ALIVE}, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     embs = data.get("embeddings")
