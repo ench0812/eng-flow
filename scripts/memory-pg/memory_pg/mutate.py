@@ -215,12 +215,17 @@ KEEP = object()   # 「不動這個欄位」的哨兵，與「設成 NULL」區�
 
 
 def edit(conn, cfg: Config, name: str, *, description: str | None, body: str | None, reason: str,
-         kind=KEEP, pin=KEEP, review_by=KEEP) -> str:
-    """改記憶。description/body 傳 None = 不動；kind/pin/review_by 用 KEEP 哨兵表示不動。
+         kind=KEEP, pin=KEEP, review_by=KEEP, decay_exempt=KEEP) -> str:
+    """改記憶。description/body 傳 None = 不動；kind/pin/review_by/decay_exempt 用 KEEP 哨兵表示不動。
 
     kind/pin/review_by 是**治理**欄位而非內容：kind 決定匯出索引的分組，pin 決定常駐成本，
     review_by 決定到期覆核。原本只有 write 時能設，改不了就只能重建記憶（會掉 revisions 與
     access 歷史），所以 edit 要能改。
+
+    **`--pin` 與 `--no-decay` 會同時把記憶叫醒**（清 `dormant_since`）：這兩個動作的意思都是
+    「這則要留著」，若不清休眠旗標，它仍被預設搜尋與索引排除——人工救回會變成無效操作，
+    而且外表看起來成功了。反向的 `--unpin` / `--allow-decay` **不主動休眠**：是否休眠一律
+    由下一次 `decay --recompute` 依分數判定，這裡不搶著做那個決定。
     """
     with conn.cursor() as cur:
         mid = _get_mid(cur, name)
@@ -241,6 +246,11 @@ def edit(conn, cfg: Config, name: str, *, description: str | None, body: str | N
             # --unpin 會把那種也降回 3。importance 目前不參與排名，影響僅止於欄位語意。
             sets.append("importance = CASE WHEN importance = %s THEN %s ELSE importance END")
             vals.extend([3, 4] if pin else [4, 3])
+        if decay_exempt is not KEEP:
+            sets.append("decay_exempt = %s"); vals.append(bool(decay_exempt))
+        # 叫醒：pin 或 no-decay 都代表「這則要留著」，同一個 UPDATE 內清掉休眠旗標。
+        if (pin is not KEEP and pin) or (decay_exempt is not KEEP and decay_exempt):
+            sets.append("dormant_since = NULL")
         vals.append(mid)
         cur.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=%s", vals)
         if body is not None:

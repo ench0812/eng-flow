@@ -124,6 +124,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
             all_scopes=args.all,
             k=args.k,
             include_superseded=args.all_status,
+            include_dormant=args.include_dormant,
             mode=args.mode,
             degrade_ok=args.degrade,
             embed_fn=embed_fn,
@@ -144,6 +145,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
                     {"id": h.name, "path": h.file_path, "description": h.description,
                      "scope": h.scope, "project_key": h.project_key, "kind": h.kind,
                      "status": h.status, "pinned": h.pinned, "stale": h.stale,
+                     "dormant": h.dormant, "decay_weight": round(h.decay_weight, 4),
                      "rank": i + 1, "score": round(h.rrf, 6),
                      "matched": {"id": h.id_hit, "fts": h.fts_rank is not None,
                                  "vec": h.vec_rank is not None, "sim": h.sim}}
@@ -648,7 +650,9 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                         reason=args.reason,
                         kind=(args.kind if args.kind else mutate.KEEP),
                         pin=(True if args.pin else (False if args.unpin else mutate.KEEP)),
-                        review_by=_review_by_arg(args.review_by))
+                        review_by=_review_by_arg(args.review_by),
+                        decay_exempt=(True if args.no_decay
+                                      else (False if args.allow_decay else mutate.KEEP)))
         _auto_embed(conn, cfg, [args.name])
         ok = _auto_export(conn, cfg)
         print(f"edit {args.name}")
@@ -739,6 +743,173 @@ def _cmd_session_context(args: argparse.Namespace) -> int:
         return EXIT_OK
     except Exception as e:  # noqa: BLE001  hook 不可被擋
         print(f"記憶注入略過（{type(e).__name__}）", file=sys.stderr)
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_decay(args: argparse.Namespace) -> int:
+    """夢境衰減：重算召回強度、套用休眠/甦醒，或唯讀看分佈。
+
+    `--recompute` 是**這套設計唯一會實際發生衰減的路徑**——分數是夜間物化的，沒有人跑它
+    就永遠停在初始值。夢境流程把它排在 embed 閘之後、export 之前。
+    """
+    from . import decay as decaymod
+
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+        if args.recompute:
+            with db.top_level_transaction(conn):
+                rep = decaymod.recompute(conn)
+            ok = _auto_export(conn, cfg)   # 休眠會改索引內容，md 必須跟著更新
+        else:
+            rep = decaymod.compute(conn)
+            ok = True
+
+        cut = rep.cutoff.astimezone().isoformat(timespec="seconds") if rep.cutoff else "（未套用 0003）"
+        print(f"cutoff\t{cut}")
+        print(f"scanned\t{rep.scanned}")
+        buckets = {"豁免": 0, "R>=0.8": 0, "0.5-0.8": 0, "0.15-0.5": 0, "R<0.15": 0, "休眠": 0}
+        for s in rep.states:
+            if s.dormant_since:
+                buckets["休眠"] += 1
+            elif s.exempt_reason:
+                buckets["豁免"] += 1
+            elif s.score >= 0.8:
+                buckets["R>=0.8"] += 1
+            elif s.score >= 0.5:
+                buckets["0.5-0.8"] += 1
+            elif s.score >= decaymod.DORMANT_THRESHOLD:
+                buckets["0.15-0.5"] += 1
+            else:
+                buckets["R<0.15"] += 1
+        for k, v in buckets.items():
+            print(f"bucket\t{k}\t{v}")
+        for name in rep.newly_dormant:
+            print(f"{'dormant' if args.recompute else 'would-sleep'}\t{name}")
+        for name in rep.revived:
+            print(f"revived\t{name}")
+        if args.verbose:
+            for s in sorted(rep.states, key=lambda x: x.score):
+                print(f"state\t{s.name}\tS={s.strength:.1f}\tR={s.score:.3f}\t"
+                      f"w={s.weight:.2f}\thits={s.hit_count}\t{s.exempt_reason or '-'}")
+        return EXIT_OK if ok else EXIT_UNDETERMINED
+    finally:
+        conn.close()
+
+
+def _cmd_habits(args: argparse.Namespace) -> int:
+    """習慣：從實際對話學到的用法。掃描只做機械統計，語義判斷由夢境的 skill 做。"""
+    import json as _json
+
+    from . import habits as H
+
+    cfg = config.load(use_test_db=args.test_db)
+    conn = db.connect(cfg)
+    try:
+        db.assert_schema(conn)
+
+        if args.scan:
+            # `--reset` 繞過 habit_scan_marks 從頭重掃，而 `--apply` 是累加——兩者併用會把
+            # 同一批 transcript 的證據疊第二次。灌水之後 ACT_MIN_EVIDENCE 與一致率兩道門檻
+            # 同時失去意義，而且沒有任何輸出看得出來（`AskUserQuestion 採納率` 是全系統
+            # 唯一機械可數的那條，正好首當其衝）。要重新校準請先 `--purge` 歸零。
+            if args.reset and args.apply and not args.force:
+                raise UsageError(
+                    "--reset 會從頭重掃，與 --apply 併用會讓證據累加第二次（門檻因此失效）。"
+                    "要重新校準：先 `memory habits --purge --yes` 歸零再 `--scan --apply`；"
+                    "確定要疊加請加 --force", code="reset_would_double_count")
+            with db.top_level_transaction(conn):
+                rep = H.scan(conn, limit_files=args.limit_files, reset=args.reset,
+                             commit_marks=bool(args.apply))
+                if args.apply:
+                    for s in rep.auto:
+                        # auto 訊號是機械統計，來源標 auto——那是唯一能正當升到 act 的路徑
+                        H.upsert(conn, kind=s.kind, pattern=s.pattern, meaning=s.meaning,
+                                 evidence=s.evidence, counter=s.counter, examples=s.examples,
+                                 first_seen=s.first_seen, last_seen=s.last_seen, source="auto")
+            print(f"files\tseen={rep.files_seen}\tscanned={rep.files_scanned}\t"
+                  f"lines={rep.lines_consumed}")
+            for s in rep.auto:
+                c = H.confidence(s.evidence, s.counter)
+                print(f"auto\t{s.kind}\t{s.pattern}\t{s.meaning}\t"
+                      f"ev={s.evidence}\tct={s.counter}\tconf={c:.2f}")
+            print(f"candidates\t{len(rep.candidates)}")
+            if args.json:
+                print(_json.dumps({"candidates": rep.candidates}, ensure_ascii=False))
+            else:
+                # 候選要人（或 LLM）讀原文才成立，預設只印前幾筆讓人知道有東西可看
+                for c in rep.candidates[: args.show_candidates]:
+                    print(f"cand\t{c['kind']}\t{c['when']}\t{c['where']}\t"
+                          f"{c['quote'][:120].replace(chr(10), ' / ')}")
+            if not args.apply:
+                print("(未寫入。要累加證據請加 --apply)")
+            return EXIT_OK
+
+        if args.add:
+            if not (args.pattern and args.meaning):
+                raise UsageError("--add 需要 --pattern 與 --meaning", code="usage")
+            with db.top_level_transaction(conn):
+                H.upsert(conn, kind=args.kind or "directive", pattern=args.pattern,
+                         meaning=args.meaning, evidence=args.evidence, counter=args.counter,
+                         examples=_json.loads(args.examples) if args.examples else [],
+                         first_seen=args.first_seen, last_seen=args.last_seen,
+                         # 預設 llm：夢境判讀寫入的證據數是判讀者自己填的，封頂在 suggest。
+                         # --human 是使用者親自確認，才可升 act。
+                         source=("human" if args.human else "llm"))
+            print(f"habit {args.pattern}")
+            return EXIT_OK
+
+        if args.unretire:
+            if not args.pattern:
+                raise UsageError("--unretire 需要 --pattern", code="usage")
+            with db.top_level_transaction(conn):
+                ok = H.unretire(conn, args.kind or "directive", args.pattern)
+            print(f"unretire {args.pattern} {'ok' if ok else '(找不到已 retired 的這一則)'}")
+            return EXIT_OK if ok else 2
+
+        if args.purge:
+            if not args.yes:
+                raise UsageError("--purge 會清空所有習慣與掃描位置，確認請加 --yes",
+                                 code="needs_confirm")
+            with db.top_level_transaction(conn), conn.cursor() as cur:
+                cur.execute("TRUNCATE habits, habit_scan_marks")
+            print("purge 已清空 habits 與掃描位置")
+            return EXIT_OK
+
+        if args.retire:
+            if not (args.pattern and args.reason):
+                raise UsageError("--retire 需要 --pattern 與 --reason", code="usage")
+            with db.top_level_transaction(conn):
+                ok = H.retire(conn, args.kind or "directive", args.pattern, args.reason)
+            print(f"retire {args.pattern} {'ok' if ok else '(找不到或已 retired)'}")
+            return EXIT_OK if ok else 2
+
+        if args.promote:
+            with db.top_level_transaction(conn):
+                changed = H.promote(conn)
+                stale = H.decay(conn)
+            for p, old, new in changed:
+                print(f"promote\t{p}\t{old}→{new}")
+            for p in stale:
+                print(f"stale\t{p}\tact→suggest（{H.STALE_DAYS} 天未再出現）")
+            print(f"changed\t{len(changed)}\tstale\t{len(stale)}")
+            return EXIT_OK
+
+        if args.export:
+            n = H.export_md(conn, cfg.home / "habits.md")
+            print(f"export {n} 則 → {cfg.home / 'habits.md'}")
+            return EXIT_OK
+
+        rows = H.listing(conn, include_retired=args.all_status)
+        for r in rows:
+            c = H.confidence(r["evidence_count"], r["counter_count"])
+            print(f"{r['autonomy']}\t{r['kind']}\t{r['pattern']}\t{r['meaning']}\t"
+                  f"ev={r['evidence_count']}\tct={r['counter_count']}\tconf={c:.2f}\t"
+                  f"{r['first_seen']}..{r['last_seen']}\t{r['status']}")
+        print(f"total\t{len(rows)}")
         return EXIT_OK
     finally:
         conn.close()
@@ -855,6 +1026,8 @@ def build_parser() -> argparse.ArgumentParser:
     sg.add_argument("--current-project", action="store_true", help="只查目前專案")
     sg.add_argument("--all", action="store_true", help="全部，含其他專案")
     s.add_argument("--all-status", action="store_true", help="含已取代/deprecated")
+    s.add_argument("--include-dormant", action="store_true",
+                   help="含休眠（久未被想起而淡出）的記憶。命中一次就會在下次 decay 時甦醒")
     s.add_argument("--mode", choices=["hybrid", "fts"], default="hybrid")
     s.add_argument("--degrade", action="store_true", help="向量路不可用時降為 fts，不 fail-closed")
     s.add_argument("--k", type=int, default=10)
@@ -925,8 +1098,13 @@ def build_parser() -> argparse.ArgumentParser:
     ed.add_argument("--kind", choices=["semantic", "episodic", "procedural", "decision", "environment"],
                     help="改分類（決定匯出索引的分組）")
     g = ed.add_mutually_exclusive_group()
-    g.add_argument("--pin", action="store_true", help="設為常駐")
+    g.add_argument("--pin", action="store_true", help="設為常駐（同時叫醒休眠中的記憶）")
     g.add_argument("--unpin", action="store_true", help="取消常駐")
+    dg = ed.add_mutually_exclusive_group()
+    dg.add_argument("--no-decay", action="store_true",
+                    help="豁免遺忘曲線：不降權、不休眠（同時叫醒休眠中的記憶）")
+    dg.add_argument("--allow-decay", action="store_true",
+                    help="取消豁免，恢復依使用度衰減。不會立刻休眠——由下次 recompute 依分數決定")
     ed.add_argument("--review-by", help="改到期覆核日（YYYY-MM-DD；傳 none 清除）")
     ed.add_argument("--reason", required=True)
     ed.set_defaults(fn=_cmd_edit)
@@ -963,6 +1141,48 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--cwd", help="覆寫 cwd（hook 從 stdin JSON 取，比行程 cwd 可靠）")
     sc.add_argument("--slug", help="直接指定 project slug（優先於 cwd；hook 從 transcript_path 取）")
     sc.set_defaults(fn=_cmd_session_context)
+
+    dc = sub.add_parser("decay", help="夢境衰減：重算召回強度與休眠狀態，或唯讀看分佈")
+    dcg = dc.add_mutually_exclusive_group()
+    dcg.add_argument("--recompute", action="store_true",
+                     help="重算並寫回（含休眠/甦醒、回填 access_count）。夜間流程跑這個")
+    dcg.add_argument("--report", action="store_true", help="唯讀（預設）：不寫入，只印會發生什麼")
+    dc.add_argument("--verbose", action="store_true", help="逐則印 S / R / 權重 / 命中數")
+    dc.set_defaults(fn=_cmd_decay)
+
+    hb = sub.add_parser("habits", help="習慣：從實際對話學到的用法（不帶動作＝列出）")
+    hbg = hb.add_mutually_exclusive_group()
+    hbg.add_argument("--scan", action="store_true",
+                     help="增量掃 transcript 產生訊號（預設不寫入，加 --apply 才累加證據）")
+    hbg.add_argument("--add", action="store_true", help="人工/LLM 判斷後寫入一則習慣")
+    hbg.add_argument("--retire", action="store_true", help="收掉一則習慣（需 --reason）")
+    hbg.add_argument("--promote", action="store_true",
+                     help="依門檻調整 autonomy，並把久未出現的 act 降回 suggest")
+    hbg.add_argument("--export", action="store_true", help="產生 ~/.claude/habits.md")
+    hbg.add_argument("--unretire", action="store_true", help="把否決過的習慣放回來（回到 suggest）")
+    hbg.add_argument("--purge", action="store_true", help="清空所有習慣與掃描位置（需 --yes）")
+    hb.add_argument("--apply", action="store_true", help="搭配 --scan：把自動訊號寫入")
+    hb.add_argument("--reset", action="store_true",
+                    help="搭配 --scan：忽略掃描位置整份重掃（證據會重複累加，慎用）")
+    hb.add_argument("--limit-files", type=int, help="搭配 --scan：只掃最近 N 個 transcript")
+    hb.add_argument("--show-candidates", type=int, default=15, help="印幾筆候選原文")
+    hb.add_argument("--kind", choices=["term", "choice", "directive", "correction", "workflow"])
+    hb.add_argument("--pattern")
+    hb.add_argument("--meaning")
+    hb.add_argument("--evidence", type=int, default=1)
+    hb.add_argument("--counter", type=int, default=0)
+    hb.add_argument("--examples", help="JSON 陣列 [{when,where,quote}]")
+    hb.add_argument("--first-seen", help="首次觀察到的日期 YYYY-MM-DD（省略＝今天）")
+    hb.add_argument("--last-seen", help="最近觀察到的日期 YYYY-MM-DD（省略＝今天）")
+    hb.add_argument("--reason")
+    hb.add_argument("--all-status", action="store_true", help="列出時含已 retired")
+    hb.add_argument("--human", action="store_true",
+                    help="搭配 --add：標記為使用者親自確認，才可升到 act")
+    hb.add_argument("--yes", action="store_true", help="搭配 --purge 確認執行")
+    hb.add_argument("--force", action="store_true",
+                    help="搭配 --scan --reset --apply：明知會重複累加仍要執行")
+    hb.add_argument("--json", action="store_true")
+    hb.set_defaults(fn=_cmd_habits)
 
     lg = sub.add_parser("log", help="讀取/匯入存取遙測")
     lg.add_argument("--since")

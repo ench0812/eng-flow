@@ -59,7 +59,7 @@ def conn(test_dsn, monkeypatch, tmp_path):
     with c.cursor() as cur:
         cur.execute(
             "TRUNCATE memory_access_log, memory_revisions, memory_sources, memory_links, "
-            "memory_projects, memories, projects, embedding_config RESTART IDENTITY CASCADE"
+            "memory_projects, memories, projects, embedding_config, habits, habit_scan_marks RESTART IDENTITY CASCADE"
         )
     c.commit()
     real_home = Path.home() / ".claude"

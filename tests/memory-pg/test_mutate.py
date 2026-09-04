@@ -148,9 +148,13 @@ def test_forget_and_verify(conn, home: Path):
     conn.commit()
     import datetime as dt
     with conn.cursor() as cur:
-        cur.execute("SELECT review_by, last_verified FROM memories WHERE name='check-me'")
-        rb, lv = cur.fetchone()
-        assert rb > dt.date(2026, 9, 1) and lv == dt.date.today()
+        # `last_verified` 由 `verify()` 寫成 PG 的 `current_date`，所以斷言也要用 DB 的今天。
+        # 拿 Python 的 `date.today()` 比對會在本地凌晨 00:00–08:00 失敗——PG 跑 Etc/UTC，
+        # 那個窗口內兩者差一天（2026-09-04 02:53 實際踩到）。這是測試的時間基準錯，
+        # 不是 verify 的行為錯。
+        cur.execute("SELECT review_by, last_verified, current_date FROM memories WHERE name='check-me'")
+        rb, lv, db_today = cur.fetchone()
+        assert rb > dt.date(2026, 9, 1) and lv == db_today
 
 
 def test_edit_body_only_keeps_description(conn, home: Path):

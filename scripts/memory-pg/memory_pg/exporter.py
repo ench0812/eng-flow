@@ -187,12 +187,25 @@ def _pinned_block(text: str) -> str:
     return text[a:b] if a >= 0 and b > a else ""
 
 
+def _indexable(r: dict) -> bool:
+    """這一列該不該進 MEMORY.md 的 PINNED 區。
+
+    休眠（久未被想起而淡出）的記憶**不進索引，但 `.md` 照常匯出**。這個不對稱是刻意的：
+    索引是被 autoMemory 全文載入的常駐成本，bank 裡的 `.md` 只在被 Read 時才有成本。
+    **絕對不可以改成「跳過寫檔」**——`known` 集合（見 run() 的未認領檔案檢查）是從同一批
+    rows 建的，跳過寫檔會讓那個 `.md` 落在 known 之外，下一次 export 直接 ExportAborted，
+    整個匯出停擺。deprecated / superseded 現行也是「寫檔但不進索引」，這裡沿用同一條路。
+    """
+    return bool(r["pinned"]) and r["status"] == "active" and r["dormant_since"] is None
+
+
 def _load(conn: psycopg.Connection) -> tuple[list[dict], dict[str, dict]]:
     with conn.cursor() as cur:
         cur.execute(
             """SELECT m.id, m.name, m.description, m.body, m.file_path, m.scope::text AS scope,
                       m.home_project_id,
-                      m.kind::text, m.legacy_type, m.status::text, m.pinned, m.review_by, m.origin_session_id,
+                      m.kind::text, m.legacy_type, m.status::text, m.pinned, m.dormant_since,
+                      m.review_by, m.origin_session_id,
                       m.node_type, m.frontmatter_raw, m.extra_frontmatter, m.updated_at,
                       p.slug, p.bank_path,
                       (SELECT array_agg(l.target_name ORDER BY l.target_name) FROM memory_links l
@@ -269,6 +282,11 @@ def run(conn: psycopg.Connection, cfg: Config, *, verify_dir: Path | None, canon
 
     # 被 tag 的專案即使自己沒有記憶，也要產索引——否則 tag 到該專案的 pinned 記憶
     # （global 或 work）就沒有載入路徑，常駐會靜默落空。
+    #
+    # **這裡刻意不濾 dormant**（與下面的 tagged_pinned 收集不同）：這一步決定的是「哪些
+    # bank 要重新產生索引」，不是「索引裡放什麼」。把休眠的記憶排除在這裡，該專案就不會
+    # 進 by_bank，它的 MEMORY.md 於是完全不重寫——舊索引原封不動留著那則已休眠的記憶，
+    # 淡出在檔案上等於沒有發生。實際過濾在 tagged_pinned 那一步。
     for slug in {s for r in rows if r["pinned"] and r["status"] == "active"
                  and r["scope"] in ("global", "work") for s in (r["tags"] or [])}:
         proj = next((v for v in projects.values() if v["slug"] == slug), None)
@@ -294,7 +312,7 @@ def run(conn: psycopg.Connection, cfg: Config, *, verify_dir: Path | None, canon
     tagged_pinned: dict[str, list[dict]] = {}
     untagged_pinned: dict[Path, list[dict]] = {}
     for r in rows:
-        if not (r["pinned"] and r["status"] == "active" and r["scope"] in ("global", "work")):
+        if not (_indexable(r) and r["scope"] in ("global", "work")):
             continue
         if r["tags"]:
             for slug in r["tags"]:
@@ -338,12 +356,13 @@ def run(conn: psycopg.Connection, cfg: Config, *, verify_dir: Path | None, canon
                 rep.written_banks.append(bank)
         # index
         slug = rs[0]["slug"] if rs and rs[0]["slug"] else projmod.slug_from_bank(bank)
-        pinned = [r for r in rs if r["pinned"] and r["status"] == "active"]
+        pinned = [r for r in rs if _indexable(r)]
         if slug:
             pinned = pinned + tagged_pinned.get(slug, [])
         elif bank in untagged_pinned or bank_scope.get(bank) in ("global", "work"):
             pinned = untagged_pinned.get(bank, [])
-        topics = [r for r in rs if r["status"] == "active" and not r["pinned"]]
+        topics = [r for r in rs if r["status"] == "active" and r["dormant_since"] is None
+                  and not r["pinned"]]
         # 工作庫不產 PINNED 區（沒有常駐載入路徑，見 render_index 的說明）
         idx = render_index(pinned, topics, with_pinned=bank != cfg.bank_work)
         blk = _pinned_block(idx)

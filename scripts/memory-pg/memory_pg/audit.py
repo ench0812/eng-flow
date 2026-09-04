@@ -17,7 +17,7 @@ from pathlib import Path
 
 import psycopg
 
-from . import exporter
+from . import decay, exporter
 from . import projects as projmod
 from .config import Config
 
@@ -147,6 +147,36 @@ def run(conn: psycopg.Connection, cfg: Config) -> AuditReport:
                 rep.findings.append(Finding(
                     "SUGGEST", fp, "work_without_tag",
                     f"{name} 是 work 卻沒有 tag，通常表示它其實該放 global，或忘了標專案"))
+
+        # dormant_candidate（SUGGEST）—— 已跌破門檻、還在寬限期內，下次 recompute 就會睡著。
+        # 先出聲是為了留一個「還來得及 --no-decay」的窗口；真的睡著也還救得回來，所以不是 WARN。
+        cur.execute(
+            "SELECT file_path, name, recall_score FROM memories "
+            "WHERE status='active' AND dormant_since IS NULL AND NOT pinned AND NOT decay_exempt "
+            f"  AND recall_score < {decay.DORMANT_THRESHOLD} "
+            f"  AND created_at <= current_date - {decay.PROTECT_DAYS} "
+            "ORDER BY recall_score, name"
+        )
+        for fp, name, score in cur.fetchall():
+            rep.findings.append(Finding("SUGGEST", fp, "dormant_candidate",
+                                        f"{name} R={score:.3f} 將於寬限期滿後休眠"))
+
+        # decay_exempt_unused（SUGGEST）—— 標了豁免卻長期沒被叫到，多半是豁免下錯了。
+        # **90 天下界不可省**：沒有它的話，剛建立就標豁免的記憶會立刻被誤報——它還沒有機會
+        # 被叫到，「沒被叫到」不代表沒用。
+        cur.execute(
+            """SELECT m.file_path, m.name FROM memories m
+               WHERE m.status='active' AND m.decay_exempt AND NOT m.pinned
+                 AND m.created_at < current_date - 90
+                 AND NOT EXISTS (
+                       SELECT 1 FROM memory_access_log l
+                       WHERE l.event='search' AND l.ts >= current_date - 90
+                         AND m.id = ANY(l.memory_ids))
+               ORDER BY m.name"""
+        )
+        for fp, name in cur.fetchall():
+            rep.findings.append(Finding("SUGGEST", fp, "decay_exempt_unused",
+                                        f"{name} 豁免衰減但 90 天內零命中，確認豁免還需要嗎"))
 
         # split_candidate（SUGGEST）
         cur.execute(

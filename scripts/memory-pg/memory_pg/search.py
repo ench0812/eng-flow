@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import psycopg
 
-from . import db, projects
+from . import db, decay, projects
 from .config import Config
 from .errors import RetrievalUnavailable, SearchAborted
 
@@ -24,9 +24,20 @@ RRF_K = 60
 FTS_LIMIT = 40
 VEC_LIMIT = 40
 
+# 遺忘曲線的排名權重。參數一律引用 decay 模組，不在這裡重寫數字——兩處各寫一份的話，
+# 調門檻時只改一邊會讓「搜尋看到的排名」與「decay --report 說的權重」悄悄分岔。
+DECAY_WEIGHT_SQL = (
+    "CASE WHEN m.pinned OR m.decay_exempt "
+    f"       OR m.created_at::date > current_date - {decay.PROTECT_DAYS} "
+    f"     THEN 1.0 ELSE greatest({decay.DECAY_FLOOR}, m.recall_score) END"
+)
+# 名次空間的懲罰項：weight=1 加 0 名，weight=floor 加滿 PENALTY_RANKS × (1−floor) 名。
+PENALTY_SQL = f"({decay.DECAY_PENALTY_RANKS} * (1 - {DECAY_WEIGHT_SQL}))"
+
 
 @dataclass
 class Hit:
+    id: str          # memories.id。log_access 要靠它把「命中排名」保序寫進 access log
     name: str
     file_path: str
     description: str
@@ -41,6 +52,9 @@ class Hit:
     vec_rank: int | None
     sim: float | None
     rrf: float
+    dormant: bool = False
+    decay_weight: float = 1.0
+    weighted: float = 0.0        # 加權後的排序分數（rrf 是未加權的相關性）
 
 
 @dataclass
@@ -156,6 +170,7 @@ def search(
     all_scopes: bool = False,          # 全部，含其他專案
     k: int = 10,
     include_superseded: bool = False,
+    include_dormant: bool = False,     # 休眠（久未被想起）的記憶預設不進結果
     mode: str = "hybrid",              # hybrid | fts
     degrade_ok: bool = False,
     embed_fn=None,                     # (cfg, text)->list[float]；None 時 hybrid 自動降 fts
@@ -205,7 +220,8 @@ def search(
 
     id_hit_expr = "(m.name = %(q)s OR m.name ILIKE '%%'||%(q)s||'%%')" if ID_RE.match(query.strip()) else "false"
 
-    params: dict = {"q": query.strip(), "terms": terms, "tau": (tau if use_vec else 0.0)}
+    params: dict = {"q": query.strip(), "terms": terms, "tau": (tau if use_vec else 0.0),
+                    "incl_dormant": bool(include_dormant)}
     params.update(scope_params)
 
     fts_where = " OR ".join(
@@ -249,20 +265,34 @@ def search(
                ORDER BY (3*c_name + 2*c_desc + c_body) DESC, c_name DESC, name) AS r
       FROM cand LIMIT {FTS_LIMIT}
     ){vec_cte}
-    SELECT m.file_path, m.name, m.description, m.scope::text, p.slug,
+    SELECT m.id, m.file_path, m.name, m.description, m.scope::text, p.slug,
            m.kind::text, m.status::text, m.pinned,
            (m.review_by IS NOT NULL AND m.review_by < current_date) AS stale,
+           m.dormant_since IS NOT NULL AS dormant,
            {id_hit_expr} AS id_hit,
            f.r AS fts_rank, v.r AS vec_rank, v.sim,
-           coalesce(1.0/({RRF_K}+f.r),0) + coalesce(1.0/({RRF_K}+v.r),0) AS rrf
+           -- rrf 是**未加權**的相關性。它同時是 log_access 記錄命中排名的依據——
+           -- 拿加權後的順序回灌會讓「上一輪的降權」變成「下一輪的訓練訊號」，形成
+           -- 降權→排後面→拿不到命中→分數更低的自我強化迴路。
+           coalesce(1.0/({RRF_K}+f.r),0) + coalesce(1.0/({RRF_K}+v.r),0) AS rrf,
+           {DECAY_WEIGHT_SQL} AS decay_weight,
+           -- 加權在**名次空間**進行：等效名次 = 實際名次 + PENALTY × (1 − weight)。
+           -- 乘法版本（rrf * weight）會讓權重支配相關性，見 decay.DECAY_PENALTY_RANKS 的說明。
+           coalesce(1.0/({RRF_K}+f.r+{PENALTY_SQL}),0)
+             + coalesce(1.0/({RRF_K}+v.r+{PENALTY_SQL}),0) AS weighted
     FROM vis m
     LEFT JOIN projects p ON p.id = m.home_project_id
     LEFT JOIN fts f USING (name)
     {vec_join}
-    WHERE f.name IS NOT NULL
-       OR (v.name IS NOT NULL AND v.sim >= %(tau)s)
-       OR {id_hit_expr}
-    ORDER BY id_hit DESC, rrf DESC, m.name
+    WHERE (f.name IS NOT NULL
+           OR (v.name IS NOT NULL AND v.sim >= %(tau)s)
+           OR {id_hit_expr})
+      -- **id 精確命中豁免休眠過濾。** 不豁免的話 `memory search <完整-id>` 對休眠記憶會回
+      -- 傳與「這則不存在」位元組一致的空結果（exit 0、零行、無警示），而這個模組的
+      -- A4 原則正是「失敗不可以長得像查無」，docstring 也把 id 列為第一等檢索欄位。
+      AND (m.dormant_since IS NULL OR %(incl_dormant)s OR {id_hit_expr})
+    -- ORDER BY 直接用輸出別名，運算式只寫一次（兩處各寫一份遲早會分岔）
+    ORDER BY id_hit DESC, weighted DESC, m.name
     LIMIT {int(k)}
     """
     with conn.cursor() as cur:
@@ -272,10 +302,13 @@ def search(
 
     hits = [
         Hit(
+            id=str(r["id"]),
             name=r["name"], file_path=_to_gitbash(r["file_path"]), description=r["description"],
             scope=r["scope"], project_key=r["slug"], kind=r["kind"], status=r["status"],
             pinned=r["pinned"], stale=r["stale"], id_hit=r["id_hit"],
             fts_rank=r["fts_rank"], vec_rank=r["vec_rank"], sim=r["sim"], rrf=float(r["rrf"]),
+            dormant=r["dormant"], decay_weight=float(r["decay_weight"]),
+            weighted=float(r["weighted"]),
         )
         for r in rows
     ]
@@ -321,16 +354,26 @@ def _scope_filter(scope: str | None, project: str | None, current_only: bool,
 
 def log_access(conn: psycopg.Connection, *, event: str, cwd: str | None, keyword: str,
                hits: list[Hit], mode: str) -> None:
+    """記一筆存取遙測。**`memory_ids` 的順序就是命中排名**，衰減模型靠它算 rank。
+
+    舊版是 `(SELECT array_agg(id) FROM memories WHERE name = ANY(%s))`——`array_agg` 沒有
+    `ORDER BY`，出來的是 DB 掃描順序，就算傳進去的 name 陣列是排好的也一樣。於是「排第 1」
+    與「排第 10」在資料裡分不出來。現在直接寫 `Hit.id` 依 hits 的既有順序組成的陣列。
+    （0003 之前寫入的資料仍是無序的，decay 以 migration 的 applied_at 為界分開處理。）
+    """
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM projects WHERE slug = %s", (resolve_project_key(conn, cwd),))
             row = cur.fetchone()
+            # **依未加權的 rrf 排序，不是展示順序。** 展示順序已經被遺忘曲線調整過；
+            # 拿它當「這則有多相關」的訓練訊號，等於讓上一輪的降權決定下一輪的降權，
+            # 形成自我強化迴路（降權→排後面→rank 變差→成長減半→分數更低）。
+            ranked = sorted(hits, key=lambda h: (-h.rrf, h.name))
             cur.execute(
                 """INSERT INTO memory_access_log(event, project_id, cwd, keyword, n, memory_ids, mode)
-                   VALUES (%s,%s,%s,%s,%s,
-                           (SELECT coalesce(array_agg(id),'{}') FROM memories WHERE name = ANY(%s)), %s)""",
+                   VALUES (%s,%s,%s,%s,%s,%s::uuid[],%s)""",
                 (event, row[0] if row else None, cwd, keyword, len(hits),
-                 [h.name for h in hits], mode),
+                 [h.id for h in ranked], mode),
             )
         conn.commit()
     except psycopg.Error:
