@@ -21,6 +21,19 @@ exit 1
 ' > "$GATE/codex"; chmod +x "$GATE/codex"
 trap 'rm -rf "$FIX" "$GATE"' EXIT
 
+# 【所有斷言 helper 都必須定義在這裡,任何測試呼叫之前】(2026-09-07 踩過):
+# ok()/has()/hasnt() 原本定義在檔案中段(舊 306 行)。在它之前呼叫 `ok` 的話,bash 只會對
+# stderr 印一行 command not found 就繼續——pass/fail 兩個計數都不動,於是那條斷言【完全沒有
+# 執行過】而總結仍是 fail=0。實際踩到: 新加的 7 條 telemetry 斷言全部靜默失效,連 mutation
+# 測試(故意改壞 pattern)都照樣綠,因為紅的只有另外用 check_e2e 寫的那兩條。
+# 這正是「測試宣稱的覆蓋比實際驗到的大」——加測試在這個檔案裡不是零風險動作。
+ok() { # $1=desc  $2..=條件(直接當指令跑)
+  local desc="$1"; shift
+  if "$@"; then pass=$((pass+1)); else echo "FAIL [$desc]"; fail=$((fail+1)); fi
+}
+has()  { printf '%s' "$2" | grep -q "$1"; }
+hasnt() { ! printf '%s' "$2" | grep -q "$1"; }
+
 check() {
   local desc="$1" expect="$2"; shift 2
   HOME="$FIX" PATH="$GATE:/usr/bin:/bin" CODEX_REVIEW_STATE="$FIX/state" CODEX_REVIEW_LOG="$FIX/usage.tsv" bash "$SCRIPT" "$@" >/dev/null 2>&1
@@ -198,6 +211,18 @@ check_e2e "自白句含【已讀】不得關掉偵測" 0 "全標【推論】" "F
 ok "自白句情境 → telemetry 仍是 OK_NOVERIFY" test "$(st16)" = "OK_NOVERIFY"
 mk_stub 'printf "%s\n" "- Required【推論】 foo.go:1 可能有問題" "標註說明: 【已讀】=已查證 / 【推論】=未查證" "收斂問句:無"; exit 0'
 check_e2e "legend 行不得關掉偵測" 0 "全標【推論】" "FAILED:"
+# 【codex 複查抓到,2026-09-07】第一版修正錨在「清單前綴」上,仍有兩個洞——legend 只要自己
+# 帶清單前綴就又被算成發現;而標題式發現沒有清單前綴,兩個計數都會是 0。改錨嚴重度後兩者皆解。
+mk_stub 'printf "%s\n" "- Required【推論】 foo.go:1 可能有問題" "- 標註說明: 【已讀】=已查證 / 【推論】=未查證" "收斂問句:無"; exit 0'
+check_e2e "帶清單前綴的 legend 不得關掉偵測" 0 "全標【推論】" "FAILED:"
+ok "清單式 legend → telemetry 仍是 OK_NOVERIFY" test "$(st16)" = "OK_NOVERIFY"
+mk_stub 'printf "%s\n" "### Required【推論】 foo.go:1 可能有問題" "收斂問句:無"; exit 0'
+check_e2e "標題式發現也要被計入" 0 "全標【推論】" "FAILED:"
+ok "標題式發現 → telemetry=OK_NOVERIFY" test "$(st16)" = "OK_NOVERIFY"
+# 嚴重度與標註之間允許一段路徑(實測最長的寫法),不得因此漏算成未查證
+mk_stub 'printf "%s\n" "- Critical — \`internal/auth/token.go:57-58\`【已讀】: 有問題" "收斂問句:無"; exit 0'
+check_e2e "長路徑夾在嚴重度與標註之間 → 仍算已查證" 0 "完成(" "全標【推論】"
+ok "長路徑情境 → telemetry=OK" test "$(st16)" = "OK"
 
 mk_stub 'printf "%s\n" "- Required【已讀】 foo.go:1 確認有問題" "收斂問句:無"; exit 0'
 check_e2e "有已讀 → 不觸發" 0 "完成(" "全標【推論】"
@@ -290,13 +315,6 @@ check_e2e "diff 內的 429 不觸發 RATE_LIMITED" 0 "完成(" "RATE_LIMITED"
 # 負控組: 真正的 429 出現在錯誤行上,仍必須判為 RATE_LIMITED(收窄不可改壞既有行為)
 mk_stub 'echo "ERROR: request failed with status 429 Too Many Requests" >&2; exit 1'
 check_e2e "錯誤行上的 429 仍判 RATE_LIMITED" 0 "RATE_LIMITED" "FAILED:"
-
-ok() { # $1=desc  $2..=條件(直接當指令跑)
-  local desc="$1"; shift
-  if "$@"; then pass=$((pass+1)); else echo "FAIL [$desc]"; fail=$((fail+1)); fi
-}
-has()  { printf '%s' "$2" | grep -q "$1"; }
-hasnt() { ! printf '%s' "$2" | grep -q "$1"; }
 
 # --- 成本治理: 純函式(2026-08-24 新增) ---
 # 直接抽腳本裡的函式本體來測,不另抄一份以免 drift(同 is_rate_limited 的做法)。
