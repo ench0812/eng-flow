@@ -1104,8 +1104,13 @@ fi
 # 【兩邊必須對稱】: 只改一邊會破壞「兩者都沒有就不觸發」那條刻意的寧漏勿誤設計。
 FINDING_LINE='(Critical|Required|Optional|Nit|FYI)[^【]{0,80}'
 FINAL_STATUS=OK
-VERIFIED_N="$(grep -cE "${FINDING_LINE}.*【已讀】" "$OUT_FILE" 2>/dev/null)"
-INFERRED_N="$(grep -cE "${FINDING_LINE}.*【推論】" "$OUT_FILE" 2>/dev/null)"
+# 【不可在這裡接 `.*`】(2026-09-07 codex 第二輪抓到): 接了之後 `[^【]{0,80}` 那段距離限制
+# 完全失效——`.*` 能跨過任意內容包含另一個標註。實測漏報:
+#   「- Required【推論】 foo.go:1 尚未讀檔,因此不能標為【已讀】」
+# 這一行會【同時】命中兩種標註,VERIFIED_N 變 1 → 全推論的回覆仍得到 OK、不發警示。
+# 正確語意是「嚴重度之後 80 字元內、且中間不再出現任何標註開頭」,那正是 FINDING_LINE 本身。
+VERIFIED_N="$(grep -cE "${FINDING_LINE}【已讀】" "$OUT_FILE" 2>/dev/null)"
+INFERRED_N="$(grep -cE "${FINDING_LINE}【推論】" "$OUT_FILE" 2>/dev/null)"
 case "$VERIFIED_N" in ''|*[!0-9]*) VERIFIED_N=0 ;; esac
 case "$INFERRED_N" in ''|*[!0-9]*) INFERRED_N=0 ;; esac
 if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then

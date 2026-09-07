@@ -219,10 +219,18 @@ ok "清單式 legend → telemetry 仍是 OK_NOVERIFY" test "$(st16)" = "OK_NOVE
 mk_stub 'printf "%s\n" "### Required【推論】 foo.go:1 可能有問題" "收斂問句:無"; exit 0'
 check_e2e "標題式發現也要被計入" 0 "全標【推論】" "FAILED:"
 ok "標題式發現 → telemetry=OK_NOVERIFY" test "$(st16)" = "OK_NOVERIFY"
-# 嚴重度與標註之間允許一段路徑(實測最長的寫法),不得因此漏算成未查證
-mk_stub 'printf "%s\n" "- Critical — \`internal/auth/token.go:57-58\`【已讀】: 有問題" "收斂問句:無"; exit 0'
+# 嚴重度與標註之間允許一段路徑(實測最長的寫法),不得因此漏算成未查證。
+# 【必須同時放一筆推論發現】(2026-09-07 codex 第二輪指出): 若只放已讀那一筆,萬一它被完全
+# 漏算,兩個計數都會是 0 而狀態仍是 OK——斷言就分不出「正確算到已讀」與「什麼都沒算到」。
+# 配一筆推論之後,已讀一旦漏算就會掉進 OK_NOVERIFY,測試才抓得到退化。
+mk_stub 'printf "%s\n" "- Critical — \`internal/auth/token.go:57-58\`【已讀】: 有問題" "- Optional【推論】 bar.go:2 未查證" "收斂問句:無"; exit 0'
 check_e2e "長路徑夾在嚴重度與標註之間 → 仍算已查證" 0 "完成(" "全標【推論】"
 ok "長路徑情境 → telemetry=OK" test "$(st16)" = "OK"
+# 【同一行提及另一種標註】(2026-09-07 codex 第二輪抓到): 發現行的自我說明若提到另一個標註,
+# 不得讓兩種計數同時成立——那會讓全推論的回覆靜默通過。
+mk_stub 'printf "%s\n" "- Required【推論】 foo.go:1 尚未讀檔,因此不能標為【已讀】" "收斂問句:無"; exit 0'
+check_e2e "同一行提及另一標註 → 仍判零查證" 0 "全標【推論】" "FAILED:"
+ok "同一行提及另一標註 → telemetry=OK_NOVERIFY" test "$(st16)" = "OK_NOVERIFY"
 
 mk_stub 'printf "%s\n" "- Required【已讀】 foo.go:1 確認有問題" "收斂問句:無"; exit 0'
 check_e2e "有已讀 → 不觸發" 0 "完成(" "全標【推論】"
