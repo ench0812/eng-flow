@@ -361,7 +361,7 @@ jnum() {
 # 只記成功的會低估成本,而低估成本正是當初沒人發現用量失控的原因。
 # 欄位轉義: 路徑含 tab/換行會把後續欄位整體位移,而 codex-usage.sh 全靠位置定址讀取。
 tsv() { local v="$1"; v="${v//$'\t'/ }"; v="${v//$'\n'/ }"; printf '%s' "$v"; }
-emit_telemetry() {  # $1=狀態(OK|FAILED|RATE_LIMITED)
+emit_telemetry() {  # $1=狀態(OK|OK_NOVERIFY|FAILED|RATE_LIMITED|SKIP_DEDUP|TOO_LARGE)
   local usage in_t cin_t out_t rea_t hit
   usage="$(grep -o '"usage":{[^}]*}' "$JSON_FILE" 2>/dev/null | tail -1)"
   in_t="$(jnum "$usage" input_tokens)";  cin_t="$(jnum "$usage" cached_input_tokens)"
@@ -898,13 +898,17 @@ LAST_FILE="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-last-$$.txt")"
 
 trap 'rm -f "$ERR_FILE" "$RC_FILE" "$JSON_FILE" "$LAST_FILE"' EXIT
 
-# --- codex 的實際 cwd 必須等於 access_note 宣告的工作根(2026-08-31,codex 自身複查抓到) ---
-# 從 repo 【子目錄】呼叫本腳本時,codex exec 的 cwd 是呼叫端的 cwd 而不是 repo 根,於是
-# access_note 宣告的路徑與它實際看到的不一致——相對路徑(plan 的 `Spec:` 行)會落在子目錄,
-# 而 prompt 還信誓旦旦說工作根是別的地方。宣告與事實不符比不宣告更糟。
-# fresh 用 codex 的正式介面 --cd(實測 0.148.0 可用,且吃得下 git rev-parse 回的正斜線路徑);
-# `codex exec resume` 【沒有】這個旗標(實測 --help 只有 --skip-git-repo-check / --ephemeral),
-# 所以另外實際 cd 一次把兩條路徑都蓋住。此時 PAYLOAD 已算完,後續只寫絕對路徑的 state,cd 安全。
+# --- 把 codex 的工作根釘在 repo 根(2026-08-31 加入;2026-09-07 訂正下方的因果) ---
+# 【2026-09-07 訂正】本段原本寫「codex exec 的 cwd 是呼叫端的 cwd,所以 --cd 之後相對路徑就
+# 會落在 repo 根」。那個因果是錯的,而且與 PROMPT_POLICY_VERSION=3 上方的實測直接矛盾——
+# 實測(四模型六次呼叫、無一例外): codex 的【shell 工具】cwd 是 C:\,--cd 並沒有改變它,
+# 相對路徑一律解析到 C:\ 而失敗。所以相對路徑的問題【不是】這裡修好的,是 access_note v3
+# 在 prompt 層要求絕對路徑才修好的。兩段講的是不同層次,別再把它們混為一談。
+# 那 --cd 與這次 cd 實際買到什麼(仍然要保留): codex 的 trust/git-repo 判定與相對 pathspec
+# 的解析基準,以及讓 access_note 宣告的路徑與 codex 認定的工作根一致——宣告與事實不符
+# 比不宣告更糟。`codex exec resume` 【沒有】--cd 旗標(實測 --help 只有 --skip-git-repo-check
+# / --ephemeral),所以另外實際 cd 一次把兩條路徑都蓋住。
+# 此時 PAYLOAD 已算完,後續只寫絕對路徑的 state,cd 安全。
 # fail-closed: 工作根進不去代表宣告的前提不成立,不可帶著錯的宣告去諮詢。
 if ! cd "$REPO_ROOT" 2>/dev/null; then
   echo "[codex-review] FAILED: 無法進入工作根 $REPO_ROOT,複查沒有發生——呼叫端不得視為已複查。" >&2
@@ -1008,6 +1012,14 @@ if [ -z "$OUT_TRIMMED" ] || [ "$RC" -ne 0 ]; then
   if grep -qi 'trusted directory' "$ERR_FILE" 2>/dev/null; then
     echo "  已知原因: codex 拒絕在非信任目錄執行。改在 git repo 內呼叫本腳本,或讓 codex 信任該目錄。" >&2
   fi
+  # critical 檔位自 2026-09-07 起用 gpt-6-astra,它多了一條 client 版本與帳號權限的硬相依。
+  # 沒有這條提示的話,舊 client / 無 astra 權限只會落到通用 FAILED,呼叫端得自己從 stderr
+  # 末 20 行看出端倪——而壞掉的正好是【最高嚴重度】那一檔的複查。
+  if grep -qiE 'invalid_request|minimal_client_version|unknown model|model_not_found' "$ERR_FILE" 2>/dev/null; then
+    echo "  已知原因: server 不接受模型 '$MODEL'。critical 檔位需要 codex >= 0.153.0 且帳號已 rollout GPT-6 Astra。" >&2
+    echo "  判別(成本可忽略): printf 'reply OK' | codex exec -m $MODEL --sandbox read-only --skip-git-repo-check -" >&2
+    echo "  過不了就先把 CRIT_MODEL 改回 gpt-5.6-sol/medium(見檔案開頭的映射表),不要讓 critical 複查一直失敗。" >&2
+  fi
   echo "  codex stderr(末 20 行):" >&2
   tail -n 20 "$ERR_FILE" >&2
   emit_telemetry FAILED
@@ -1075,17 +1087,36 @@ fi
 # 誤報幾次之後這行警示會被當雜訊略過,比沒有還糟(理由同下面那段「已知的偵測缺口」)。
 # 刻意【不】升成 FAILED: 純推論的發現仍可能是真的(該次實測就抓到兩個真缺陷),丟掉過當;
 # 要的是讓呼叫端知道「這一份不得當成已查證」——它是假說集,不是結論集。
+# 【必須錨在「發現行」上,不可裸數字樣】(2026-09-07 複查抓到,實測會漏報):
+# 裸 grep -c '【已讀】' 數的是「出現過這四個字的行」,不是「有發現被標成已讀」。於是 codex
+# 只要在回覆裡寫一句自白——「本輪未能讀取任何檔案,因此沒有任何一項達到【已讀】等級」——
+# 計數就變成 1,偵測整個關掉。而那句話正是這個偵測唯一想抓的情境下【最自然的寫法】。
+# 標註說明式的 legend 行(「【已讀】=已查證 / 【推論】=未查證」)也會造成同樣的關閉。
+# 實測(stub,doc 模式,其餘條件相同): 全推論 → 觸發; 全推論＋上述自白句 → 不觸發。
+# 錨定樣式涵蓋實際觀察到的兩種清單寫法: 「- **Critical【已讀】**」與「1. **Critical【已讀】**」。
+# 【兩邊必須對稱】: 只改一邊會破壞「兩者都沒有就不觸發」那條刻意的寧漏勿誤設計。
+FINDING_LINE='^[[:space:]]*([-*+•]|[0-9]+[.)])'
 FINAL_STATUS=OK
-VERIFIED_N="$(grep -c '【已讀】' "$OUT_FILE" 2>/dev/null)"
-INFERRED_N="$(grep -c '【推論】' "$OUT_FILE" 2>/dev/null)"
+VERIFIED_N="$(grep -cE "${FINDING_LINE}.*【已讀】" "$OUT_FILE" 2>/dev/null)"
+INFERRED_N="$(grep -cE "${FINDING_LINE}.*【推論】" "$OUT_FILE" 2>/dev/null)"
 case "$VERIFIED_N" in ''|*[!0-9]*) VERIFIED_N=0 ;; esac
 case "$INFERRED_N" in ''|*[!0-9]*) INFERRED_N=0 ;; esac
 if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then
   FINAL_STATUS=OK_NOVERIFY
-  echo "[codex-review] 警示: 本輪【零查證】——$INFERRED_N 項標【推論】,沒有任何一項標【已讀】。" >&2
-  echo "  codex 很可能一個檔案都沒讀成,所有意見都只從送進去的片段推得。" >&2
-  echo "  處置: 不得視為已查證的第二意見。把每一項當成【待驗證的假說】,自己回頭核對後再決定處置;" >&2
-  echo "        也不可據此對使用者稱「已完成 codex 複查」。" >&2
+  # 【已知邊界,刻意不補】: 「讀不到檔案 + 回無重大遺漏」不會觸發——沒有任何發現時兩個計數
+  # 都是 0,落在「寧漏勿誤」那一側。要抓它得改看 JSON 事件流的工具往返數,但那個訊號在 stub
+  # 測試下恆為 0(stub 不產生 JSONL),會讓既有測試全面誤報。方向是漏報不是誤報,先留著。
+  # 兩種模式的失效意義不同,措辭要分開——diff 模式的零查證幾乎一定是故障,doc 模式不是。
+  if [ "$MODE_NAME" = "doc" ]; then
+    echo "[codex-review] 注意: 本輪回覆的 $INFERRED_N 行發現全標【推論】,沒有任何一行標【已讀】。" >&2
+    echo "  doc 模式這【未必】是故障: 對還沒落地的設計提補充/替代/調整,本來就常常沒有原始碼可讀。" >&2
+    echo "  但若這份 spec/plan 明確指到既有程式(例如 plan 的 Spec: 行),那就代表它沒讀成——自己核對一次。" >&2
+  else
+    echo "[codex-review] 警示: 本輪【零查證】——$INFERRED_N 行發現標【推論】,沒有任何一行標【已讀】。" >&2
+    echo "  codex 很可能一個檔案都沒讀成,所有意見都只從送進去的片段推得。" >&2
+    echo "  處置: 不得視為已查證的第二意見。把每一項當成【待驗證的假說】,自己回頭核對後再決定處置;" >&2
+    echo "        也不可據此對使用者稱「已完成 codex 複查」。" >&2
+  fi
   # 最常見的成因是路徑寫法,不是真的沒有權限——這一句是要打斷「存取被拒 ⇒ 我沒有讀取權」的
   # 錯誤歸因,那個歸因會讓人跑去查沙箱設定,而真正該做的是確認 access_note 的絕對路徑指引。
   if grep -qE '(沙箱|sandbox)[^。]{0,40}(拒絕|denied)|讀取權[限]?被[^。]{0,20}拒絕|沒有[^。]{0,10}(讀取|存取)權' "$OUT_FILE" 2>/dev/null; then

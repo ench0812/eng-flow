@@ -182,13 +182,30 @@ check_e2e "缺收斂問句行 → 注意但完成" 0 "未附行首" "FAILED:"
 # 命題: 「一個【已讀】都沒有、卻有【推論】」= codex 一個檔案都沒讀成,這一份不得當成已查證。
 # 實測背景: gpt-5.6-terra 撞到相對路徑失敗後自行放棄、全篇改推論作答,而 stderr 沒有任何
 # exec_command failed、exit 0、格式完整——既有的工具失敗偵測完全抓不到,recall 卻掉到 2/8。
+# 斷言優先看 telemetry 的 status 欄(第 16 欄)而非訊息文字: 那是機器可讀的出口,措辭改了
+# 也不會讓這幾條測試失去保護力。訊息只驗兩種模式共有的核心字樣。
+st16() { awk -F'\t' 'END{print $16}' "$STUB/usage.tsv"; }
+
 mk_stub 'printf "%s\n" "- Required【推論】 foo.go:1 可能有問題" "收斂問句:無"; exit 0'
-check_e2e "全推論零已讀 → 零查證警示" 0 "零查證" "FAILED:"
+check_e2e "全推論零已讀 → 觸發偵測" 0 "全標【推論】" "FAILED:"
+ok "全推論零已讀 → telemetry=OK_NOVERIFY" test "$(st16)" = "OK_NOVERIFY"
+
+# 【R1 回歸,2026-09-07 複查抓到】裸 grep -c '【已讀】' 會被回覆裡任何一次該字樣關掉,
+# 包含「本輪未能讀取任何檔案,因此沒有任何一項達到【已讀】等級」這種【該情境下最自然的自白】。
+# 判定必須錨在發現行上。這兩條各鎖一種關閉手法。
+mk_stub 'printf "%s\n" "- Required【推論】 foo.go:1 可能有問題" "本輪未能讀取任何檔案,因此沒有任何一項達到【已讀】等級。" "收斂問句:無"; exit 0'
+check_e2e "自白句含【已讀】不得關掉偵測" 0 "全標【推論】" "FAILED:"
+ok "自白句情境 → telemetry 仍是 OK_NOVERIFY" test "$(st16)" = "OK_NOVERIFY"
+mk_stub 'printf "%s\n" "- Required【推論】 foo.go:1 可能有問題" "標註說明: 【已讀】=已查證 / 【推論】=未查證" "收斂問句:無"; exit 0'
+check_e2e "legend 行不得關掉偵測" 0 "全標【推論】" "FAILED:"
+
 mk_stub 'printf "%s\n" "- Required【已讀】 foo.go:1 確認有問題" "收斂問句:無"; exit 0'
-check_e2e "有已讀 → 不報零查證" 0 "完成(" "零查證"
+check_e2e "有已讀 → 不觸發" 0 "完成(" "全標【推論】"
+ok "有已讀 → telemetry=OK" test "$(st16)" = "OK"
 # 寧漏勿誤: codex 沒照協議標註時無法判斷,不得亂報——誤報幾次後這行警示就會被當雜訊略過。
 mk_stub 'printf "%s\n" "- Required 完全沒有標註的發現" "收斂問句:無"; exit 0'
-check_e2e "兩種標註都沒有 → 不報零查證" 0 "完成(" "零查證"
+check_e2e "兩種標註都沒有 → 不觸發" 0 "完成(" "全標【推論】"
+ok "兩種標註都沒有 → telemetry=OK" test "$(st16)" = "OK"
 # 錯誤歸因的追加提示: 「沙箱拒絕」這類宣稱實測幾乎都是相對路徑造成的,不是真的沒有讀取權。
 mk_stub 'printf "%s\n" "- Required【推論】 工作根的讀取權限被沙箱拒絕" "收斂問句:無"; exit 0'
 check_e2e "宣稱沙箱拒絕 → 追加路徑歸因提示" 0 "相對路徑" "FAILED:"
@@ -202,6 +219,13 @@ else echo "FAIL [access_note 缺絕對路徑指引]"; fail=$((fail+1)); fi
 # 這一句是針對「存取被拒 ⇒ 我沒有讀取權」的錯誤歸因,缺了就等於沒修到 terra 那個失效模式。
 if grep -q "不得.*判定自己沒有檔案存取權\|不是沙箱禁止你讀取" "$STUB/args_path.txt" 2>/dev/null; then pass=$((pass+1))
 else echo "FAIL [access_note 缺「存取被拒≠沒有讀取權」]"; fail=$((fail+1)); fi
+# 【零查證偵測的啟用條件,2026-09-07 複查抓到】: 偵測靠 codex 照 prompt 標【已讀】/【推論】。
+# 若日後有人精簡 access_note 把標註要求拿掉,兩個計數恆為 0 → 偵測【永遠不觸發】,而所有測試
+# 照樣全綠、status 一路是 OK。這正是安全鐵律 #4 說的「移除一層防護前先確認它是不是別處
+# fail-closed 的啟用條件」——所以那個條款要有自己的測試,不能只靠偵測那端的測試。
+if grep -q '【已讀】' "$STUB/args_path.txt" 2>/dev/null && grep -q '【推論】' "$STUB/args_path.txt" 2>/dev/null
+then pass=$((pass+1))
+else echo "FAIL [access_note 缺【已讀】/【推論】標註要求 → 零查證偵測會靜默失效]"; fail=$((fail+1)); fi
 
 # transcript 回顯 prompt(內含行中「收斂問句」字樣)不得騙過在場檢查——需行首才算
 mk_stub 'printf "%s\n" "${!#}"; echo "無重大補充"; exit 0'
