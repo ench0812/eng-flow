@@ -25,14 +25,33 @@
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
-#   映射(嚴重度用語同 mao-review taxonomy;2026-08-07 改版,理由:舊映射 token 消耗過大):
-#     critical          -> gpt-5.6-sol   / medium(旗艦保留給阻斷級風險,但 effort 由 max 降到 medium)
+#   映射(嚴重度用語同 mao-review taxonomy;2026-09-07 改版 critical 一級,其餘沿用 2026-08-07):
+#     critical          -> gpt-6-astra   / low   (見下方實測;low 已達滿分 recall,effort 再往上
+#                                                 買到的是跨版本推理深度,不是覆蓋率)
 #     required          -> gpt-5.6-terra / high  (中階模型 + 高 effort 補償)
 #     optional/nit/fyi  -> gpt-5.6-luna  / max   (nano 級模型,單價低到直接給最高 effort 也划算)
 #   --severity 未傳/未知 -> fallback gpt-5.6-luna / max(對齊最低一級:沒說嚴重度就不燒旗艦額度;
 #                            腳本仍印警告要求呼叫端補傳,別靠 fallback 過日子)。
-#   策略:模型階梯隨嚴重度下降(sol > terra > luna),effort 反向上升作為補償。舊版 sol/max
-#   ＋ sol/high 兩級都吃旗艦模型的最貴檔位,是 token 消耗的主因。
+#   策略:模型階梯隨嚴重度下降(astra > terra > luna),effort 反向上升作為補償。
+#
+#   【critical 改用 gpt-6-astra/low 的依據】(2026-09-07 實測,非推測)。方法: 一份植入 8 個
+#   已知缺陷的 Go diff(7.6KB,難度分三層:單看 diff 可見 / 需讀本檔邏輯 / 需跨檔或跨版本時序
+#   推理),同一份 prompt 對各檔位各跑一次,人工比對 recall 與誤報。全部零誤報,差異只在 recall:
+#     模型/effort        recall  未快取in  output  往返  秒    相對單價
+#     gpt-5.6-sol/medium  7/8    19,362   3,900    7   106   1.00  (原 critical 檔位)
+#     gpt-5.6-terra/high  7.5/8  25,701   6,153    7   135   0.56  (現 required 檔位)
+#     gpt-6-astra/low     8/8    12,425   1,447    7    67   1.04
+#     gpt-6-astra/medium  8/8    14,338   1,402    5    66   1.12
+#     gpt-6-astra/xhigh   8/8    17,717   3,134    8   113   1.58  (B6 的分析最深,見下)
+#   兩邊都漏掉的那一個(B6)是「契約新增必填欄位卻在消費端無條件 fail-closed」——舊生產端不送
+#   該欄位就全面 401,部署順序一顛倒即全區斷線。sol/medium 與 terra/high 都只從「任意字串都能
+#   通過、證明不了韌體」的安全角度看它,沒有觸及部署時序;astra 全檔位都抓到,xhigh 更進一步指出
+#   舊版 handler 的 DisallowUnknownFields 會讓【兩個方向的升級順序都存在不相容窗口】。
+#   換言之 astra 買到的不是「更嚴格」,是【跨版本/跨服務時序】這一軸——正好是本專案最貴的缺陷類。
+#   成本幾乎持平(1.04x)的原因: astra 往返少、一次讀到位,未快取 input 反而比另兩者低。
+#   【沒有把 required 也換掉】: terra/high 7.5/8 只要 0.56 單價,而 required 佔實測呼叫量的
+#   69%(critical 只佔 21%)。全換會讓每週 astra 呼叫從約 26 次跳到約 111 次,weekly limit 風險
+#   不成比例。要調這裡之前先看 codex-usage.sh 的實際週用量。
 #
 # 成本治理(2026-08-24 新增,起因: 實測 5 天內被呼叫 129 次、diff 模式 107 次全無輪次計數):
 #   1. 遙測 — 改用 `codex exec --json` 取 turn.completed 的 usage,每次呼叫(含 FAILED /
@@ -52,8 +71,13 @@
 #        bash codex-review.sh --severity <...> --doc <path> --kind <spec|plan>
 #        --base 省略時自動偵測(origin/HEAD → main → master);--doc 與 --base 互斥。
 #
-# 前置: codex client >= 0.144.x 且帳號 plan(Plus 以上)已 rollout GPT-5.6 家族,
-#        否則 gpt-5.6-* slug 會被 server 回 400 invalid_request。
+# 前置: codex client >= 0.153.0 且帳號 plan 已 rollout GPT-6 Astra(critical 檔位要用),
+#        否則 gpt-6-astra slug 會被 server 回 400 invalid_request。0.153.0 是 astra 的
+#        minimal_client_version(bundled catalog 寫死),舊 client 連送都送不出去。
+#        required/optional 檔位仍是 gpt-5.6-*,只需要 >= 0.144.x + GPT-5.6 家族權限。
+#        判別「有沒有 astra 權限」最省的方法: 一次極小呼叫
+#          printf 'reply OK' | codex exec -m gpt-6-astra --sandbox read-only --skip-git-repo-check -
+#        通了就有(實測固定開銷約 16.6k input / 12.3k cached,可忽略)。
 #
 # 結束碼: 環境缺失(codex 未裝/未授權、diff 模式不在 repo) → 印提示並 exit 0(不阻斷);
 #          用量/額度上限 → 印 RATE_LIMITED 並 exit 0(不阻斷、不重試、不計 round);
@@ -68,7 +92,7 @@
 set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
-CRIT_MODEL="gpt-5.6-sol";      CRIT_EFFORT="medium"     # critical
+CRIT_MODEL="gpt-6-astra";      CRIT_EFFORT="low"        # critical
 REQ_MODEL="gpt-5.6-terra";     REQ_EFFORT="high"        # required
 LOW_MODEL="gpt-5.6-luna";      LOW_EFFORT="max"         # optional / nit / fyi
 FALLBACK_MODEL="gpt-5.6-luna"; FALLBACK_EFFORT="max"    # --severity 未傳/未知時的保底(對齊 optional)
@@ -268,11 +292,40 @@ diff_delta_per_file() {  # $1=上一輪 diff 快照 $2=本輪 diff
 # 用途只有一個,但很關鍵(2026-08-31 codex 複查抓到): resume 沿用舊 session 的對話歷史,而 resume
 # 輪的 prompt 只說「規則同先前輪次」——若那個 session 建立於舊政策,新加的讀取限制在那一輪
 # 【等於不存在】,而且外表完全看不出來。版本不符就退 fresh 重送全文。
-PROMPT_POLICY_VERSION=2
+# 【2026-09-07 加入路徑寫法宣告,版本 2 → 3】。實測發現(四個模型、六次呼叫,無一例外):
+# codex 的 shell 工具目前目錄是 C:\,【不是】--cd 指定的工作根,所以 access_note 舊版第一句
+# 「shell 工具的工作根是 <path>」是錯的,而模型會照著它下相對路徑指令 → 全數失敗。
+# 觀察到的代價分兩層:
+#   (a) 成本: 每個模型都要燒 2-4 次往返自己試錯繞出來(astra 試了三次才改用 Get-Content
+#       -LiteralPath 絕對路徑),而往返正是未快取 input 的主要來源。
+#   (b) 品質: gpt-5.6-terra 撞兩次就【放棄並錯誤歸因】,在回覆裡寫「工作根的讀取權限被沙箱
+#       拒絕」,然後全篇改用【推論】作答——recall 從 7.5/8 掉到 2/8,但輸出格式完整、收斂問句
+#       照附、exit 0,呼叫端完全看不出這次複查是空的。同一份 diff 換到不受阻的路徑就恢復正常。
+#       (該次的阻礙來自 Windows sandbox 擋掉 AppData\Local\Temp\claude;但 cwd=C:\ 這件事
+#        與那個阻礙無關,在正常 repo 位置一樣成立。)
+# 所以宣告裡三件事缺一不可: cwd 不是工作根、讀檔用絕對路徑、以及「存取被拒不等於沒有讀取權」。
+# 第三點是針對 (b) 那種錯誤歸因——它比讀不到本身更危險。
+PROMPT_POLICY_VERSION=3
 
 access_note() {  # $1=工作根絕對路徑
   cat <<EOF
-你在唯讀沙箱內執行,shell 工具的工作根是 $1。
+你在唯讀沙箱內執行。本次要審的工作根是:
+  $1
+
+【路徑寫法 — 先讀完這段再下第一個指令】(2026-09-07 實測寫入,見下方註解)
+你的 shell 目前目錄【不是】上面那個工作根(Windows 上實測是 C:\\)。所以【相對路徑會解析到錯的
+地方】: 'internal/api/foo.go' 會被當成 'C:\\internal\\api\\foo.go' 而找不到。
+讀檔一律用【絕對路徑】,把工作根整串接在前面:
+  PowerShell : Get-Content -LiteralPath '$1/<相對路徑>'
+  POSIX shell: cat '$1/<相對路徑>'
+搜尋也一樣要把工作根當成明確的搜尋起點,不要靠目前目錄:
+  rg -n '<pattern>' '$1'
+不要靠 cd / Set-Location 切進工作根——它在某些環境會被拒絕,而那【不代表】你不能讀那些檔案。
+
+【失敗的歸因】: 若指令回報「存取被拒 / Access denied / 找不到路徑 / cannot find path」,
+那幾乎都是【路徑寫法】的問題,不是沙箱禁止你讀取。換成上面的絕對路徑寫法重試一次。
+在真的用絕對路徑試過之前,【不得】判定自己沒有檔案存取權,更【不得】據此改用純推論作答
+——那會產出一份看起來完整、實際上沒有任何查證的複查,比明講讀不到更糟。
 
 【你的角色是第二意見,不是分析者】——查證的目的是確認手上這份待審內容,不是理解整個系統。
 所以查證應該是【少數幾次目標明確的讀取】,不是遍歷或探索。
@@ -1009,9 +1062,42 @@ fi
 # 被當雜訊略過,比沒有還糟。要正確做需要 `codex exec --json` stdout 的實際失敗事件樣本
 # (不是 orca session 的 rollout 格式,兩者不保證相同),取得樣本前不動。
 
+# --- 這一輪到底有沒有查證過(2026-09-07 新增;與上面的工具失敗偵測【互補,不重疊】) ---
+# 上面那段掃的是 stderr 裡的工具【崩潰】訊息(exec_command failed / CreateProcess failed)。
+# 實測遇到的更隱蔽形態是工具【沒有】崩潰,是 codex 自己【放棄】: 它用相對路徑讀檔失敗
+# (cwd 不是工作根,見 PROMPT_POLICY_VERSION=3 的註解),撞兩次就在回覆裡宣稱「工作根的讀取
+# 權限被沙箱拒絕」,然後全篇改用推論作答。那一次 stderr 沒有任何 exec_command failed、
+# exit 0、格式完整、收斂問句照附、腳本照印「完成」——上面那段一個都抓不到,recall 卻從
+# 7.5/8 掉到 2/8。這是本腳本 header 說「假成功比直接報錯危險」的最純粹形態。
+# 判定改看【產出本身】: prompt 要求每項都標【已讀】或【推論】,所以「一個【已讀】都沒有、
+# 卻有【推論】」就是不依賴任何 stderr pattern 的客觀零查證訊號。
+# 兩者都沒有(codex 根本沒照協議標註)時【不觸發】——無法判斷就不報,寧可漏報也不要誤報,
+# 誤報幾次之後這行警示會被當雜訊略過,比沒有還糟(理由同下面那段「已知的偵測缺口」)。
+# 刻意【不】升成 FAILED: 純推論的發現仍可能是真的(該次實測就抓到兩個真缺陷),丟掉過當;
+# 要的是讓呼叫端知道「這一份不得當成已查證」——它是假說集,不是結論集。
+FINAL_STATUS=OK
+VERIFIED_N="$(grep -c '【已讀】' "$OUT_FILE" 2>/dev/null)"
+INFERRED_N="$(grep -c '【推論】' "$OUT_FILE" 2>/dev/null)"
+case "$VERIFIED_N" in ''|*[!0-9]*) VERIFIED_N=0 ;; esac
+case "$INFERRED_N" in ''|*[!0-9]*) INFERRED_N=0 ;; esac
+if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then
+  FINAL_STATUS=OK_NOVERIFY
+  echo "[codex-review] 警示: 本輪【零查證】——$INFERRED_N 項標【推論】,沒有任何一項標【已讀】。" >&2
+  echo "  codex 很可能一個檔案都沒讀成,所有意見都只從送進去的片段推得。" >&2
+  echo "  處置: 不得視為已查證的第二意見。把每一項當成【待驗證的假說】,自己回頭核對後再決定處置;" >&2
+  echo "        也不可據此對使用者稱「已完成 codex 複查」。" >&2
+  # 最常見的成因是路徑寫法,不是真的沒有權限——這一句是要打斷「存取被拒 ⇒ 我沒有讀取權」的
+  # 錯誤歸因,那個歸因會讓人跑去查沙箱設定,而真正該做的是確認 access_note 的絕對路徑指引。
+  if grep -qE '(沙箱|sandbox)[^。]{0,40}(拒絕|denied)|讀取權[限]?被[^。]{0,20}拒絕|沒有[^。]{0,10}(讀取|存取)權' "$OUT_FILE" 2>/dev/null; then
+    echo "  註: 回覆裡出現「沙箱拒絕/沒有讀取權」這類宣稱。實測這幾乎都是【相對路徑】造成的" >&2
+    echo "      (codex 的 shell cwd 不是工作根),不是沙箱真的禁止讀取。先確認 access_note 的" >&2
+    echo "      絕對路徑指引有送到(PROMPT_POLICY_VERSION >= 3),再去懷疑沙箱設定。" >&2
+  fi
+fi
+
 # 複查確實發生 → 推進 ledger、留 payload 快照給下一輪算 delta,並記一筆用量。
 persist_ledger
-emit_telemetry OK
+emit_telemetry "$FINAL_STATUS"
 
 USAGE_SHOWN="$(grep -o '"usage":{[^}]*}' "$JSON_FILE" 2>/dev/null | tail -1)"
 if [ -n "$USAGE_SHOWN" ]; then

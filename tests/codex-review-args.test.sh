@@ -178,6 +178,31 @@ check_e2e "帶收斂問句 → 完成且無注意" 0 "完成(" "未附行首"
 mk_stub 'echo "無重大補充"; exit 0'
 check_e2e "缺收斂問句行 → 注意但完成" 0 "未附行首" "FAILED:"
 
+# --- 零查證偵測(2026-09-07) ---
+# 命題: 「一個【已讀】都沒有、卻有【推論】」= codex 一個檔案都沒讀成,這一份不得當成已查證。
+# 實測背景: gpt-5.6-terra 撞到相對路徑失敗後自行放棄、全篇改推論作答,而 stderr 沒有任何
+# exec_command failed、exit 0、格式完整——既有的工具失敗偵測完全抓不到,recall 卻掉到 2/8。
+mk_stub 'printf "%s\n" "- Required【推論】 foo.go:1 可能有問題" "收斂問句:無"; exit 0'
+check_e2e "全推論零已讀 → 零查證警示" 0 "零查證" "FAILED:"
+mk_stub 'printf "%s\n" "- Required【已讀】 foo.go:1 確認有問題" "收斂問句:無"; exit 0'
+check_e2e "有已讀 → 不報零查證" 0 "完成(" "零查證"
+# 寧漏勿誤: codex 沒照協議標註時無法判斷,不得亂報——誤報幾次後這行警示就會被當雜訊略過。
+mk_stub 'printf "%s\n" "- Required 完全沒有標註的發現" "收斂問句:無"; exit 0'
+check_e2e "兩種標註都沒有 → 不報零查證" 0 "完成(" "零查證"
+# 錯誤歸因的追加提示: 「沙箱拒絕」這類宣稱實測幾乎都是相對路徑造成的,不是真的沒有讀取權。
+mk_stub 'printf "%s\n" "- Required【推論】 工作根的讀取權限被沙箱拒絕" "收斂問句:無"; exit 0'
+check_e2e "宣稱沙箱拒絕 → 追加路徑歸因提示" 0 "相對路徑" "FAILED:"
+
+# access_note 的路徑指引必須真的送到 codex(2026-09-07)。
+# 只驗「有沒有送出」,不驗模型會不會照做——後者要花額度跑真 codex 才知道。
+mk_stub 'printf "%s\n" "$@" > "'"$STUB"'/args_path.txt"; echo "無重大補充"'
+check_e2e "prompt 送達(路徑指引)" 0 "無重大補充" "FAILED:"
+if grep -q "絕對路徑" "$STUB/args_path.txt" 2>/dev/null; then pass=$((pass+1))
+else echo "FAIL [access_note 缺絕對路徑指引]"; fail=$((fail+1)); fi
+# 這一句是針對「存取被拒 ⇒ 我沒有讀取權」的錯誤歸因,缺了就等於沒修到 terra 那個失效模式。
+if grep -q "不得.*判定自己沒有檔案存取權\|不是沙箱禁止你讀取" "$STUB/args_path.txt" 2>/dev/null; then pass=$((pass+1))
+else echo "FAIL [access_note 缺「存取被拒≠沒有讀取權」]"; fail=$((fail+1)); fi
+
 # transcript 回顯 prompt(內含行中「收斂問句」字樣)不得騙過在場檢查——需行首才算
 mk_stub 'printf "%s\n" "${!#}"; echo "無重大補充"; exit 0'
 check_e2e "回顯 prompt 但缺行首收斂問句 → 注意" 0 "未附行首" "FAILED:"
@@ -565,8 +590,10 @@ ok "cwd: fresh 分支帶 --cd"       has "^--cd$" "$(cat "$ARGV")"
 ok "cwd: --cd 的值是 repo 根"     test "$(awk '/^--cd$/{getline; print; exit}' "$ARGV")" = "$C1TOP"
 # 這一條【直接比對兩個值】,不是各自比對常數: 兩邊同時漂到別的路徑時,分別斷言會雙雙通過而
 # 這條會紅——「宣告與事實不符」本來就是兩者之間的關係,不是任一方的絕對值。
+# 抓法隨 access_note 的版式走(2026-09-07: 路徑從句中移到獨立一行,前面兩個空格縮排),
+# 但斷言不變——比對的仍是「宣告」與「實傳」兩個值是否相等。
 ok "cwd: prompt 宣告 == --cd 實傳" test \
-  "$(sed -n 's/.*工作根是 \([^。]*\)。.*/\1/p' "$ARGV" | head -1)" \
+  "$(awk '/工作根是:/{getline; gsub(/^[[:space:]]+/,""); gsub(/[[:space:]]+$/,""); print; exit}' "$ARGV")" \
   = "$(awk '/^--cd$/{getline; print; exit}' "$ARGV")"
 
 rm -rf "$STUB2"

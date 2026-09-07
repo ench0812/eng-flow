@@ -41,10 +41,26 @@ Severity is an **input decided by the source** — never re-triaged by a weaker 
 
 | Source severity | Codex model / effort |
 |---------------------|----------------------|
-| Critical | `gpt-5.6-sol` / medium |
+| Critical | `gpt-6-astra` / low **(changed 2026-09-07)** |
 | Required | `gpt-5.6-terra` / high |
 | Optional / Nit / FYI | `gpt-5.6-luna` / max |
 | (unspecified) | fallback `gpt-5.6-luna` / max |
+
+**Why Critical moved to `gpt-6-astra`/low (measured 2026-09-07, not extrapolated).** Method: one Go diff (7.6 KB) with 8 planted defects across three difficulty tiers — visible in the diff alone / needs the surrounding file's logic / needs cross-file or cross-version reasoning — sent to each tier once with the identical prompt, scored by hand against the known answer key. Zero false positives everywhere; the whole spread is recall.
+
+| Model / effort | recall | uncached in | output | tool round-trips | sec | rel. price |
+|---|---|---|---|---|---|---|
+| `gpt-5.6-sol` / medium (was Critical) | 7/8 | 19,362 | 3,900 | 7 | 106 | 1.00 |
+| `gpt-5.6-terra` / high (Required) | 7.5/8 | 25,701 | 6,153 | 7 | 135 | 0.56 |
+| `gpt-6-astra` / low | **8/8** | 12,425 | 1,447 | 7 | 67 | 1.04 |
+| `gpt-6-astra` / medium | 8/8 | 14,338 | 1,402 | 5 | 66 | 1.12 |
+| `gpt-6-astra` / xhigh | 8/8 (deepest) | 17,717 | 3,134 | 8 | 113 | 1.58 |
+
+The defect both 5.6 tiers missed is the one this codebase pays most for: a contract gains a required field and the consumer fail-closes on it unconditionally, so any producer still on the old build gets a blanket 401 the moment deployment order slips. `sol` and `terra` both saw that line but only from the "any non-empty string passes, so it proves nothing" angle — neither reached the deployment-ordering consequence. Every astra tier got it; `xhigh` went further and noticed the *old* handler's `DisallowUnknownFields` makes **both** upgrade orders incompatible. So astra is not buying strictness, it is buying the cross-version / cross-service timing axis — exactly the seam-defect class in the user's CLAUDE.md rule 9.
+
+Cost is near-parity (1.04x) because astra needs fewer round-trips and reads the right files first try, so its *uncached* input is the lowest of the three despite the highest unit price. **effort above `low` does not buy recall** — it buys depth on that one timing axis. Use `xhigh` only when the change is itself a cross-service contract or deployment-order change.
+
+**Required deliberately stayed on `terra`/high.** It scores 7.5/8 at 0.56 relative price, and Required is 69% of real call volume against Critical's 21% (measured over 246 consultations, 14 days). Moving it too would take astra calls from ~26/week to ~111/week — disproportionate weekly-limit exposure for half a defect. Re-check `codex-usage.sh` before revisiting this.
 
 The ladder walks the **model** down with severity (sol → terra → luna) and walks **effort** up to compensate. The previous mapping put both Critical and Required on the flagship's most expensive tiers (`sol/max`, `sol/high`), which was the dominant token cost. Caveat carried knowingly: `gpt-5.6-luna` is the nano tier — extra reasoning effort does not buy it flagship-level review depth, so anything that might actually matter should be called `required` or above, not left on luna. The unspecified-severity fallback now lands on that same bottom rung (it used to be the flagship): omitting `--severity` no longer buys a deep review, it buys the shallowest one. The script still prints a warning on omission — treat that warning as a caller bug to fix, not as a default to lean on.
 
@@ -55,10 +71,15 @@ The ladder walks the **model** down with severity (sol → terra → luna) and w
 | `gpt-5.6-sol` | low, medium, high, xhigh, max, **ultra** | low |
 | `gpt-5.6-terra` | low, medium, high, xhigh, max, **ultra** | medium |
 | `gpt-5.6-luna` | low, medium, high, xhigh, max | medium |
+| `gpt-6-astra` | low, medium, high, xhigh, max, ultra † | not established |
+
+† The astra row is **server-probed, not catalog-read** (2026-09-07): each value was sent in a minimal `codex exec` call and none was rejected. That proves the server accepts the parameter, *not* that each level behaves distinctly — `ultra` in particular was never exercised on a real review here, so treat it as untested rather than endorsed. The five levels below it were each run against the full review fixture (see the recall table above).
 
 So `luna/max` is luna's ceiling — `ultra` is not a valid setting there. `ultra` exists on sol *and* terra (it is not sol-exclusive), but it spawns parallel subagents and burns quota fast, which runs against the point of this mapping — do not reach for it without deciding the cost is worth it. Note the CLI does not validate effort against this catalog locally: an unsupported pair is sent to the server, so a bad combination surfaces as a request error at consultation time, not at call time.
 
-Doc mode skips the base-branch / empty-diff gates; outside a git repo it continues with `--skip-git-repo-check` (sandbox is read-only — codex merely loses repo context). A missing `--doc` file or contradictory flags is a caller bug → exit 2, loud (environment gaps SKIP with exit 0, never blocking). Requires codex client >= 0.144.x + GPT-5.6 access; self-skips when codex is absent/unauthorized.
+Doc mode skips the base-branch / empty-diff gates; outside a git repo it continues with `--skip-git-repo-check` (sandbox is read-only — codex merely loses repo context). A missing `--doc` file or contradictory flags is a caller bug → exit 2, loud (environment gaps SKIP with exit 0, never blocking). Requires codex client **>= 0.153.0** + GPT-6 Astra access for the Critical tier (0.153.0 is astra's `minimal_client_version`, hard-coded in the bundled catalog — older clients cannot even send the slug); Required/Optional still only need >= 0.144.x + GPT-5.6 access. Self-skips when codex is absent/unauthorized.
+
+**One thing the prompt has to say on Windows, or every tier pays for it** (measured 2026-09-07 across four models, six calls, no exceptions): codex's shell cwd is `C:\`, **not** the `--cd` working root. Every model's first command used a relative path and every one of them failed. Strong models burned 2-4 round-trips discovering `Get-Content -LiteralPath '<abs>'` for themselves; `terra` gave up after two, wrote "the working root is denied by the sandbox" into its reply, and answered the whole review from inference — recall fell from 7.5/8 to 2/8 with a complete-looking output, a convergence question, and exit 0. `access_note` (policy version 3) now states the cwd caveat, gives the absolute-path form, and explicitly says a denied/not-found result means the path spelling, not a missing read permission.
 
 ## Codex payload cost & telemetry (v1.17.0)
 
