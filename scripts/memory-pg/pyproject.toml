@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memory-pg"
+version = "0.1.0"
+description = "eng-flow 記憶系統的 PostgreSQL 後端（PGroonga + pgvector + 本機 embedding）"
+requires-python = ">=3.12"
+dependencies = [
+  "psycopg[binary]>=3.2",
+  "httpx>=0.27",
+]
+
+[project.scripts]
+memory-pg = "memory_pg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["memory_pg*"]
+
+[tool.setuptools.package-data]
+memory_pg = ["migrations/*.sql", "kinds.tsv"]

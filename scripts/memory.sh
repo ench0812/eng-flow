@@ -46,7 +46,8 @@ usage() {
   memory.sh search <keyword> [--home PATH]
 
   --home    記憶庫根目錄，預設 $HOME/.claude
-            掃描 <home>/memory/ 與 <home>/projects/*/memory/
+            掃描 <home>/memory/、<home>/memory-machine/、<home>/memory-work/
+            與 <home>/projects/*/memory/
   --today   到期判定的基準日（UTC），預設今天。讓測試不依賴真實時鐘。
 
 結束碼: 0 無問題 / 1 發現治理問題 / 2 用法或根目錄錯誤
@@ -136,6 +137,9 @@ if [ "$(printf '部署與環境' | awk '{print length($0)}' 2>/dev/null)" != "5"
   GRAM_MODE="byte"
 fi
 
+# MEMORY_SH_CAPABILITY: banks=global,machine,work,project
+#   ^ 這一行是【契約】：~/.claude/scripts/memory 的 wrapper 用它判斷 md fallback 有沒有
+#     涵蓋四個 bank。涵蓋範圍變了就要同步改這行，否則 wrapper 會做出錯誤的退回決定。
 # ---------- bank 掃描 ----------
 # bank 依絕對路徑 byte-order 排序，讓多 bank 寫入的順序可重現。
 #
@@ -165,7 +169,12 @@ LINKS_FLAG="$(mktemp)"
 rm -f "$LINKS_FLAG"   # 存在與否就是旗標本身，先清成「未設定」
 build_banks() {
   local d list=() n=0
-  [ -d "$HOME_DIR/memory" ] && { list+=("$HOME_DIR/memory"); n=1; }
+  # 四個固定 bank。**少收 machine/work 的後果不是「查不到」而是「查無」**——PG 停機時
+  # 這條 fallback 是唯一的檢索路徑，回傳不完整的結果會讓那兩類記憶消失得像不存在，
+  # 直接違反「失敗不可以長得像查無」。wrapper 會用下方的 capability 標記偵測版本。
+  for d in "$HOME_DIR/memory" "$HOME_DIR/memory-machine" "$HOME_DIR/memory-work"; do
+    [ -d "$d" ] && { list+=("$d"); n=$((n+1)); }
+  done
   # projects/ 讀不到或不能 traverse 時，下面的 glob 直接不展開——一個專案庫都
   # 掃不到，而輸出看起來就是「只有全域庫」。少掉的記憶在 search 是「查無」、
   # 在 --write 是「這些 bank 不用更新」，兩種都會被當成正常結果。

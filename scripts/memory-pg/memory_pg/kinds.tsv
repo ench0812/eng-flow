@@ -1,0 +1,22 @@
+# name	kind	— 遷移時逐則指派的提案 type（semantic/episodic/procedural/decision/environment）。
+# 分類可議，不影響任何行為（只作 filter 與 TOPICS 分組）。未列出的記憶 kind 為 NULL。
+drive-account-topology	environment
+pgs-deployment-reality	environment
+pgs-local-env-gotchas	environment
+nav-jetson-machine-state	environment
+pgs-github-org	environment
+pgs-workspace-layout	environment
+codex-sandbox-fix	environment
+pgs-docker-removal-d6	decision
+pgs-security-posture-decisions	decision
+nav-perf-ceiling-2026-08	decision
+cbm-trial-review	decision
+drive-large-file-upload	procedural
+gh-auth-workflow-scope	procedural
+pgs-native-deploy-procedure	procedural
+nav-arm64-deb-build	procedural
+nav-jetson-field-access	procedural
+pgs-review-process	procedural
+hd-editor-frame-mismatch	episodic
+pgs-iron-rules-reconstructed	episodic
+rose-map-import-baseline	semantic
