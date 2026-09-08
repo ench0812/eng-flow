@@ -62,10 +62,34 @@ tops_norm=()    # 已解析出的 repo 頂層（正斜線形式），用於前�
 # **每開一個子行程約 30ms**，所以這裡一律用 bash 內建運算，不用 printf|sed|tr。
 #   實測 23 個路徑：printf|sed 取目錄共 740ms、git rev-parse 共 493ms。
 #   前者用參數展開可降到接近 0，後者靠「已知 repo 底下不再問」收斂。
+# 臨時目錄底下的 repo 一律不報（2026-09-08）：session scratchpad、mktemp -d 出來的
+# fixture、測試用的暫存 repo——它們**本來就不該有遠端**，報了只是雜訊，而被忽略的
+# 警告等於沒有警告（同本檔開頭「範圍不對的警告會被忽略」那條理由）。
+# 實測動機：一個 session 裡同一個 fixture repo 報了三次。
+# 比對用小寫化的正斜線路徑，Windows 路徑大小寫不敏感。刻意**不**用寬鬆的 `*/temp/*`
+# ——那會誤殺 D:/Projects/temp-tool 這類正常 repo；只認真正的臨時根。
+is_temp_path() {
+  # 測試專用的繞道：測試 fixture 本身就是 mktemp -d 出來的，落在同一批臨時根底下，
+  # 不給開關的話整份測試會全部被這條規則擋掉（實測 15 條紅）。
+  # 只有測試會設它；生產路徑不設，維持排除行為。「temp 排除有沒有生效」另有專門的
+  # 案例在不設此變數的情況下驗——否則這個開關會把它要保護的行為一起關掉。
+  [ "${GIT_GUARD_ALLOW_TEMP:-0}" = "1" ] && return 1
+  local lp="${1,,}"
+  case "$lp" in
+    */appdata/local/temp/*|/tmp/*|*/scratchpad/*|*/.cache/*) return 0 ;;
+  esac
+  if [ -n "${TMPDIR:-}" ]; then
+    local lt="${TMPDIR//\\//}"; lt="${lt,,}"; lt="${lt%/}"
+    case "$lp" in "$lt"/*) return 0 ;; esac
+  fi
+  return 1
+}
+
 add_repo() {
   local p="${1:-}" top np ntop t
   [ -n "$p" ] || return 0
   np="${p//\\//}"                       # 反斜線換正斜線（內建，不開子行程）
+  is_temp_path "$np" && return 0
   for t in ${tops_norm+"${tops_norm[@]}"}; do
     case "$np/" in "$t/"*) return 0 ;; esac
   done
@@ -120,6 +144,8 @@ fi
 
 # --- 逐 repo 判定 ---
 findings=""
+auto_findings=""   # 有上游且 fast-forward：例行推送，不需要逐一問人
+ask_findings=""    # 無上游、或落後遠端：要人決定
 # 必須用 while read 逐行讀，不能用 `for x in $(...)`：後者會依空白斷詞，
 # 路徑含空格的 repo（Windows 上很常見，例如 D:/My Projects/foo）會被切成碎片，
 # 於是該 repo 永遠檢查不到——正是本 hook 要防的那種靜默漏檢。
@@ -133,12 +159,26 @@ while IFS= read -r top; do
   #
   # rev-list 在沒有上游時會失敗，正好用它的失敗當「無上游」的訊號，
   # 省掉一次額外的 rev-parse。
-  if ahead="$(git -C "$top" rev-list --count '@{u}'..HEAD 2>/dev/null)"; then
-    case "$ahead" in ''|*[!0-9]*) ahead=0 ;; esac
+  # --left-right --count 一次拿到 behind 與 ahead（輸出是「behind<TAB>ahead」）。
+  # 需要 behind 是因為 2026-09-08 起有上游的 repo 會被歸類成「可直接推」，而那個結論
+  # 只在 fast-forward 時成立——落後遠端時 push 會被拒（或需要 rebase/merge），
+  # 那是要人決定的事，不能自動做。
+  # 仍然沿用「rev-list 失敗＝無上游」這個訊號，省一次 rev-parse。
+  if lr="$(git -C "$top" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null)"; then
+    behind="${lr%%[	 ]*}"; ahead="${lr##*[	 ]}"
+    case "$ahead"  in ''|*[!0-9]*) ahead=0 ;; esac
+    case "$behind" in ''|*[!0-9]*) behind=0 ;; esac
     [ "$ahead" -gt 0 ] || continue
     upstream="$(git -C "$top" rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '<upstream>')"
-    reason="領先 $upstream $ahead 筆未推送"
+    if [ "$behind" -gt 0 ]; then
+      reason="領先 $upstream $ahead 筆未推送，但也落後 $behind 筆（非 fast-forward，要先整合）"
+      bucket=ask
+    else
+      reason="領先 $upstream $ahead 筆未推送"
+      bucket=auto
+    fi
   else
+    bucket=ask
     # 沒有上游追蹤。空 repo（尚無 commit）不算，那沒有東西會遺失。
     git -C "$top" rev-parse HEAD >/dev/null 2>&1 || continue
     upstream=""
@@ -169,10 +209,15 @@ while IFS= read -r top; do
   # 出現異常的數字。wc 永遠 exit 0。
   dirty="$(git -C "$top" status --porcelain 2>/dev/null | wc -l | tr -cd '0-9')"
   [ -n "$dirty" ] || dirty=0
-  findings="$findings
+  entry="
   - $top
       $reason；未提交變更 $dirty 筆
 $subjects"
+  # 分兩桶輸出。理由是「該不該停下來問人」在這兩類之間差很多，混在一起講會讓
+  # 真正需要決定的那幾筆被例行項目淹沒——同樣是「範圍不對的警告會被忽略」那條。
+  if [ "$bucket" = auto ]; then auto_findings="$auto_findings$entry"
+  else ask_findings="$ask_findings$entry"; fi
+  findings="$findings$entry"
 # 用 heredoc 餵入而不是 `... | while`：管線會讓迴圈跑在子行程裡，
 # $findings 累積的結果出不來，最後永遠是空的（＝靜默漏報）。
 done <<EOF
@@ -181,14 +226,30 @@ EOF
 
 [ -n "$findings" ] || exit 0
 
-"$JQ" -cn --arg f "$findings" '{
+# 指示分兩段（2026-09-08 使用者裁定）：舊版一律要求「不要自行 push、交由使用者決定」，
+# 於是每次收工都變成一輪來回確認，而其中絕大多數是例行的推送。現在依「有沒有上游、
+# 是不是 fast-forward」分流——那是 hook 在不連線的前提下唯一能可靠判定的東西。
+# 刻意**不**去分辨遠端是 public 還是 private：那需要打 GitHub API，會帶來網路往返、
+# 憑證提示與 rate limit，違反本 hook「不做 fetch」的成本前提（使用者已知並接受
+# 公開 repo 也會落在自動那一類）。
+"$JQ" -cn --arg auto "$auto_findings" --arg ask "$ask_findings" '{
   hookSpecificOutput: {
     hookEventName: "Stop",
     additionalContext: (
-      "[git-guard] 偵測到已 commit 但尚未推送到遠端的工作：\n" + $f + "\n\n" +
-      "請把這件事告訴使用者並提議處置，不要自行 push——推送是對外動作，要由使用者決定。\n" +
+      "[git-guard] 偵測到已 commit 但尚未推送到遠端的工作。\n\n" +
+      (if ($auto | length) > 0 then
+        "【可直接處理，不必逐一確認】有上游追蹤且是 fast-forward：" + $auto + "\n\n" +
+        "  推上去、在最後訊息用一兩句回報推了什麼（repo、commit 主旨），不要為此開一輪確認。\n" +
+        "  若 push 被拒或出現非預期輸出，停下來照實回報，不要重試或改用 force。\n\n"
+       else "" end) +
+      (if ($ask | length) > 0 then
+        "【要你先問使用者】沒有上游追蹤，或落後遠端（非 fast-forward）：" + $ask + "\n\n" +
+        "  這幾筆不要自行推送。沒有上游代表推去哪並不明確；落後遠端代表要先整合，\n" +
+        "  而整合方式（rebase／merge）是使用者的決定。列出來並提議處置。\n\n"
+       else "" end) +
       "判定只比對本機的 remote-tracking ref、不做 fetch：一般過期只會多報；\n" +
       "但遠端若被 force-push 或刪除，本檢查會漏報（已知盲點，非全稱保證）。\n" +
+      "臨時目錄（scratchpad／TMPDIR／AppData\\Local\\Temp）底下的 repo 一律不列入。\n" +
       "同一個 commit 狀態在本 session 只提醒一次；有新 commit 才會再提醒。"
     )
   }
