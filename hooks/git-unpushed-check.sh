@@ -55,6 +55,7 @@ transcript="$(printf '%s' "$input" | "$JQ" -r '.transcript_path // ""' 2>/dev/nu
 
 # --- 收集要檢查的 repo ---
 repos=""
+writable=""     # 其中「本 session 有寫入證據」的 repo（正規化頂層），只有這些能進 auto 桶
 tops_norm=()    # 已解析出的 repo 頂層（正斜線形式），用於前綴短路
 
 # 效能守則（實測逼出來的，改動前請先量）：本函式對 transcript 取出的每個路徑
@@ -85,22 +86,38 @@ is_temp_path() {
   return 1
 }
 
+# $2="w" 表示這個路徑帶有【本 session 的寫入證據】（cwd，或 Write/Edit 類工具動過的檔）。
+# 為什麼要分：auto 桶會讓模型【不問就推】，而 push 是這條路徑上唯一不可逆的動作。
+# 只有「讀過一個檔」就授權推送，會把使用者自己留在那個 repo 的 WIP commit 推出去——
+# 那筆 commit 根本不是這次工作產生的。範圍收集維持寬鬆（多報方向安全），
+# 收緊的只是【授權】：沒有寫入證據的 repo 一律留在 ask 桶。
 add_repo() {
-  local p="${1:-}" top np ntop t
+  local p="${1:-}" mode="${2:-}" top np ntop t
   [ -n "$p" ] || return 0
   np="${p//\\//}"                       # 反斜線換正斜線（內建，不開子行程）
-  is_temp_path "$np" && return 0
   for t in ${tops_norm+"${tops_norm[@]}"}; do
-    case "$np/" in "$t/"*) return 0 ;; esac
+    case "$np/" in
+      "$t/"*)
+        # 已知 repo 底下就不再問 git，但【寫入證據仍要補記】——否則先 Read 後 Write
+        # 同一個 repo 時，寫入證據會被前綴短路吃掉，該 repo 就永遠進不了 auto 桶。
+        [ "$mode" = w ] && case "$writable" in *"|$t|"*) ;; *) writable="$writable|$t|" ;; esac
+        return 0 ;;
+    esac
   done
   top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || return 0
   [ -n "$top" ] || return 0
+  ntop="${top//\\//}"
+  # 【臨時目錄要對 repo 頂層判定，不是對被存取的路徑】(複查抓到): 對入參判定的話，
+  # D:/Projects/myapp/.cache/vite 這種子路徑會讓【整個 myapp】被丟掉——而漏掉的正是
+  # 本 hook 唯一要防的東西。放在 rev-parse 之後、用 $ntop 判定；fixture 那種
+  # /tmp/tmp.XXX/work 的 toplevel 本身就在臨時根底下，排除行為不變。
+  is_temp_path "$ntop" && return 0
   case "$repos" in *"|$top|"*) return 0 ;; esac
   repos="$repos|$top|"
-  ntop="${top//\\//}"
+  [ "$mode" = w ] && writable="$writable|$ntop|"
   tops_norm+=("$ntop")
 }
-add_repo "$cwd"
+add_repo "$cwd"   # 只進範圍，不算寫入證據（理由見下方 take w 的註解）
 
 # 本 session 碰過的目錄：transcript 每筆記錄都帶 cwd，Write/Edit 則帶 file_path
 # （檔案可能不在 cwd 底下，所以要另外取其所在目錄）。一次 jq 取完兩者。
@@ -117,16 +134,49 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
   # 陣列——實測 4.7MB 要 1889ms，比這個混合寫法慢 19 倍，而這段掛在每個回合結束。
   # 反跳脫交給 jq 而不是自己 sed：Windows 路徑的反斜線是跳脫過的，手寫容易錯。
   # fromjson? 讓個別壞行被略過而不是中止整串。
-  while IFS= read -r d; do
-    [ -n "$d" ] || continue
-    # cwd 本來就是目錄；file_path 是檔案，取其所在目錄。
-    # 用參數展開而非 printf|sed：後者每個路徑要開一個子行程，實測 23 個
-    # 路徑共 740ms——本 hook 最大的單項成本，而它掛在每個回合結束。
-    [ -d "$d" ] || d="${d%[/\\]*}"
-    add_repo "$d"
-  done <<EOF
-$(grep -ohE '"(cwd|file_path|notebook_path)":"[^"]*"' "$transcript" 2>/dev/null \
-  | sed 's/^"[a-z_]*"://' | sort -u | "$JQ" -rR 'fromjson? // empty' 2>/dev/null)
+  # 分兩批，先寫入後唯讀（順序有意義：寫入那批要先建立 tops_norm 並標記 writable）。
+  # 成本：比原本多掃兩次 transcript（實測 4.7MB / 每次約 127ms）。掛在 Stop、每回合一次，
+  # timeout 15s，這個代價換掉的是「只讀過就自動對外推送」——不對稱到不需要猶豫。
+  norm_paths() { sed 's/^"[a-z_]*"://' | sort -u | "$JQ" -rR 'fromjson? // empty' 2>/dev/null; }
+  take() {  # take <mode>：把 stdin 的路徑逐一餵給 add_repo
+    local mode="${1:-}" d
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      # cwd 本來就是目錄；file_path 是檔案，取其所在目錄。
+      # 用參數展開而非 printf|sed：後者每個路徑要開一個子行程，實測 23 個
+      # 路徑共 740ms——本 hook 最大的單項成本，而它掛在每個回合結束。
+      [ -d "$d" ] || d="${d%[/\\]*}"
+      add_repo "$d" "$mode"
+    done
+  }
+
+  # 【必須用 heredoc 餵，不可用 `... | take`】：管線會讓 take 跑在子行程裡，
+  # $writable 與 tops_norm 的累積出不來，最後 auto 桶永遠是空的——靜默失效。
+  # 本檔下方的逐 repo 迴圈已經為同一個理由寫過一次註解，這裡是第二個現場。
+  #
+  # (1) 寫入證據：【只有】寫入類工具實際動過的檔。
+  #
+  # 【cwd 不算證據】(codex 複查抓到): cwd 只表示「session 從那裡啟動」，不表示有寫入。
+  # 在一個有既存 WIP commit 的 repo 裡開 session 做純唯讀 review，cwd 就指向它——
+  # 若算證據，那些不屬於本次工作的 commit 會被自動推出去。
+  # 代價：純 git 操作（merge / cherry-pick，沒有 Write/Edit）產生的 commit 會落到 ask 桶，
+  # 每次多問一句。這個方向是對的——那種 commit 本來就該讓使用者確認。
+  #
+  # 【必須以工具物件為單位抽路徑】(codex 複查抓到): 先 grep 含 Write/Edit 的整行、再抽該行
+  # 所有 file_path 是錯的——同一筆 message.content 可以同時裝著 Write(A) 與 Read(B)，
+  # B 會跟著被授權。所以 grep 只用來把候選行數縮到極少數，真正的抽取交給 jq 逐物件做。
+  # （純 jq 走完整份 transcript 實測 4.7MB / 1889ms，比這個混合寫法慢 19 倍，故不那樣做。）
+  take w <<EOF
+$(grep -hE '"name":"(Write|Edit|MultiEdit|NotebookEdit)"' "$transcript" 2>/dev/null \
+  | "$JQ" -r '[.. | objects
+                 | select((.name? // "") | test("^(Write|Edit|MultiEdit|NotebookEdit)$"))
+                 | (.input.file_path? // .input.notebook_path?)
+                 | select(. != null)] | .[]' 2>/dev/null | sort -u)
+EOF
+
+  # (2) 其餘路徑（cwd 與 Read 過的檔）：只納入檢查範圍，不授權自動推送。
+  take <<EOF
+$(grep -ohE '"(cwd|file_path|notebook_path)":"[^"]*"' "$transcript" 2>/dev/null | norm_paths)
 EOF
 fi
 
@@ -175,7 +225,27 @@ while IFS= read -r top; do
       bucket=ask
     else
       reason="領先 $upstream $ahead 筆未推送"
-      bucket=auto
+      # 【auto 桶要求本 session 有寫入證據】(複查抓到): 範圍收集刻意寬鬆（連 Read 過的
+      # repo 都納入，多報方向安全），但【授權】不能跟著寬鬆——push 是這條路徑上唯一
+      # 不可逆的動作。只讀過就自動推，等於把使用者自己留在那個 repo 的 WIP commit
+      # 推出去，而那筆 commit 根本不是這次工作產生的。
+      ntop_chk="${top//\\//}"
+      case "$writable" in
+        *"|$ntop_chk|"*)
+          # 【清單截斷就不能授權】(codex 第三輪抓到): 下面只列最近 3 筆，而指示要執行者
+          # 「依列出的 commit 確認是本次工作」。若總數超過 3，更早的（可能是使用者自己的
+          # WIP）會被截掉而看不見，push 卻是整批一起推——指示要求確認的東西，資料沒給全。
+          # 與其把清單無上限印出來（一次 50 筆沒人會逐筆看），不如轉 ask：
+          # 一輪工作累積超過 3 筆未推 commit，本來就值得人看一眼。
+          if [ "$ahead" -gt 3 ]; then
+            bucket=ask
+            reason="$reason（超過 3 筆，下方只列得出最近 3 筆——無法逐筆確認是否都屬於本次工作）"
+          else
+            bucket=auto
+          fi ;;
+        *) bucket=ask
+           reason="$reason（本 session 只讀取過這個 repo，沒有寫入證據——這些 commit 可能不是這次工作產生的）" ;;
+      esac
     fi
   else
     bucket=ask
@@ -203,7 +273,13 @@ while IFS= read -r top; do
   [ -f "$stamp" ] && continue
   mkdir -p "$(dirname "$stamp")" 2>/dev/null && : > "$stamp" 2>/dev/null
 
-  subjects="$(git -C "$top" log --oneline -3 ${upstream:+"$upstream"..}HEAD 2>/dev/null | sed 's/^/      /')"
+  # 帶上相對時間: 判斷「這些 commit 是不是本次工作做的」最直接的線索就是它有多舊。
+  # hook 自己不做這個判斷——它沒有「本次工作是什麼」的上下文，而讀到這段訊息的一方有。
+  # 分層是刻意的: hook 做機械過濾（有無上游 / 是否 fast-forward / 本 session 有無寫入），
+  # commit 歸屬這種語意判斷留給執行者。往 hook 裡再堆推斷（比對 session 起始時間、
+  # 配對 tool_result 確認寫入成功）只會擴大誤判面，而誤判的代價是不可逆的對外推送。
+  subjects="$(git -C "$top" log --format='      %h %ad %s' --date=relative \
+                ${upstream:+"$upstream"..}HEAD 2>/dev/null | head -3)"
   # 用 wc -l 不用 grep -c：工作目錄乾淨時 grep 會印 0 但以 status 1 結束，
   # 後面的 `|| echo 0` 於是再補一個 0，dirty 變成兩行的 "0\n0"，警告裡就會
   # 出現異常的數字。wc 永遠 exit 0。
@@ -238,9 +314,13 @@ EOF
     additionalContext: (
       "[git-guard] 偵測到已 commit 但尚未推送到遠端的工作。\n\n" +
       (if ($auto | length) > 0 then
-        "【可直接處理，不必逐一確認】有上游追蹤且是 fast-forward：" + $auto + "\n\n" +
-        "  推上去、在最後訊息用一兩句回報推了什麼（repo、commit 主旨），不要為此開一輪確認。\n" +
-        "  若 push 被拒或出現非預期輸出，停下來照實回報，不要重試或改用 force。\n\n"
+        "【可自行處理，不需要開一輪確認】有上游、fast-forward、且本 session 寫入過：" + $auto + "\n\n" +
+        "  推之前先看一眼上面列出的 commit 主旨與時間：確認它們是【本 session 做的】。\n" +
+        "  這一步不能省——hook 只能證明「這個 repo 被本 session 寫過」，證明不了「這些\n" +
+        "  未推 commit 是本次工作產生的」。repo 裡原本就有的 WIP 會長得一模一樣。\n" +
+        "  確認是本次的 → 推上去，用一兩句回報推了什麼。\n" +
+        "  認不出來、或混著更早的 commit → 別推，列給使用者決定。\n" +
+        "  push 被拒或出現非預期輸出 → 停下來照實回報，不要重試或改用 force。\n\n"
        else "" end) +
       (if ($ask | length) > 0 then
         "【要你先問使用者】沒有上游追蹤，或落後遠端（非 fast-forward）：" + $ask + "\n\n" +
