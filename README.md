@@ -8,6 +8,7 @@ Streamlined engineering workflow skills for Claude Code — merged from [superpo
 |-------|-------------|
 | `mao-init` | Meta-dispatcher — maps task types to skills, core behavior rules |
 | `mao-brainstorm` | Design-first exploration with HARD-GATE, 2-3 approaches, spec output |
+| `mao-issue` | Issue intake — codex co-design on the issue itself before any implementation starts |
 | `mao-plan` | Task breakdown with checkboxes, no-placeholder discipline, vertical slicing |
 | `mao-execute` | Subagent-driven execution with two-stage review (spec + quality) |
 | `mao-debug` | Root-cause debugging — Iron Law + 6-step triage |
@@ -22,7 +23,7 @@ Streamlined engineering workflow skills for Claude Code — merged from [superpo
 
 `references/repomix.md` — when to use [repomix](https://github.com/yamadashy/repomix) to pack codebase context for an LLM/subagent (explore unfamiliar code, bundle a diff for a reviewer, trace a regression), the common commands, and the ISO 27001 / privacy rules. `mao-init`, `mao-brainstorm`, `mao-plan`, `mao-review`, and `mao-debug` point here. Requires the `repomix` CLI (`npm i -g repomix`).
 
-`references/model-routing.md` — shared model-routing rules (opus for judgment, sonnet for execution stages, haiku for mechanical volume), plus the Codex cross-family consultation routing (`scripts/codex-review.sh`): diff second opinion at mao-review / mao-execute closing, spec/plan co-design loops in mao-brainstorm / mao-plan. Consultations are convergence-gated, not capped: every codex reply ends with one 收斂問句 (its most important open question, or 無), and Claude continues only while answering it would still change the artifact — the doc-mode script warns (non-blocking) at 6+ rounds. A `RATE_LIMITED` reply is not a consultation: no retry, no round logged, carry on. `mao-execute` and `mao-review` point here.
+`references/model-routing.md` — shared model-routing rules (opus for judgment, sonnet for execution stages, haiku for mechanical volume), plus the Codex cross-family consultation routing (`scripts/codex-review.sh`): diff second opinion at mao-review / mao-execute closing, issue intake in mao-issue, spec/plan co-design loops in mao-brainstorm / mao-plan. Consultations are convergence-gated, not capped: every codex reply ends with one 收斂問句 (its most important open question, or 無), and Claude continues only while answering it would still change the artifact — the doc-mode script warns (non-blocking) at 6+ rounds. A `RATE_LIMITED` reply is not a consultation: no retry, no round logged, carry on. `mao-execute` and `mao-review` point here.
 
 ## Hooks
 

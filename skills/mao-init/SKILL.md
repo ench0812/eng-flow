@@ -16,6 +16,7 @@ If you are executing a specific task with defined inputs and expected outputs (r
 | 使用者意圖 | Skill | 說明 |
 |-----------|-------|------|
 | 模糊想法、需求不清、「我想做…」 | `mao-brainstorm` | 設計先行，不寫 code |
+| 從看板領一張 issue 開工（待處理 → 進行中） | `mao-issue` | 先讓 codex 對 issue 本身提修正建議並收斂 |
 | 有 spec，需要拆任務 | `mao-plan` | 任務分解 + plan 撰寫 |
 | 有 plan，開始實作 | `mao-execute` | Subagent 逐 task 執行 |
 | Bug、測試失敗、非預期行為 | `mao-debug` | 根因調查優先 |
