@@ -30,6 +30,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}\"/hooks/no-swallowed-exit-code.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
