@@ -78,13 +78,25 @@ After the **final integration review** passes (all tasks done, all Required/Crit
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
 ```
 
-Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → Codex model (Critical→`sol/medium`, Required→`terra/high`, else→`luna/max`; see `references/model-routing.md`). Severity is your input — never let the script re-triage it; over-estimate when unsure (`else` lands on the nano tier — anything that might matter belongs at `required` or above). Output is a pure second opinion: present by severity, do **not** auto-fix, the user decides. Self-skips if codex is absent/unauthorized. **No consultation cap** — codex ends each reply with `收斂問句:<one question>` (or `無`); consult again only if a fix-and-review cycle produced Critical/Required-level fixes codex hasn't seen, or its question is substantive (answering it would change the code), in scope, and not already settled — same convergence rules as mao-review's closing cross-check. A `無`, repeated, or scope-expanding question closes the loop (report scope-expanding ones to the user as open questions).
+Set `<level>` to the **highest original severity** surfaced across this implementation's spec/code reviews (Critical/Required/Optional/Nit/FYI — even if now fixed). The script maps severity → model/effort; use `scripts/codex-review.sh` as the executable source of truth and `references/model-routing.md` for its rationale. Do not duplicate the model table here. Severity is your input — never let the script re-triage it; over-estimate when unsure (`else` lands on the nano tier — anything that might matter belongs at `required` or above). Follow `references/decision-consensus.md`: resolve material choices with Codex first; implement evidence-backed consensus within existing authorization, then verify. Escalate only unresolved decisions or missing user-only intent/authorization. Explicit review-only tasks remain read-only. Self-skips if codex is absent/unauthorized. **No consultation cap** — codex ends each reply with `收斂問句:<one question>` (or `無`); consult again only if a fix-and-review cycle produced Critical/Required-level fixes codex hasn't seen, or its question is substantive (answering it would change the code), in scope, and not already settled — same convergence rules as mao-review's closing cross-check. A `無`, repeated, or scope-expanding question closes the loop (report scope-expanding ones to the user as open questions).
 
 **Cost discipline (v1.17.0).** One consultation per implementation, **not per task** — the script keeps a round ledger and prints a non-blocking `警示: ...第 N 次諮詢` from the 3rd call on the same base, which means you are consulting per fix. Identical content twice in a row is refused (`SKIP: 送出內容與上一輪...完全相同`); session resume is **off by default** (the server-side cache window is only tens of seconds — see `references/model-routing.md`). Per-call token usage and cache hit rate land in `$CODEX_REVIEW_LOG` (report: `scripts/codex-usage.sh`).
 
 If the script answers `[codex-review] RATE_LIMITED:`, that consultation did not happen: do not retry it, and close out with what you have, saying so in one line.
 
 **Input too large.** If the script answers `[codex-review] FAILED: 輸入過長,未送出`, the consultation did **not** happen and this is *not* a quota problem — the diff exceeds codex's input limit, so it will never be reviewed until the scope is narrowed. Unlike RATE_LIMITED you must not just carry on: re-run with a tighter `--base` (per-commit or per-theme), or review the high-risk files separately from the test-file bulk. Treating it as reviewed is a false pass.
+
+Ending a consultation loop is not approval: if a material objection remains, use the decision-consensus
+escalation rule. RATE_LIMITED/SKIP permits only already-decided authorized work to continue.
+
+## Improvement evidence
+
+When this task exposes recurring friction, keep one compact entry in the existing closing report:
+source incident → failure class → intervention (if any) → verification result → next applicable
+case to observe. Distinguish unverified inference, tool failure, and confirmed defects. Count
+independent incidents, not repeated findings in the same review loop. A passing review or fewer
+tokens alone does not prove improved outcomes. Feed this evidence to the user's existing
+retrospective when available; do not create a new mandatory workflow or global rule per finding.
 
 ## Red Flags
 - Dispatching multiple agents on overlapping files without worktree isolation

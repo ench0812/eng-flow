@@ -104,9 +104,9 @@ After the five axes are complete AND the author has fixed all Required/Critical 
 bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --severity <level>
 ```
 
-Set `<level>` to the **highest original severity this review assigned** to the change (Critical/Required/Optional/Nit/FYI — even if now fixed; the risk area remains). The script maps severity → Codex model (Critical→`sol/medium`, Required→`terra/high`, else→`luna/max`; see `references/model-routing.md`). Severity is your input from this review — never let the script re-triage it. Over-estimate when unsure (`else` lands on the nano tier — anything that might matter belongs at `required` or above).
+Set `<level>` to the **highest original severity this review assigned** to the change (Critical/Required/Optional/Nit/FYI — even if now fixed; the risk area remains). The script maps severity → model/effort; use `scripts/codex-review.sh` as the executable source of truth and `references/model-routing.md` for its rationale. Do not duplicate the model table here. Severity is your input from this review — never let the script re-triage it. Over-estimate when unsure (`else` lands on the nano tier — anything that might matter belongs at `required` or above).
 
-Treat the output as a **pure second opinion**: present findings by severity, do **not** auto-fix, the user decides. If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay the reason in one line, do not install anything.
+Follow `references/decision-consensus.md`: resolve material choices with Codex first; implement evidence-backed consensus within existing authorization, then verify. Escalate only unresolved decisions or missing user-only intent/authorization. Explicit review-only tasks remain read-only. If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay the reason in one line, do not install anything.
 
 **Convergence (no consultation cap):** codex ends each reply with a single line, `收斂問句:<its most important open question>` (or `無`). One consultation per review **round** is the default — *round*, not per file and not per fix: apply every Required/Critical fix from this round first, then consult once on the combined result; consult **again** only if a fix-and-review round produced Critical/Required-level fixes codex hasn't seen, or that question is substantive (answering it would change this change), in scope, and not already settled in this review. Otherwise close the review: 收斂問句 of `無`, a repeated/settled question, or a scope-expanding one (report it to the user as an open question instead of chasing it) all end the loop. Every extra consultation must shrink the open-question set, never widen it.
 
@@ -136,6 +136,18 @@ For automated review, run a reviewer via Workflow `agent()` (or Agent tool direc
 ## Dead Code Hygiene
 
 After refactoring, check for orphaned code. List it explicitly and ask before deleting.
+
+Ending a consultation loop is not approval: if a material objection remains, use the decision-consensus
+escalation rule. RATE_LIMITED/SKIP permits only already-decided authorized work to continue.
+
+## Improvement evidence
+
+When this task exposes recurring friction, keep one compact entry in the existing closing report:
+source incident → failure class → intervention (if any) → verification result → next applicable
+case to observe. Distinguish unverified inference, tool failure, and confirmed defects. Count
+independent incidents, not repeated findings in the same review loop. A passing review or fewer
+tokens alone does not prove improved outcomes. Feed this evidence to the user's existing
+retrospective when available; do not create a new mandatory workflow or global rule per finding.
 
 ## Red Flags
 - PRs merged without review

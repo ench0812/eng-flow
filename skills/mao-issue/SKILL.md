@@ -44,6 +44,11 @@ bash <plugin>/scripts/codex-review.sh --severity required --doc <scratchpad>/iss
 
 ### 3. 處置
 
+未決技術問題依 `references/decision-consensus.md` 先共議；有證據、在原授權內的具體共識
+直接落地並驗證，無法收斂才交使用者裁決。不可因使用者十分鐘未答就採用推薦選項、
+跳到下一張卡或發送留言。以下 issue 寫回只在原任務已授權或明確調用本流程時執行；
+若只是請求評估，先留本機紀錄。
+
 每一項都要有結論，三種之一：**採納**（改 issue）／**不採納**（寫理由）／**移出範圍**（另開 issue）。
 
 **把處置寫回 issue**，不要只留在對話裡——下一個讀這張 issue 的人（可能是幾週後的你、也可能是 subagent）看到的是 GitHub 上那份，不是這次的 session。採納的修正直接改 body 或補一則留言；`gh issue comment --body-file`（Windows 的 heredoc 對多 byte UTF-8 會截斷，中文一律走檔案）。
@@ -59,7 +64,7 @@ bash <plugin>/scripts/codex-review.sh --severity required --doc <scratchpad>/iss
 ## 三種「沒問成」要分開處置
 
 - `完成(…)` → 真的問到了。
-- `RATE_LIMITED`（exit 0）→ 額度擋下。**不重試、不計輪次**，直接繼續開工；下次照常再叫。
+- `RATE_LIMITED`（exit 0）→ 額度擋下。**不重試、不計輪次**；只能繼續已裁定且已授權的獨立工作，爭議事項不得當成已取得共識；下次照常再叫。
 - `FAILED`（exit 1）→ **複查根本沒發生**。不得視為已複查、不得據此放行；排除原因後重跑，或明講這一輪沒做成。
 
 ## 這條流程不做的事
