@@ -5,4 +5,5 @@
 *.yml              text eol=lf
 *.yaml             text eol=lf
 *.md               text eol=lf
+*.py               text eol=lf
 templates/pre-commit text eol=lf
