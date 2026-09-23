@@ -648,6 +648,123 @@ ok "cwd: prompt 宣告 == --cd 實傳" test \
 
 rm -rf "$STUB2"
 
+# --- 舊模型退路(2026-09-23 新增) ---
+# 兩道退回: Gate 3 看 client 版本(前置)、執行期看伺服器是否以「模型不可用」拒絕。
+# 兩個負控組是這一段的重點: 一般錯誤【不可】觸發退回(否則真失敗會被舊模型掩蓋成成功),
+# 讀不出版本時【不可】降級(「不知道」不等於「確認不夠」)。
+# 模型名一律從腳本讀出來斷言——映射表改了測試不必跟著改,也不會因為寫死舊值而恆綠。
+map() { sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$SCRIPT" | head -1; }
+REQ_NEW="$(map REQ_MODEL)";  REQ_OLD="$(map REQ_LEGACY_MODEL)"
+CRIT_NEW="$(map CRIT_MODEL)"; CRIT_OLD="$(map CRIT_LEGACY_MODEL)"
+LOW_NEW="$(map LOW_MODEL)";  LOW_OLD="$(map LOW_LEGACY_MODEL)"
+PLAN_NEW="$(map PLAN_MODEL)"; PLAN_OLD="$(map PLAN_LEGACY_MODEL)"
+ok "退路: 映射表讀得到(否則以下斷言全部沒意義)" test -n "$REQ_NEW" -a -n "$REQ_OLD" -a -n "$CRIT_NEW" -a -n "$CRIT_OLD" -a -n "$LOW_NEW" -a -n "$LOW_OLD" -a -n "$PLAN_NEW" -a -n "$PLAN_OLD"
+
+# version_ge: 直接抽腳本裡的函式來測(不另抄一份以免 drift)
+eval "$(awk '/^version_ge\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPT")"
+if type version_ge >/dev/null 2>&1; then
+  ok "版本比較: 0.156.1 >= 0.155.0"            version_ge 0.156.1 0.155.0
+  ok "版本比較: 0.155.0 >= 0.155.0(相等)"      version_ge 0.155.0 0.155.0
+  ok "版本比較: 0.154.9 < 0.155.0"             bash -c "$(declare -f version_ge); ! version_ge 0.154.9 0.155.0"
+  ok "版本比較: 0.153.4 < 0.155.0"             bash -c "$(declare -f version_ge); ! version_ge 0.153.4 0.155.0"
+  ok "版本比較: 1.0.0 >= 0.999.9(跨主版號)"     version_ge 1.0.0 0.999.9
+  ok "版本比較: 0.10.0 >= 0.9.0(字串比會判反)"   version_ge 0.10.0 0.9.0
+  ok "版本比較: 0.08.0 不被當八進位"            version_ge 0.08.0 0.7.9
+else
+  echo "FAIL [抽取 version_ge] 腳本結構可能已改"; fail=$((fail+1))
+fi
+# 防回歸: sort -V 在 macOS 的 BSD sort 不一定可用,出錯時會把夠新的 client 誤判成太舊
+ok "版本比較: 腳本不得用 sort -V(只看非註解行)" bash -c "! grep -v '^[[:space:]]*#' '$SCRIPT' | grep -q 'sort -V'"
+
+FB="$(mktemp -d)"
+cat > "$FB/codex" <<'STUBEOF'
+#!/usr/bin/env bash
+case "$1" in
+  login) exit 0 ;;
+  --version) [ -n "$FB_VER" ] && echo "codex-cli $FB_VER"; exit 0 ;;
+  exec)
+    m=""
+    for a in "$@"; do case "$a" in model=*) m="${a#model=}" ;; esac; done
+    echo "$m" >> "$FB_LOG"
+    case "$FB_MODE" in
+      reject-new) case "$m" in gpt-6-*)
+        echo '{"type":"error","status":400,"error":{"message":"The model is not supported when using Codex with a ChatGPT account."}}' >&2
+        exit 1 ;; esac ;;
+      reject-all) echo 'ERROR: The model is not supported when using Codex with a ChatGPT account.' >&2; exit 1 ;;
+      generic)    echo 'ERROR: stream disconnected before completion' >&2; exit 1 ;;
+    esac
+    printf '%s\n' "無重大補充" "收斂問句:無"; exit 0 ;;
+esac
+exit 0
+STUBEOF
+chmod +x "$FB/codex"
+FB_N=0
+fb_run() { # $1=severity $2=版本(空=讀不出) $3=模式 [$4=kind,預設 spec] → 設 FB_OUT/FB_RC/FB_CALLS
+  FB_N=$((FB_N+1)); : > "$FB/log$FB_N"
+  FB_OUT="$(PATH="$FB:$PATH" FB_VER="$2" FB_MODE="$3" FB_LOG="$FB/log$FB_N" \
+    CODEX_REVIEW_STATE="$FB/state$FB_N" CODEX_REVIEW_LOG="$FB/usage.tsv" \
+    bash "$SCRIPT" --doc "$STUB_DOC" --kind "${4:-spec}" --severity "$1" 2>&1)"; FB_RC=$?
+  FB_CALLS="$(tr '\n' ' ' < "$FB/log$FB_N" | sed 's/ $//')"
+}
+
+fb_run required 0.153.4 ok
+ok "退路/前置: 版本不足 → rc 0"                 test "$FB_RC" -eq 0
+ok "退路/前置: 版本不足 → 直接用舊模型、只問一次"  test "$FB_CALLS" = "$REQ_OLD"
+ok "退路/前置: 有印出改用舊模型的注意"          has "改用舊模型 $REQ_OLD" "$FB_OUT"
+ok "退路/前置: 完成行標出已退回"               has "已退回舊模型" "$FB_OUT"
+
+fb_run required 0.156.1 reject-new
+ok "退路/執行期: 新模型被拒 → rc 0"             test "$FB_RC" -eq 0
+ok "退路/執行期: 先問新模型再問舊模型"          test "$FB_CALLS" = "$REQ_NEW $REQ_OLD"
+ok "退路/執行期: 有印出伺服器不接受的注意"       has "伺服器不接受 $REQ_NEW" "$FB_OUT"
+ok "退路/執行期: 完成行標出已退回"             has "已退回舊模型" "$FB_OUT"
+
+fb_run critical 0.156.1 reject-new
+ok "退路/critical 檔: 退到 critical 自己的舊模型" test "$FB_CALLS" = "$CRIT_NEW $CRIT_OLD"
+
+fb_run required 0.156.1 reject-all
+ok "退路/兩個都被拒: FAILED(rc 1)"              test "$FB_RC" -eq 1
+ok "退路/兩個都被拒: 只退一次,不無限重試"        test "$FB_CALLS" = "$REQ_NEW $REQ_OLD"
+ok "退路/兩個都被拒: 指出舊模型可能也已退役"      has "都被伺服器拒絕" "$FB_OUT"
+
+# 前置退回後舊模型又被拒: 新模型根本沒送出去,診斷不得說它被拒
+fb_run required 0.153.4 reject-all
+ok "退路/前置後被拒: 只問過舊模型一次"            test "$FB_CALLS" = "$REQ_OLD"
+ok "退路/前置後被拒: 診斷講明新模型未送出"         has "新模型未送出" "$FB_OUT"
+ok "退路/前置後被拒: 不得說兩個都被拒"            hasnt "都被伺服器拒絕" "$FB_OUT"
+
+# 負控組 1: 一般錯誤不可觸發退回——否則「複查沒發生」會被偽裝成「用舊模型複查過了」
+fb_run required 0.156.1 generic
+ok "退路/負控(一般錯誤): 仍是 FAILED"            test "$FB_RC" -eq 1
+ok "退路/負控(一般錯誤): 只問一次、不退回"        test "$FB_CALLS" = "$REQ_NEW"
+ok "退路/負控(一般錯誤): 不得出現改用舊模型"      hasnt "改用舊模型" "$FB_OUT"
+
+# 負控組 2: 讀不出版本不可降級——交給執行期退回兜底
+fb_run required "" ok
+ok "退路/負控(讀不出版本): 用新模型"             test "$FB_CALLS" = "$REQ_NEW"
+ok "退路/負控(讀不出版本): 不得出現改用舊模型"    hasnt "改用舊模型" "$FB_OUT"
+
+fb_run required 0.156.1 ok
+ok "退路/正常: 版本夠且模型可用 → 只用新模型"      test "$FB_CALLS" = "$REQ_NEW"
+ok "退路/正常: 完成行不得標退回"                 hasnt "已退回舊模型" "$FB_OUT"
+
+fb_run optional 0.156.1 reject-new
+ok "退路/optional 檔: 退到 optional 自己的舊模型" test "$FB_CALLS" = "$LOW_NEW $LOW_OLD"
+
+# 計畫文件: 不論嚴重度都用 PLAN_MODEL,嚴重度只決定 effort;spec 仍走一般映射(對照)
+fb_run required 0.156.1 ok plan
+ok "計畫/required: 用計畫專用模型"               test "$FB_CALLS" = "$PLAN_NEW"
+ok "計畫/required: effort 是 medium"            has "模型=$PLAN_NEW/medium" "$FB_OUT"
+fb_run optional 0.156.1 ok plan
+ok "計畫/optional: 仍用計畫專用模型、effort low"  has "模型=$PLAN_NEW/low" "$FB_OUT"
+fb_run critical 0.156.1 ok plan
+ok "計畫/critical: effort high"                 has "模型=$PLAN_NEW/high" "$FB_OUT"
+fb_run required 0.156.1 ok spec
+ok "計畫/對照: spec 不受影響、走一般映射"         test "$FB_CALLS" = "$REQ_NEW"
+fb_run required 0.156.1 reject-new plan
+ok "計畫/退路: 計畫模型被拒 → 退到計畫專用舊模型" test "$FB_CALLS" = "$PLAN_NEW $PLAN_OLD"
+rm -rf "$FB"
+
 rm -rf "$STUB"
 
 echo "pass=$pass fail=$fail"

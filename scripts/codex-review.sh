@@ -25,14 +25,28 @@
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
-#   映射(嚴重度用語同 mao-review taxonomy;2026-09-07 改版 critical 一級,其餘沿用 2026-08-07):
-#     critical          -> gpt-6-astra   / low   (見下方實測;low 已達滿分 recall,effort 再往上
-#                                                 買到的是跨版本推理深度,不是覆蓋率)
-#     required          -> gpt-5.6-terra / high  (中階模型 + 高 effort 補償)
-#     optional/nit/fyi  -> gpt-5.6-luna  / max   (nano 級模型,單價低到直接給最高 effort 也划算)
-#   --severity 未傳/未知 -> fallback gpt-5.6-luna / max(對齊最低一級:沒說嚴重度就不燒旗艦額度;
+#   映射(嚴重度用語同 mao-review taxonomy;2026-09-23 使用者裁定 critical/required 改用 gpt-6-sol):
+#     critical          -> gpt-6-sol    / high   退路 gpt-6-astra  / low
+#     required          -> gpt-6-sol    / medium 退路 gpt-5.6-terra / high
+#     optional/nit/fyi  -> gpt-6-luna   / max    退路 gpt-5.6-luna  / max
+#     doc --kind plan   -> gpt-6-astra  / 依嚴重度 critical=high、required=medium、其餘=low
+#                          退路 gpt-5.6-sol / 同 effort(使用者裁定:astra 留給計畫階段補全面性)
+#   --severity 未傳/未知 -> fallback gpt-6-luna / max(對齊最低一級:沒說嚴重度就不燒旗艦額度;
 #                            腳本仍印警告要求呼叫端補傳,別靠 fallback 過日子)。
-#   策略:模型階梯隨嚴重度下降(astra > terra > luna),effort 反向上升作為補償。
+#   「退路」= 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型,機制見映射表下方。
+#
+#   【2026-09-23 改用 gpt-6-sol 的依據】沿用下方 09-07 的同一份 8 缺陷測資,但這次 prompt 取自
+#   現行 access_note(v3,含絕對路徑指示),且測資副本【移除了 GROUND-TRUTH.md】——codex 在沙箱內
+#   讀得到工作根任何檔案,答案檔留在原處它 ls 一下就能看到,recall 就沒有意義。各跑一次:
+#     模型/effort          recall  未快取in  output  秒
+#     gpt-5.6-terra/high    7/8    30,615    5,557  131   (舊 required,對照組)
+#     gpt-6-sol/medium      7/8    21,267    2,459   69   (新 required)
+#     gpt-6-sol/high        7.5/8  29,905    3,832  106   (新 critical)
+#     gpt-6-luna/max        6.5/8  42,164   14,342  305   (SQLi 與 nil panic 被降成 Optional、漏 TOCTOU)
+#   sol/medium 與 terra/high 抓到的一樣多,時間減半、未快取 input 少三成。sol/high 的 B6 只看到
+#   「任意字串都能通過」的安全面(半分),【沒有看到部署時序面】——那一軸仍是 astra 獨有(見下),
+#   所以 critical 的退路選 astra 而不是 5.6。terra/high 在 09-07 是 7.5/8、這次 7/8,差在 B6 的
+#   安全面這次沒提:同一組合兩次差半分,樣本數 1 的雜訊就是這個量級,判讀時別把半分當訊號。
 #
 #   【critical 改用 gpt-6-astra/low 的依據】(2026-09-07 實測,非推測)。方法: 一份植入 8 個
 #   已知缺陷的 Go diff(7.6KB,難度分三層:單看 diff 可見 / 需讀本檔邏輯 / 需跨檔或跨版本時序
@@ -92,10 +106,67 @@
 set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
-CRIT_MODEL="gpt-6-astra";      CRIT_EFFORT="low"        # critical
-REQ_MODEL="gpt-5.6-terra";     REQ_EFFORT="high"        # required
-LOW_MODEL="gpt-5.6-luna";      LOW_EFFORT="max"         # optional / nit / fyi
-FALLBACK_MODEL="gpt-5.6-luna"; FALLBACK_EFFORT="max"    # --severity 未傳/未知時的保底(對齊 optional)
+CRIT_MODEL="gpt-6-sol";        CRIT_EFFORT="high"       # critical
+REQ_MODEL="gpt-6-sol";         REQ_EFFORT="medium"      # required
+LOW_MODEL="gpt-6-luna";        LOW_EFFORT="max"         # optional / nit / fyi
+FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="max"    # --severity 未傳/未知時的保底(對齊 optional)
+# 計畫文件(doc 模式 --kind plan)一律用 astra,不看嚴重度選模型——使用者 2026-09-23 裁定:
+# astra 留給計畫階段,輔助完善計畫的全面性。effort 仍隨嚴重度(見 plan_effort_for)。
+PLAN_MODEL="gpt-6-astra"
+
+# --- 各檔位的舊模型退路(2026-09-23 新增) ---
+# 為什麼要有: 新模型上線時有兩道閘,任一道沒過都會回同一句 400「not supported when using
+# Codex with a ChatGPT account」——(a) client 版本低於該模型在 Codex 目錄公布的
+# minimal_client_version;(b) 帳號的分批 rollout 還沒輪到。兩者從錯誤訊息完全分不出來。
+# 而且這台有兩個 CODEX_HOME(~/.codex 與 Orca 注入的 runtime home),任一方的安裝/更新都可能
+# 讓 PATH 上的 codex 退回舊版,且沒有任何訊號(2026-09-23 實際發生: 安裝程式因 Orca 注入的
+# CODEX_HOME 裝錯了 home)。與其防每一種覆蓋方式,不如每次呼叫都自己檢查、不夠就退回。
+# 退回只發生在【模型不可用】這一類錯誤;額度、網路、codex 崩潰照原路徑走 RATE_LIMITED/FAILED,
+# 絕不被退回機制吞掉(否則「複查沒發生」會被偽裝成「用舊模型複查過了」)。
+# critical 的退路刻意用 astra 而不是 5.6: astra/low 是 critical 在 2026-09-23 之前的現行模型,
+# 也是實測中唯一抓到「契約新欄位 × 舊生產者 × 部署順序」這類跨版本時序缺陷的(B6,見 header),
+# 只需 client 0.153.0。退路是「新模型用不了時的次佳選擇」,不是「最便宜的選擇」。
+CRIT_LEGACY_MODEL="gpt-6-astra";   CRIT_LEGACY_EFFORT="low"
+REQ_LEGACY_MODEL="gpt-5.6-terra";  REQ_LEGACY_EFFORT="high"
+LOW_LEGACY_MODEL="gpt-5.6-luna";   LOW_LEGACY_EFFORT="max"
+PLAN_LEGACY_MODEL="gpt-5.6-sol"    # 舊世代旗艦,client 0.144 即可;effort 沿用 plan_effort_for 的值
+# 計畫文件的 effort: low 起跳,因為 09-07 實測 astra/low 已經 8/8,再往上買到的是推理深度
+# 而不是覆蓋率;計畫文件量少、astra 單價高,預設不必拉到頂,嚴重度高才加深。
+plan_effort_for() {
+  case "$1" in
+    critical) echo "high" ;;
+    required) echo "medium" ;;
+    *)        echo "low" ;;
+  esac
+}
+
+# 各模型在 Codex 目錄公布的最低 client 版本(2026-09-22 對線上目錄的實測值;
+# 0.154 被拒、0.155 通過)。未列出的模型回 0.0.0 = 不做前置判斷,交給執行期退回兜底。
+min_client_for() {
+  case "$1" in
+    gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
+    gpt-6-astra)          echo "0.153.0" ;;
+    gpt-5.6-*)            echo "0.144.0" ;;
+    *)                    echo "0.0.0" ;;
+  esac
+}
+# $1 >= $2 ?(x.y.z 逐段比數字)。【刻意不用 sort -V】(2026-09-23 codex 複查抓到):macOS 的
+# BSD sort 不一定支援 -V,而比較出錯時舊寫法會得到「版本不夠」——在已經夠新的機器上靜默退回
+# 舊模型。純 bash 比較沒有外部相依;兩個參數都已由呼叫端限定為數字(grep -oE 抽出的版本、
+# min_client_for 的常數),10# 前綴防止 08/09 被當成八進位。
+version_ge() {
+  local IFS=. i a b
+  local -a x=($1) y=($2)
+  for i in 0 1 2; do
+    a="${x[i]:-0}"; b="${y[i]:-0}"
+    (( 10#$a > 10#$b )) && return 0
+    (( 10#$a < 10#$b )) && return 1
+  done
+  return 0
+}
+# 模型不可用類錯誤。刻意只收這幾種形態,不收泛用的 400/invalid_request——那會把 prompt 太長、
+# 參數錯誤之類的真失敗也吞進退回路徑,讓一個該修的呼叫端錯誤被舊模型掩蓋。
+MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access"
 CONVERGE_WARN_ROUNDS=6         # doc 模式共議輪數警示線:達此輪數仍未收斂即印提醒(不阻斷)。
                                # 無硬上限——收斂由呼叫端依每輪「收斂問句」判斷,見 header。
 CONVERGE_WARN_ROUNDS_DIFF=3    # diff 模式警示線。比 doc 嚴,因為 diff 模式的協議是「一輪
@@ -497,14 +568,26 @@ fi
 
 # --- 依來源嚴重度決定模型/effort ---
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
-  critical)         MODEL="$CRIT_MODEL"; EFFORT="$CRIT_EFFORT"; SEV_SHOWN="critical" ;;
-  required)         MODEL="$REQ_MODEL";  EFFORT="$REQ_EFFORT";  SEV_SHOWN="required" ;;
-  optional|nit|fyi) MODEL="$LOW_MODEL";  EFFORT="$LOW_EFFORT";  SEV_SHOWN="$SEVERITY" ;;
+  critical)         MODEL="$CRIT_MODEL"; EFFORT="$CRIT_EFFORT"; SEV_SHOWN="critical"
+                    LEGACY_MODEL="$CRIT_LEGACY_MODEL"; LEGACY_EFFORT="$CRIT_LEGACY_EFFORT" ;;
+  required)         MODEL="$REQ_MODEL";  EFFORT="$REQ_EFFORT";  SEV_SHOWN="required"
+                    LEGACY_MODEL="$REQ_LEGACY_MODEL";  LEGACY_EFFORT="$REQ_LEGACY_EFFORT" ;;
+  optional|nit|fyi) MODEL="$LOW_MODEL";  EFFORT="$LOW_EFFORT";  SEV_SHOWN="$SEVERITY"
+                    LEGACY_MODEL="$LOW_LEGACY_MODEL";  LEGACY_EFFORT="$LOW_LEGACY_EFFORT" ;;
   "")  MODEL="$FALLBACK_MODEL"; EFFORT="$FALLBACK_EFFORT"; SEV_SHOWN="(未指定)"
+       LEGACY_MODEL="$LOW_LEGACY_MODEL"; LEGACY_EFFORT="$LOW_LEGACY_EFFORT"
        echo "[codex-review] 警告: 未傳 --severity,fallback $FALLBACK_MODEL/$FALLBACK_EFFORT。呼叫端應依來源嚴重度指定(diff: 第一輪 review 最高判定;spec/plan: 設計風險自評)。" >&2 ;;
   *)   MODEL="$FALLBACK_MODEL"; EFFORT="$FALLBACK_EFFORT"; SEV_SHOWN="(未知:$SEVERITY)"
+       LEGACY_MODEL="$LOW_LEGACY_MODEL"; LEGACY_EFFORT="$LOW_LEGACY_EFFORT"
        echo "[codex-review] 警告: 未知 severity '$SEVERITY',fallback $FALLBACK_MODEL/$FALLBACK_EFFORT。有效值: critical|required|optional|nit|fyi。" >&2 ;;
 esac
+# 計畫文件改用 astra(嚴重度只決定 effort)。放在嚴重度映射之後覆寫,讓未知/未傳嚴重度的
+# 警告照常印出——呼叫端漏傳嚴重度仍然是該被看見的呼叫端錯誤。
+if [ "$DOC_MODE" -eq 1 ] && [ "$KIND" = "plan" ]; then
+  EFFORT="$(plan_effort_for "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')")"
+  MODEL="$PLAN_MODEL"; LEGACY_MODEL="$PLAN_LEGACY_MODEL"; LEGACY_EFFORT="$EFFORT"
+fi
+USED_LEGACY=0   # 本次諮詢是否已改用舊模型(前置檢查或執行期退回);退回最多一次
 
 # --- Gate 1: 安裝偵測 ---
 # 先查 PATH（Windows npm 版可能是 codex.cmd）；PATH 不全時（WSL/CI/git hook 等
@@ -535,6 +618,20 @@ if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
   echo "[codex-review] SKIP: codex 已安裝但未授權(codex login status 失敗)。"
   echo "  登入: codex login   (CI 環境: 設 OPENAI_API_KEY 後 codex login --with-api-key)"
   exit 0
+fi
+
+# --- Gate 3: client 版本是否夠新(2026-09-23 新增) ---
+# 版本不夠就直接改用舊模型,省下一次注定失敗的往返。【讀不出版本時不降級】——「不知道」
+# 不等於「確認不夠」,這裡降級是犧牲複查品質換取可用性,只在有證據時才做;讀不出版本的
+# 情況交給執行期退回兜底(它看的是伺服器的實際回應,比這裡的推斷更權威)。
+CLIENT_VER="$("$CODEX_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+NEED_VER="$(min_client_for "$MODEL")"
+if [ -n "$CLIENT_VER" ] && [ -n "$LEGACY_MODEL" ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
+   && ! version_ge "$CLIENT_VER" "$NEED_VER"; then
+  echo "[codex-review] 注意: codex CLI $CLIENT_VER 低於 $MODEL 需要的 $NEED_VER,本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT。" >&2
+  echo "  這通常代表 PATH 上的 codex 被另一個安裝來源(例如 Orca 的 CODEX_HOME)蓋回舊版。" >&2
+  echo "  升級並驗證: codex --version 應 >= $NEED_VER;兩個 home 的 packages/standalone/current 要指向同一版。" >&2
+  MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1; LEGACY_REASON="preflight"
 fi
 
 # --- git repo 檢查: diff 模式必須在 repo 內;doc 模式不在 repo 時加旗標續跑 ---
@@ -936,6 +1033,7 @@ fi
 EPHEMERAL_FLAG=""
 [ "$CODEX_REVIEW_RESUME" = "1" ] || EPHEMERAL_FLAG="--ephemeral"
 
+run_codex() {
 { { if [ "$SESSION_MODE" = "resume" ]; then
       printf '%s\n\n%s\n' "$RESUME_PROMPT" "$DELTA" \
         | "$CODEX_BIN" exec resume "$RESUME_ID" - --json -o "$LAST_FILE" \
@@ -957,6 +1055,30 @@ EPHEMERAL_FLAG=""
 
 RC="$(cat "$RC_FILE" 2>/dev/null)"
 case "$RC" in ''|*[!0-9]*) RC=1 ;; esac   # RC_FILE 沒寫成(內層整個被砍)一律當失敗
+}
+run_codex
+
+# --- 執行期退回(2026-09-23 新增) ---
+# 前置版本檢查過了、伺服器仍拒絕模型(帳號 rollout 沒輪到、模型已退役、目錄門檻又被調高)
+# → 用該檔位的舊模型重跑【一次】。只認模型不可用這一類錯誤,且只在失敗時(RC 非 0)才看;
+# 模型可用時的任何輸出都不會觸發,review 內容裡剛好提到這些字也不會(那時 RC=0)。
+# 換了模型就不接續舊 session(resume 的歷史屬於另一個模型),一律 fresh 並送完整內容。
+if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ -n "$LEGACY_MODEL" ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
+   && grep -qE "$MODEL_UNAVAILABLE_PAT" "$ERR_FILE" "$JSON_FILE" 2>/dev/null; then
+  # resume 輪原本只送 delta,改 fresh 就得送完整內容——而前面的長度守門量的是 delta。完整內容
+  # 超過上限時不退回,讓它照原路徑走 FAILED(2026-09-23 codex 複查抓到:否則退回呼叫會繞過守門,
+  # 送出一份注定在 turn/start 就被拒的內容)。
+  if [ "$SESSION_MODE" = "resume" ] && [ "${FULL_CHARS:-0}" -gt "$CODEX_SAFE_CHARS" ]; then
+    echo "[codex-review] 注意: 伺服器不接受 $MODEL,但完整內容 ${FULL_CHARS} 字元超過安全上限,無法改用舊模型 fresh 重送。" >&2
+  else
+    echo "[codex-review] 注意: 伺服器不接受 $MODEL(帳號尚未開通或 client 版本不足),本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重跑一次。" >&2
+    echo "  判別: printf 'reply OK' | codex exec -m $MODEL --sandbox read-only --skip-git-repo-check -" >&2
+    MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1; LEGACY_REASON="runtime"
+    SESSION_MODE="fresh"; SEND_PAYLOAD="$PAYLOAD"; PAYLOAD_CHARS="$FULL_CHARS"
+    : > "$LAST_FILE"; : > "$JSON_FILE"; : > "$ERR_FILE"; : > "$RC_FILE"
+    run_codex
+  fi
+fi
 
 # review 本體來源: -o 檔(真實 codex)。stub 或 codex 沒寫成 -o 檔時退回 stdout 捕獲的內容
 # ——後續所有判定(rate limit 短路、零輸出 FAILED、收斂問句在場)都沿用 OUT_FILE,不必分支。
@@ -1012,13 +1134,19 @@ if [ -z "$OUT_TRIMMED" ] || [ "$RC" -ne 0 ]; then
   if grep -qi 'trusted directory' "$ERR_FILE" 2>/dev/null; then
     echo "  已知原因: codex 拒絕在非信任目錄執行。改在 git repo 內呼叫本腳本,或讓 codex 信任該目錄。" >&2
   fi
-  # critical 檔位自 2026-09-07 起用 gpt-6-astra,它多了一條 client 版本與帳號權限的硬相依。
-  # 沒有這條提示的話,舊 client / 無 astra 權限只會落到通用 FAILED,呼叫端得自己從 stderr
-  # 末 20 行看出端倪——而壞掉的正好是【最高嚴重度】那一檔的複查。
-  if grep -qiE 'invalid_request|minimal_client_version|unknown model|model_not_found' "$ERR_FILE" 2>/dev/null; then
-    echo "  已知原因: server 不接受模型 '$MODEL'。critical 檔位需要 codex >= 0.153.0 且帳號已 rollout GPT-6 Astra。" >&2
+  # 走到這裡而錯誤仍是「模型不可用」,代表執行期退回已經試過(或該檔位沒有退路)、舊模型也被拒。
+  # 這時不是版本或 rollout 的問題能解釋的,要人看——舊模型可能也已退役,映射表需要更新。
+  if grep -qiE 'invalid_request|minimal_client_version|unknown model|model_not_found|not supported when using Codex' "$ERR_FILE" 2>/dev/null; then
+    # 兩種退回的診斷不同:前置退回時新模型【根本沒送出去】,不能說它被拒(2026-09-23 codex 複查抓到)。
+    if [ "${LEGACY_REASON:-}" = "runtime" ]; then
+      echo "  已知原因: 新模型與舊模型 '$MODEL' 都被伺服器拒絕——舊模型可能也已退役,需要更新檔案開頭的映射表。" >&2
+    elif [ "${LEGACY_REASON:-}" = "preflight" ]; then
+      echo "  已知原因: client $CLIENT_VER 版本不足而直接改用舊模型 '$MODEL'(新模型未送出),但舊模型也被拒絕——" >&2
+      echo "            舊模型可能已退役;升級 codex CLI 後新模型就不必走退路。" >&2
+    else
+      echo "  已知原因: server 不接受模型 '$MODEL',且該檔位沒有可退回的舊模型。" >&2
+    fi
     echo "  判別(成本可忽略): printf 'reply OK' | codex exec -m $MODEL --sandbox read-only --skip-git-repo-check -" >&2
-    echo "  過不了就先把 CRIT_MODEL 改回 gpt-5.6-sol/medium(見檔案開頭的映射表),不要讓 critical 複查一直失敗。" >&2
   fi
   echo "  codex stderr(末 20 行):" >&2
   tail -n 20 "$ERR_FILE" >&2
@@ -1148,5 +1276,6 @@ if [ -n "$USAGE_SHOWN" ]; then
   _out="$(jnum "$USAGE_SHOWN" output_tokens)"
   echo "[codex-review] 用量: input ${_in:-?}(cached ${_cin:-?}) / output ${_out:-?} | $(awk -v a="${_cin:-0}" -v b="${_in:-0}" 'BEGIN{ if (b>0) printf "cache hit %.1f%%", a*100/b; else printf "cache hit n/a" }') | 明細見 $CODEX_REVIEW_LOG" >&2
 fi
-echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT, $SESSION_MODE round=$ROUND_NO, codex exit=$RC)。唯讀諮詢,腳本未改 repo 內任何檔。" >&2
+LEGACY_NOTE=""; [ "$USED_LEGACY" -eq 1 ] && LEGACY_NOTE=", 已退回舊模型"
+echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT$LEGACY_NOTE, $SESSION_MODE round=$ROUND_NO, codex exit=$RC)。唯讀諮詢,腳本未改 repo 內任何檔。" >&2
 exit 0

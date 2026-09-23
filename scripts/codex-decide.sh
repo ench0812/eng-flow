@@ -54,13 +54,36 @@ if ! grep -qE '^##[[:space:]]*安全與可逆性聲明' "$QUESTION" 2>/dev/null;
   exit 2
 fi
 
+# 映射與退路和 codex-review.sh 同一套(2026-09-23 使用者裁定;依據見該檔 header)。
+# 退路 = 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型。
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
-  critical)         MODEL="gpt-6-astra";  EFFORT="low" ;;
-  required)         MODEL="gpt-5.6-terra"; EFFORT="high" ;;
-  optional|nit|fyi) MODEL="gpt-5.6-luna";  EFFORT="max" ;;
+  critical)         MODEL="gpt-6-sol";    EFFORT="high";   LEGACY_MODEL="gpt-6-astra";   LEGACY_EFFORT="low" ;;
+  required)         MODEL="gpt-6-sol";    EFFORT="medium"; LEGACY_MODEL="gpt-5.6-terra"; LEGACY_EFFORT="high" ;;
+  optional|nit|fyi) MODEL="gpt-6-luna";   EFFORT="max";    LEGACY_MODEL="gpt-5.6-luna";  LEGACY_EFFORT="max" ;;
   *) echo "[codex-decide] 警告: 未知 severity '$SEVERITY',用 required 檔位。" >&2
-     MODEL="gpt-5.6-terra"; EFFORT="high" ;;
+     MODEL="gpt-6-sol"; EFFORT="medium"; LEGACY_MODEL="gpt-5.6-terra"; LEGACY_EFFORT="high" ;;
 esac
+min_client_for() {
+  case "$1" in
+    gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
+    gpt-6-astra)          echo "0.153.0" ;;
+    gpt-5.6-*)            echo "0.144.0" ;;
+    *)                    echo "0.0.0" ;;
+  esac
+}
+# 逐段比數字;不用 sort -V(macOS 的 BSD sort 不一定支援,出錯時會被誤判成版本不夠)
+version_ge() {
+  local IFS=. i a b
+  local -a x=($1) y=($2)
+  for i in 0 1 2; do
+    a="${x[i]:-0}"; b="${y[i]:-0}"
+    (( 10#$a > 10#$b )) && return 0
+    (( 10#$a < 10#$b )) && return 1
+  done
+  return 0
+}
+MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access"
+USED_LEGACY=0
 
 CODEX_BIN=""
 for b in codex codex.cmd; do command -v "$b" >/dev/null 2>&1 && { CODEX_BIN="$b"; break; }; done
@@ -79,6 +102,13 @@ fi
 if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
   echo "[codex-decide] SKIP: codex 未授權 —— 停下交使用者。" >&2
   exit 3
+fi
+# client 版本不夠就直接改用舊模型;讀不出版本時不降級,交給執行期退回兜底。
+CLIENT_VER="$("$CODEX_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+NEED_VER="$(min_client_for "$MODEL")"
+if [ -n "$CLIENT_VER" ] && [ "$LEGACY_MODEL" != "$MODEL" ] && ! version_ge "$CLIENT_VER" "$NEED_VER"; then
+  echo "[codex-decide] 注意: codex CLI $CLIENT_VER 低於 $MODEL 需要的 $NEED_VER,本次改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT。" >&2
+  MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -120,10 +150,22 @@ EOF
 OUT="$(mktemp)"; ERR="$(mktemp)"
 trap 'rm -f "$OUT" "$ERR" 2>/dev/null || true' EXIT
 
-printf '%s\n\n---\n\n%s\n' "$PROMPT" "$(cat "$QUESTION")" \
-  | "$CODEX_BIN" exec -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
-      --sandbox read-only $SKIP_GIT --cd "$REPO_ROOT" - >"$OUT" 2>"$ERR"
-RC=$?
+run_codex() {
+  printf '%s\n\n---\n\n%s\n' "$PROMPT" "$(cat "$QUESTION")" \
+    | "$CODEX_BIN" exec -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
+        --sandbox read-only $SKIP_GIT --cd "$REPO_ROOT" - >"$OUT" 2>"$ERR"
+  RC=$?
+}
+run_codex
+# 伺服器以「模型不可用」拒絕時用舊模型重問【一次】;其他錯誤照原路徑走 FAILED/RATE_LIMITED,
+# 不被退回機制吞掉——那會把「沒問成」偽裝成「用舊模型問過了」,而這裡的離開碼決定能不能逕行。
+if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
+   && grep -qE "$MODEL_UNAVAILABLE_PAT" "$ERR" "$OUT" 2>/dev/null; then
+  echo "[codex-decide] 注意: 伺服器不接受 $MODEL,改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重問一次。" >&2
+  MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1
+  : > "$OUT"; : > "$ERR"
+  run_codex
+fi
 
 cat "$OUT"
 
@@ -189,5 +231,6 @@ if [ "$BASIS" = "推論" ] && [ "$ALLOW_INFERENCE" != "1" ]; then
 fi
 
 NOTE=""; [ "$BASIS" = "推論" ] && NOTE=" 【注意: 無查證共識,呼叫端已聲明本決定不需查證】"
+[ "$USED_LEGACY" -eq 1 ] && NOTE="$NOTE 【已退回舊模型】"
 echo "[codex-decide] 共識成立: 裁定=$VERDICT 信心=$CONF 依據=$BASIS (模型=$MODEL/$EFFORT)。可依共識進行。$NOTE" >&2
 exit 0

@@ -90,14 +90,28 @@ Fable 5.1 的官方指引明寫：**為舊模型寫的 prompt 往往過度規定
 
 Severity is an **input decided by the source** — never re-triaged by a weaker model. When in doubt, over-estimate — under-calling sends work that deserves deep review to a cheap luna scan. Model mapping (all modes, revised 2026-08-07 to cut token spend):
 
-| Source severity | Codex model / effort |
-|---------------------|----------------------|
-| Critical | `gpt-6-astra` / low **(changed 2026-09-07)** |
-| Required | `gpt-5.6-terra` / high |
-| Optional / Nit / FYI | `gpt-5.6-luna` / max |
-| (unspecified) | fallback `gpt-5.6-luna` / max |
+| Source severity | Codex model / effort | Legacy fallback |
+|---------------------|----------------------|-----------------|
+| Critical | `gpt-6-sol` / high **(changed 2026-09-23)** | `gpt-6-astra` / low |
+| Required | `gpt-6-sol` / medium **(changed 2026-09-23)** | `gpt-5.6-terra` / high |
+| Optional / Nit / FYI | `gpt-6-luna` / max **(changed 2026-09-23)** | `gpt-5.6-luna` / max |
+| (unspecified) | fallback `gpt-6-luna` / max | `gpt-5.6-luna` / max |
+| doc `--kind plan` (any severity) | `gpt-6-astra` / critical=high, required=medium, else low | `gpt-5.6-sol` / same effort |
 
-**Why Critical moved to `gpt-6-astra`/low (measured 2026-09-07, not extrapolated).** Method: one Go diff (7.6 KB) with 8 planted defects across three difficulty tiers — visible in the diff alone / needs the surrounding file's logic / needs cross-file or cross-version reasoning — sent to each tier once with the identical prompt, scored by hand against the known answer key. Zero false positives everywhere; the whole spread is recall.
+**2026-09-23 mapping (user decision).** Critical and Required both move to `gpt-6-sol`, differing only in effort; Optional moves to `gpt-6-luna`. `gpt-6-astra` is kept for the **planning stage** — every `--kind plan` consultation uses it regardless of severity, to round out the plan's coverage; severity only picks its effort. Spec (`--kind spec`) consultations stay on the severity mapping. Re-measured on the same 8-defect fixture, this time with the current v3 access note and with `GROUND-TRUTH.md` **removed from the copy codex reviews** (codex can read any file under the work root in its read-only sandbox, so leaving the answer key there would make recall meaningless):
+
+| Model / effort | recall | uncached in | output | sec |
+|---|---|---|---|---|
+| `gpt-5.6-terra` / high (old Required, control) | 7/8 | 30,615 | 5,557 | 131 |
+| `gpt-6-sol` / medium (new Required) | 7/8 | 21,267 | 2,459 | 69 |
+| `gpt-6-sol` / high (new Critical) | 7.5/8 | 29,905 | 3,832 | 106 |
+| `gpt-6-luna` / max | 6.5/8 | 42,164 | 14,342 | 305 |
+
+`sol/medium` matches `terra/high` at half the wall time and ~30% less uncached input. `sol/high` scored half of B6 (it saw "any non-empty hash passes") but, like every non-astra tier on 09-07, **not** the deployment-ordering consequence — that axis is still astra-only, which is why Critical's legacy fallback is astra rather than a 5.6 model. `luna/max` was slowest, most verbose, rated SQL injection and a nil-deref panic as Optional, and missed the TOCTOU. `terra/high` scored 7.5/8 on 09-07 and 7/8 here (B6's security angle went unmentioned this time): half a defect of drift between two runs of the same pair is the noise floor at n=1.
+
+**Legacy fallback (added 2026-09-23).** A new model is gated twice — the client must be at least the model's `minimal_client_version` in the Codex catalog (`gpt-6-sol`/`gpt-6-luna` 0.155.0, `gpt-6-astra` 0.153.0, `gpt-5.6-*` 0.144.0; measured 2026-09-22: 0.154 refused, 0.155 accepted), **and** the account's staged rollout must have reached it. Both failures return the identical 400 `not supported when using Codex with a ChatGPT account`. On this machine a second trap sits on top: two `CODEX_HOME`s (`~/.codex` and the one Orca injects) each own a `packages/standalone/current`, and an install or Orca update touching one leaves the `codex` on `PATH` behind with no signal (it happened on 2026-09-23 — the installer followed Orca's `CODEX_HOME`, `PATH` stayed on 0.153.4, and every GPT-6 Sol/Luna call was refused). Both `codex-review.sh` and `codex-decide.sh` therefore check on every call instead of trusting the environment: (1) **Gate 3** reads `codex --version` and, if it is below the chosen model's floor, switches to the tier's legacy model up front; an unreadable version does **not** downgrade ("unknown" is not "confirmed too old"); (2) if the server still refuses with one of the model-unavailable messages, the call is re-run **once** on the legacy model, fresh (a resumed session belongs to the other model). Only that message class triggers it — quota, network and crash failures keep their RATE_LIMITED / FAILED paths, because swallowing them would turn "no review happened" into "reviewed with the old model". Every fallback is announced on stderr and in the final `完成(...)` line (`已退回舊模型`), since it is a downgrade the caller should know about. `scripts/memory-session-context.sh` additionally prints `<codex-version-drift>` at session start when the two homes' `current` versions differ.
+
+**(History, 2026-09-07.)** **Why Critical moved to `gpt-6-astra`/low (measured 2026-09-07, not extrapolated).** Method: one Go diff (7.6 KB) with 8 planted defects across three difficulty tiers — visible in the diff alone / needs the surrounding file's logic / needs cross-file or cross-version reasoning — sent to each tier once with the identical prompt, scored by hand against the known answer key. Zero false positives everywhere; the whole spread is recall.
 
 | Model / effort | recall | uncached in | output | tool round-trips | sec | rel. price |
 |---|---|---|---|---|---|---|
@@ -113,9 +127,9 @@ Cost is near-parity (1.04x) because astra needs fewer round-trips and reads the 
 
 **How much weight this table carries.** Each cell is **one run** against **one** 8-defect fixture. A 7/8-vs-8/8 gap at n=1 is inside sampling noise, so read the recall column as "no tier was obviously worse", not as a measured ranking — the honest claim is that astra/low is *at least as good* at near-identical cost, which is enough to justify the switch given it is trivially reversible (one line in this file). The cwd finding below rests on much stronger evidence (four models, six calls, no exceptions). The fixture and its answer key are kept at `C:\Users\markh\codex-effort-fixture` so this can be re-run with more samples, or against a new model, without rebuilding it.
 
-**Required deliberately stayed on `terra`/high.** It scores 7.5/8 at 0.56 relative price, and Required is 69% of real call volume against Critical's 21% (measured over 246 consultations, 14 days). Moving it too would take astra calls from ~26/week to ~111/week — disproportionate weekly-limit exposure for half a defect. Re-check `codex-usage.sh` before revisiting this.
+**(Superseded 2026-09-23 — kept as history; see the mapping table above.)** **Required deliberately stayed on `terra`/high.** It scores 7.5/8 at 0.56 relative price, and Required is 69% of real call volume against Critical's 21% (measured over 246 consultations, 14 days). Moving it too would take astra calls from ~26/week to ~111/week — disproportionate weekly-limit exposure for half a defect. Re-check `codex-usage.sh` before revisiting this.
 
-The ladder walks the **model** down with severity (sol → terra → luna) and walks **effort** up to compensate. The previous mapping put both Critical and Required on the flagship's most expensive tiers (`sol/max`, `sol/high`), which was the dominant token cost. Caveat carried knowingly: `gpt-5.6-luna` is the nano tier — extra reasoning effort does not buy it flagship-level review depth, so anything that might actually matter should be called `required` or above, not left on luna. The unspecified-severity fallback now lands on that same bottom rung (it used to be the flagship): omitting `--severity` no longer buys a deep review, it buys the shallowest one. The script still prints a warning on omission — treat that warning as a caller bug to fix, not as a default to lean on.
+**(History, 2026-08-07 → 2026-09-22; the current mapping is the table above, which keeps one model — `gpt-6-sol` — for Critical and Required and separates them by effort.)** The ladder walks the **model** down with severity (sol → terra → luna) and walks **effort** up to compensate. The previous mapping put both Critical and Required on the flagship's most expensive tiers (`sol/max`, `sol/high`), which was the dominant token cost. Caveat carried knowingly: `gpt-5.6-luna` is the nano tier — extra reasoning effort does not buy it flagship-level review depth, so anything that might actually matter should be called `required` or above, not left on luna. The unspecified-severity fallback now lands on that same bottom rung (it used to be the flagship): omitting `--severity` no longer buys a deep review, it buys the shallowest one. The script still prints a warning on omission — treat that warning as a caller bug to fix, not as a default to lean on.
 
 **Effort ceilings per model** (source: the model catalog bundled in codex 0.146.0 — `supported_reasoning_levels` per slug, not a blog post; several third-party write-ups get this wrong):
 
@@ -125,12 +139,16 @@ The ladder walks the **model** down with severity (sol → terra → luna) and w
 | `gpt-5.6-terra` | low, medium, high, xhigh, max, **ultra** | medium |
 | `gpt-5.6-luna` | low, medium, high, xhigh, max | medium |
 | `gpt-6-astra` | low, medium, high, xhigh, max, ultra † | not established |
+| `gpt-6-sol` | medium, high ‡ | not established |
+| `gpt-6-luna` | max ‡ | not established |
+
+‡ 2026-09-23: only the levels listed were actually run (each against the full review fixture, codex 0.156.1). Other levels were **not** probed — third-party write-ups claim Luna tops out at `max` and Sol offers `ultra`, but that is not verified here.
 
 † The astra row is **server-probed, not catalog-read** (2026-09-07): each value was sent in a minimal `codex exec` call and none was rejected. That proves the server accepts the parameter, *not* that each level behaves distinctly — `ultra` in particular was never exercised on a real review here, so treat it as untested rather than endorsed. The five levels below it were each run against the full review fixture (see the recall table above).
 
 So `luna/max` is luna's ceiling — `ultra` is not a valid setting there. `ultra` exists on sol *and* terra (it is not sol-exclusive), but it spawns parallel subagents and burns quota fast, which runs against the point of this mapping — do not reach for it without deciding the cost is worth it. Note the CLI does not validate effort against this catalog locally: an unsupported pair is sent to the server, so a bad combination surfaces as a request error at consultation time, not at call time.
 
-Doc mode skips the base-branch / empty-diff gates; outside a git repo it continues with `--skip-git-repo-check` (sandbox is read-only — codex merely loses repo context). A missing `--doc` file or contradictory flags is a caller bug → exit 2, loud (environment gaps SKIP with exit 0, never blocking). Requires codex client **>= 0.153.0** + GPT-6 Astra access for the Critical tier (0.153.0 is astra's `minimal_client_version`, hard-coded in the bundled catalog — older clients cannot even send the slug); Required/Optional still only need >= 0.144.x + GPT-5.6 access. Self-skips when codex is absent/unauthorized.
+Doc mode skips the base-branch / empty-diff gates; outside a git repo it continues with `--skip-git-repo-check` (sandbox is read-only — codex merely loses repo context). A missing `--doc` file or contradictory flags is a caller bug → exit 2, loud (environment gaps SKIP with exit 0, never blocking). The current mapping wants codex client **>= 0.155.0** (the `minimal_client_version` of `gpt-6-sol` and `gpt-6-luna`; `gpt-6-astra` for `--kind plan` needs 0.153.0) plus the account's GPT-6 rollout. An older client or a not-yet-enabled account no longer fails the review: it falls back to each tier's legacy model (see "Legacy fallback" above), which only needs >= 0.144.x + GPT-5.6 access — except Critical's legacy, `gpt-6-astra`, which needs 0.153.0. Self-skips when codex is absent/unauthorized.
 
 **One thing the prompt has to say on Windows, or every tier pays for it** (measured 2026-09-07 across four models, six calls, no exceptions): codex's shell cwd is `C:\`, **not** the `--cd` working root. Every model's first command used a relative path and every one of them failed. Strong models burned 2-4 round-trips discovering `Get-Content -LiteralPath '<abs>'` for themselves; `terra` gave up after two, wrote "the working root is denied by the sandbox" into its reply, and answered the whole review from inference — recall fell from 7.5/8 to 2/8 with a complete-looking output, a convergence question, and exit 0. `access_note` (policy version 3) now states the cwd caveat, gives the absolute-path form, and explicitly says a denied/not-found result means the path spelling, not a missing read permission.
 
