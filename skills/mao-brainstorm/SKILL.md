@@ -6,7 +6,7 @@ description: 設計先行。新功能、跨元件/跨系統設計、需求不清
 # Design Before Code
 
 <HARD-GATE>
-Do NOT write any code, scaffold, or take implementation actions until you have presented a design and the user has approved it. Every project goes through this — "too simple to need a design" is exactly when unexamined assumptions cause the most wasted work.
+Once this skill applies, write no code, scaffold, or other implementation until you have presented a design and the user has approved it. Don't talk yourself out of the design step because the work feels simple — that is when unexamined assumptions cause the most wasted work.
 </HARD-GATE>
 
 ## Process
@@ -93,7 +93,7 @@ If the script answers `[codex-review] RATE_LIMITED:` the consultation did not ha
 
 **Input too large.** If the script answers `[codex-review] FAILED: 輸入過長,未送出`, the consultation did **not** happen and this is *not* a quota problem — the document exceeds codex's input limit, so it will never be reviewed until it is split. Unlike RATE_LIMITED you must not just carry on. Note this is **doc mode**: `--base` is not available here (`--doc` and `--base` are mutually exclusive and the script exits 2) — split the document into sections and consult on each, which is what the script's own message says. Treating it as reviewed is a false pass.
 
-**Cost discipline (v1.17.0).** The script sends the document with the `## Cross-Check Log` **trimmed to its last round only** (earlier rounds still count as settled — the prompt says so). Do not paste earlier rounds back into the body to compensate; that was the exact behaviour that grew one plan's payload from 4,929 to 26,758 characters across 12 rounds. Session resume is **off by default** (measured server-side cache window is only tens of seconds — see `references/model-routing.md`). Identical content twice in a row is refused (`SKIP: 送出內容與上一輪...完全相同`): apply the round's fixes first. Per-call token usage and cache hit rate land in `$CODEX_REVIEW_LOG`; report with `scripts/codex-usage.sh`.
+**Cost discipline.** The script sends the document with the `## Cross-Check Log` **trimmed to its last round only** (earlier rounds still count as settled — the prompt says so). Do not paste earlier rounds back into the body to compensate; that was the exact behaviour that grew one plan's payload from 4,929 to 26,758 characters across 12 rounds. Session resume is **off by default** (measured server-side cache window is only tens of seconds — see `references/model-routing.md`). Identical content twice in a row is refused (`SKIP: 送出內容與上一輪...完全相同`): apply the round's fixes first. Per-call token usage and cache hit rate land in `$CODEX_REVIEW_LOG`; report with `scripts/codex-usage.sh`.
 
 If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay in one line and go to the Gate with the solo spec.
 

@@ -13,7 +13,7 @@ You are implementing Task N: [task name]
 [Where this fits, dependencies, architectural context]
 
 ## Before You Begin
-If anything is unclear about requirements, approach, or dependencies — ask now.
+You have no channel to ask questions mid-task. If requirements, approach, or dependencies are unclear, stop and return `NEEDS_CONTEXT` with what is missing in `blockerDescription` rather than guessing.
 
 ## Your Job
 1. Implement exactly what the task specifies
@@ -23,7 +23,7 @@ If anything is unclear about requirements, approach, or dependencies — ask now
 5. Report back
 
 Work from: [directory]
-While working: if anything unexpected, ask — don't guess.
+While working: if something unexpected changes what the task should do, return `NEEDS_CONTEXT` or `DONE_WITH_CONCERNS` instead of guessing.
 
 ## Code Organization
 - Follow file structure from the plan

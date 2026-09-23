@@ -43,9 +43,9 @@ Fable 5.1 的官方指引明寫：**為舊模型寫的 prompt 往往過度規定
 | | Input $/MTok | Output $/MTok |
 |---|---|---|
 | `claude-fable-5-1` | 10.00 | 50.00 |
-| `claude-opus-5` | 5.00 | 25.00 |
+| `claude-opus-5-5` | 4.00 | 20.00 |
 
-貴一倍且貴在 output。但**把這個當主判準會做出錯的決定**：一次 plan 起草約 200k input / 15k output，D 是 $2.75、主線是 $1.375，**差 $1.4**——對照一份要指導好幾天實作的 plan、以及切片錯誤造成的 48.5% 返工，這個價差不成比例。
+貴 2.5 倍且貴在 output。但**把這個當主判準會做出錯的決定**：一次 plan 起草約 200k input / 15k output，D 是 $2.75、主線是 $1.10，**差 $1.65**——對照一份要指導好幾天實作的 plan、以及切片錯誤造成的 48.5% 返工，這個價差不成比例。
 
 成本只在**高頻、可重跑**的任務上才是主要變數，而那類任務照上面的判準本來就不該走 D。仍然要知道的兩件事：
 
@@ -69,7 +69,7 @@ Fable 5.1 的官方指引明寫：**為舊模型寫的 prompt 往往過度規定
 - When unsure: 升 tier（B2→B1→A），不要拆開 model 與 effort 的配對去單獨拉 effort；也不要用降 model 來省成本（能力降級是反向操作）。確定機械化才進 C。**D 不在這條階梯上**——它是階段性的路由，不是「A 之上的一格」，任務難度再高也不是升 D 的理由。
 - **沿革**：2026-08-05 曾把 implement stage 單獨校準為 `effort:'high'`（理由：high→xhigh 對範疇明確任務邊際效益遞減、每輪思考延遲照付，平行化省下的時間不該被吃回去）。該結論已被本版吸收成 **B1**——差別是現在由「任務不確定性」決定 implement 走 B1 還是 B2，而不是整條 implement stage 一律 high。
 
-## Codex Cross-Family Consultation (gpt-5.6)
+## Codex Cross-Family Consultation
 
 `scripts/codex-review.sh` keeps a small local ledger under `$CODEX_REVIEW_STATE` (round count + payload snapshot per review line); it still writes nothing inside the repo. One call is **at most** one consultation — a repeat whose payload is byte-identical to the previous round is refused outright (`CODEX_REVIEW_FORCE=1` overrides). Two modes; the doc mode has three call sites (issue intake / spec / plan):
 

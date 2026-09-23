@@ -26,18 +26,6 @@ Establish baseline metrics before any changes:
 ### 2. Identify
 Locate the actual bottleneck — it's usually not where you think.
 
-**Common Bottleneck Patterns:**
-
-| Pattern | Symptom | Fix |
-|---------|---------|-----|
-| N+1 queries | Latency scales with data size | Batch queries, eager loading |
-| Unbounded fetch | OOM or timeout on large datasets | Pagination, streaming |
-| Missing cache | Same expensive computation repeated | Cache with TTL |
-| Synchronous I/O | Thread blocked, UI frozen | Async / background thread |
-| Unnecessary allocation | GC pressure in hot paths | Object pooling, reuse buffers |
-| Over-logging | I/O bottleneck from verbose logs | Throttle, conditional logging |
-| Lock contention | Threads waiting on shared resource | Reduce critical section, lock-free |
-
 ### 3. Fix
 Apply the minimum change that addresses the measured bottleneck.
 - One optimization at a time

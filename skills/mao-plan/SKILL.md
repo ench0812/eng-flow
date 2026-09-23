@@ -110,7 +110,7 @@ Build complete feature paths, not horizontal layers.
 - **Bad:** all DB → all API → all UI → connect everything
 - **Good:** feature A (DB+API+UI) → feature B (DB+API+UI)
 
-**多服務／多 repo 時，「repo」就是層——不要按 repo 切波次**（2026-08-07 加，實測代價見下）：
+**多服務／多 repo 時，「repo」就是層——不要按 repo 切波次**（實測代價見下）：
 - **Bad:** W1=契約定案 → W2=整個 backend → W3=整個 gateway → W4=整個前端 → W5=模擬器 → W6=收尾
 - **Good:** 片1=「行為 X 端到端」(backend+gateway+驗證) → 片2=「行為 Y 端到端」 → …
 
@@ -143,7 +143,7 @@ Build complete feature paths, not horizontal layers.
 
 **Break down further when:** >2 hours of work, can't describe acceptance in ≤3 bullets, touches 2+ independent subsystems, title contains "and".
 
-**plan／spec 本身的大小也要控制**（2026-08-07 加）：一個功能一份大 spec 會隨裁定累積而膨脹——
+**plan／spec 本身的大小也要控制**：一個功能一份大 spec 會隨裁定累積而膨脹——
 實例是一份 spec 長到千行、裁定累積到 D1~D16，**後期裁定還推翻前期段落**，讀者要自己分辨哪些還有效；
 而每個執行 agent 每輪都整份讀，token 大量花在重複閱讀。
 - **切片後每片一份小 spec**，裁定寫在它所屬那一片裡，不要全部堆進同一份。
@@ -189,7 +189,7 @@ If the script answers `[codex-review] RATE_LIMITED:` the consultation did not ha
 
 **Input too large.** If the script answers `[codex-review] FAILED: 輸入過長,未送出`, the consultation did **not** happen and this is *not* a quota problem — the document exceeds codex's input limit, so it will never be reviewed until it is split. Unlike RATE_LIMITED you must not just carry on. Note this is **doc mode**: `--base` is not available here (`--doc` and `--base` are mutually exclusive and the script exits 2) — split the document into sections and consult on each, which is what the script's own message says. Treating it as reviewed is a false pass.
 
-**Cost discipline (v1.17.0).** The script sends the document with the `## Cross-Check Log` **trimmed to its last round only** (earlier rounds still count as settled — the prompt says so). Do not paste earlier rounds back into the body to compensate; that was the exact behaviour that grew one plan's payload from 4,929 to 26,758 characters across 12 rounds. Session resume is **off by default** (measured server-side cache window is only tens of seconds — see `references/model-routing.md`). Identical content twice in a row is refused (`SKIP: 送出內容與上一輪...完全相同`): apply the round's fixes first. Per-call token usage and cache hit rate land in `$CODEX_REVIEW_LOG`; report with `scripts/codex-usage.sh`.
+**Cost discipline.** The script sends the document with the `## Cross-Check Log` **trimmed to its last round only** (earlier rounds still count as settled — the prompt says so). Do not paste earlier rounds back into the body to compensate; that was the exact behaviour that grew one plan's payload from 4,929 to 26,758 characters across 12 rounds. Session resume is **off by default** (measured server-side cache window is only tens of seconds — see `references/model-routing.md`). Identical content twice in a row is refused (`SKIP: 送出內容與上一輪...完全相同`): apply the round's fixes first. Per-call token usage and cache hit rate land in `$CODEX_REVIEW_LOG`; report with `scripts/codex-usage.sh`.
 
 If codex is absent/unauthorized the script self-skips — relay in one line and hand off the solo plan.
 

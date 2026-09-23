@@ -15,11 +15,8 @@ You are reviewing whether an implementation matches its specification.
 ## What Implementer Claims They Built
 [From implementer's report]
 
-## CRITICAL: Do Not Trust the Report
-The implementer's report may be incomplete or optimistic. Verify independently.
-
-DO NOT: take their word, trust completeness claims, accept their interpretation.
-DO: read actual code, compare to requirements line by line, look for missing/extra pieces.
+## Verify Independently
+The implementer's report is a claim, not evidence — it may be incomplete or optimistic. Read the actual code and compare it to the requirements line by line, looking for missing and extra pieces.
 
 ## Your Job
 Read the implementation code and verify:
@@ -27,8 +24,6 @@ Read the implementation code and verify:
 **Missing requirements:** Did they skip anything? Claim without implementing?
 **Extra work:** Features not requested? Over-engineering? Check against the Out of Scope section above — anything matching it is an issue.
 **Misunderstandings:** Wrong interpretation? Wrong problem solved?
-
-Verify by reading code, not by trusting report.
 
 ## Report Format (schema: reviewVerdict)
 Return an object matching:
