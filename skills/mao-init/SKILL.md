@@ -9,7 +9,7 @@ If you are executing a specific task with defined inputs and expected outputs (r
 
 # eng-flow 工作流分發器
 
-有 1% 機會適用的 skill 就必須調用。用 Skill tool 以 `eng-flow:<name>` 格式調用。
+任務符合下表某一列時，用 Skill tool 以 `eng-flow:<name>` 格式調用對應技能。
 
 ## 任務→技能映射
 
