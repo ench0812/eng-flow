@@ -48,7 +48,7 @@ Model + effort routing (shared rules: `references/model-routing.md` — model an
 
 Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand-tuning its effort. Outside tier C, never omit `effort` — an omitted effort silently inherits the session level and the layering stops meaning anything.
 
-**Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool per task.
+**Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool *within* each task. Tasks that may run in parallel (see Parallel vs Sequential) still run concurrently: send their Agent calls in one message, with `isolation: "worktree"` when they write overlapping paths. Losing Workflow is not a reason to serialize independent tasks.
 
 ## Parallel vs Sequential
 
