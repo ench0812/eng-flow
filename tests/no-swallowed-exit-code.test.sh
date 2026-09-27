@@ -48,6 +48,18 @@ want deny 'cmd | sort; exit $?'
 # 換行分隔的語句與 `;` 語意相同，不能因為換行就漏掉
 want deny "$(printf 'cmd 2>&1 | tail -40\necho "EXIT=$?"')"
 
+echo "== 該擋的（2026-09-27 回顧重播本週 Bash 呼叫時，舊版漏掉的兩類）=="
+# 同一條指令裡另一句用了 PIPESTATUS，不代表這一句也用了——夢境第 0 階段連六晚的原句
+want deny 'memory doctor 2>&1 | tail -20; echo "rc=$?"; memory embed --smoke 2>&1 | tail -5; echo "smoke_rc=${PIPESTATUS[0]}"'
+# heredoc 終止行之後的指令要照常檢查——09-22 連六次的原句形狀
+want deny "$(printf 'python - <<PY\nprint(1)\nPY\ngo build ./... 2>&1 | head -5; echo "exit=$?"')"
+want deny "$(printf "python - <<'PY'\nprint(1)\nPY\ngo build ./... 2>&1 | head -5; echo \"exit=\$?\"")"
+want deny "$(printf 'cat <<-EOF\n\tx\n\tEOF\ncmd | tail -3; echo $?')"
+# 一行兩個 heredoc：兩段正文都消耗完才回到指令
+want deny "$(printf 'cat <<A <<B\na\nA\nb\nB\ncmd | tail -3; echo $?')"
+# `<<<` 是 here-string、沒有正文，不能因此把後面當成資料略過
+want deny 'grep x <<< "$s" | tail -3; echo $?'
+
 echo "== 不該擋的（誤殺比漏報昂貴，這組是重點）=="
 # 正解本身絕對不能被擋——擋掉它等於沒有逃生口
 want allow 'cmd > out.txt 2>&1; rc=$?; tail -40 out.txt; echo "EXIT=$rc"'
@@ -74,6 +86,14 @@ want allow 'npm test | tail -20 > log.txt'
 want allow "grep 'cmd | tail -3; echo \$?' notes.md"
 # heredoc 內容是資料不是指令
 want allow "$(printf 'cat > w.sh <<EOF\ncmd | tail -3; echo $?\nEOF')"
+# 正文之後接的是正確寫法 → 放行（確認剝正文沒有把前後黏成一個假命中）
+want allow "$(printf 'cat > w.sh <<EOF\ncmd | tail -3; echo $?\nEOF\nbash w.sh; echo $?')"
+# 第二個 heredoc 的正文也是資料
+want allow "$(printf 'cat <<A <<B\na\nA\ncmd | tail -3; echo $?\nB\necho done')"
+# 沒有終止行的 heredoc：之後全是正文，不得出錯也不得誤殺
+want allow "$(printf 'cat <<EOF\ncmd | tail -3; echo $?')"
+# 正解與 PIPESTATUS 並存時照樣放行
+want allow 'a | tail -2; echo "${PIPESTATUS[0]}"; b | tail -2; echo "${PIPESTATUS[0]}"'
 
 echo "== 繞道 =="
 # 【逃生口必須真的可用】hook 讀的是自己 process 的環境變數，inline 前綴要等指令

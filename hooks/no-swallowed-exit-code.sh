@@ -55,14 +55,39 @@ case "$cmd" in
   CLAUDE_ALLOW_PIPED_EXIT=1[[:space:]]*) exit 0 ;;
 esac
 
-# 已經處理過管線離開碼的寫法直接放行。
+# 開了 pipefail 的指令直接放行——整條管線的失敗會傳出來，主要危害已經消失。
+#
+# 【PIPESTATUS 不在這裡放行】2026-09-27 回顧重播一週 7,638 次 Bash 呼叫：夢境第 0 階段
+# 連六晚寫 `memory doctor 2>&1 | tail -20; echo "rc=$?"; ...; echo "smoke_rc=${PIPESTATUS[0]}"`，
+# 第一句是這個坑、後一句才是正解，而舊版只要整條字串出現 PIPESTATUS 就整條放行。
+# 正確寫法 `${PIPESTATUS[0]}` 本身不含 `$?`，下面的判定原本就不會命中它，不需要特別放行。
 case "$cmd" in
-  *pipefail*|*PIPESTATUS*) exit 0 ;;
+  *pipefail*) exit 0 ;;
 esac
 
-# 【heredoc 內容是資料，不是要執行的指令】同 no-blind-sleep.sh：只掃第一個 `<<` 之前。
-scan="${cmd%%<<*}"
-[ -n "$scan" ] || scan="$cmd"
+# 【heredoc 內容是資料，不是要執行的指令】剝掉 heredoc 正文，**終止行之後照常掃**。
+# 舊版只掃第一個 `<<` 之前，於是 heredoc 結束之後的指令全部不檢查——同一次重播裡
+# `python - <<PY ... PY` 之後緊接 `go build ./... 2>&1 | head -5; echo "exit=$?"` 漏了 7 次。
+# `<<<` 是 here-string、不開正文，先換掉再認 heredoc。一行可有多個 heredoc，正文依序消耗。
+# 已知限制：單引號字串裡的 `<<WORD` 也會被當成 heredoc 開頭，其後內容被當正文略過——
+# 誤差方向是漏報不是誤殺，刻意接受。
+scan="$(printf '%s\n' "$cmd" | awk '
+  {
+    if (n > 0) {
+      line = $0; sub(/^\t+/, "", line)
+      if (line == q[h]) { h++; if (h > n) { n = 0; h = 1 } }
+      next
+    }
+    print
+    rest = $0; gsub(/<<</, "", rest)
+    while (match(rest, /<<-?[ \t]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) {
+      d = substr(rest, RSTART, RLENGTH); sub(/^<<-?[ \t]*["'"'"']?/, "", d)
+      q[++n] = d; h = 1
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+  }
+')"
+[ -n "$scan" ] || exit 0
 
 # 單引號內容是字面資料，剝掉；雙引號**不可剝**（見檔頭）。
 # 跨行字串用 SOH 哨符折成單行再剝，剝完把換行換成 `;`——語句分隔的語意與 `;` 相同，
