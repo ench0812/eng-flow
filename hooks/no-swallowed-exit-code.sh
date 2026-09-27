@@ -69,6 +69,8 @@ esac
 # 舊版只掃第一個 `<<` 之前，於是 heredoc 結束之後的指令全部不檢查——同一次重播裡
 # `python - <<PY ... PY` 之後緊接 `go build ./... 2>&1 | head -5; echo "exit=$?"` 漏了 7 次。
 # `<<<` 是 here-string、不開正文，先換掉再認 heredoc。一行可有多個 heredoc，正文依序消耗。
+# 分隔符照 bash 的規則取：整個 word（`<<\EOF`、`<<'EOF'`、`<<"EOF"`、`<<END-1` 都合法），
+# 再做引號移除，終止行必須與它逐字相同。
 # 已知限制：單引號字串裡的 `<<WORD` 也會被當成 heredoc 開頭，其後內容被當正文略過——
 # 誤差方向是漏報不是誤殺，刻意接受。
 scan="$(printf '%s\n' "$cmd" | awk '
@@ -81,10 +83,10 @@ scan="$(printf '%s\n' "$cmd" | awk '
     }
     print
     rest = $0; gsub(/<<</, "", rest)
-    while (match(rest, /<<-?[ \t]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) {
+    while (match(rest, /<<-?[ \t]*[A-Za-z_\\"'"'"'][^ \t;&|<>()]*/)) {
       d = substr(rest, RSTART, RLENGTH)
       t[n + 1] = (substr(d, 3, 1) == "-")
-      sub(/^<<-?[ \t]*["'"'"']?/, "", d)
+      sub(/^<<-?[ \t]*/, "", d); gsub(/[\\"'"'"']/, "", d)
       q[++n] = d; h = 1
       rest = substr(rest, RSTART + RLENGTH)
     }

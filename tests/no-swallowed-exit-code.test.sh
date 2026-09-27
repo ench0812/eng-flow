@@ -57,6 +57,9 @@ want deny "$(printf "python - <<'PY'\nprint(1)\nPY\ngo build ./... 2>&1 | head -
 want deny "$(printf 'cat <<-EOF\n\tx\n\tEOF\ncmd | tail -3; echo $?')"
 # 一行兩個 heredoc：兩段正文都消耗完才回到指令
 want deny "$(printf 'cat <<A <<B\na\nA\nb\nB\ncmd | tail -3; echo $?')"
+# 跳脫與含連字號的分隔符：終止行之後照常檢查
+want deny "$(printf 'cat <<\\EOF\nx\nEOF\ncmd | tail -3; echo $?')"
+want deny "$(printf 'cat <<END-1\nx\nEND-1\ncmd | tail -3; echo $?')"
 # `<<<` 是 here-string、沒有正文，不能因此把後面當成資料略過
 want deny 'grep x <<< "$s" | tail -3; echo $?'
 
@@ -92,6 +95,12 @@ want allow "$(printf 'cat > w.sh <<EOF\ncmd | tail -3; echo $?\nEOF\nbash w.sh; 
 want allow "$(printf 'cat <<A <<B\na\nA\ncmd | tail -3; echo $?\nB\necho done')"
 # 一般 `<<` 不剝 tab：正文裡的 `\tEOF` 不是終止行，後面仍是正文（codex 第二意見抓到）
 want allow "$(printf 'cat <<EOF\n\tEOF\ncmd | tail -3; echo $?\nEOF')"
+# 分隔符的各種合法寫法：正文都是資料（`<<\EOF` 是 codex 第二意見抓到的）
+want allow "$(printf 'cat <<\\EOF\ncmd | tail -3; echo $?\nEOF')"
+want allow "$(printf 'cat <<"EOF"\ncmd | tail -3; echo $?\nEOF')"
+want allow "$(printf 'cat <<END-1\ncmd | tail -3; echo $?\nEND-1')"
+# 算術左移不是 heredoc，後面照常檢查
+want deny 'echo $((1<<2)); cmd | tail -3; echo $?'
 # 沒有終止行的 heredoc：之後全是正文，不得出錯也不得誤殺
 want allow "$(printf 'cat <<EOF\ncmd | tail -3; echo $?')"
 # 正解與 PIPESTATUS 並存時照樣放行
