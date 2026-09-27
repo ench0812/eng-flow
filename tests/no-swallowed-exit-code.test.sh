@@ -99,6 +99,9 @@ want allow "$(printf 'cat <<EOF\n\tEOF\ncmd | tail -3; echo $?\nEOF')"
 want allow "$(printf 'cat <<\\EOF\ncmd | tail -3; echo $?\nEOF')"
 want allow "$(printf 'cat <<"EOF"\ncmd | tail -3; echo $?\nEOF')"
 want allow "$(printf 'cat <<END-1\ncmd | tail -3; echo $?\nEND-1')"
+# 引號分隔符可含空白：正文裡單獨的 `END` 不是終止行（codex 第二意見第 3 輪抓到）
+want allow "$(printf "cat <<'END WORD'\nEND\ncmd | tail -3; echo \$?\nEND WORD")"
+want deny  "$(printf "cat <<'END WORD'\nx\nEND WORD\ncmd | tail -3; echo \$?")"
 # 算術左移不是 heredoc，後面照常檢查
 want deny 'echo $((1<<2)); cmd | tail -3; echo $?'
 # 沒有終止行的 heredoc：之後全是正文，不得出錯也不得誤殺
