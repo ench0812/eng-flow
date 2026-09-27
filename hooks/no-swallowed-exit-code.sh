@@ -74,14 +74,17 @@ esac
 scan="$(printf '%s\n' "$cmd" | awk '
   {
     if (n > 0) {
-      line = $0; sub(/^\t+/, "", line)
+      # 只有 `<<-` 會剝終止行的前導 tab；一般 `<<` 的 `\tEOF` 仍是正文。
+      line = $0; if (t[h]) sub(/^\t+/, "", line)
       if (line == q[h]) { h++; if (h > n) { n = 0; h = 1 } }
       next
     }
     print
     rest = $0; gsub(/<<</, "", rest)
     while (match(rest, /<<-?[ \t]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) {
-      d = substr(rest, RSTART, RLENGTH); sub(/^<<-?[ \t]*["'"'"']?/, "", d)
+      d = substr(rest, RSTART, RLENGTH)
+      t[n + 1] = (substr(d, 3, 1) == "-")
+      sub(/^<<-?[ \t]*["'"'"']?/, "", d)
       q[++n] = d; h = 1
       rest = substr(rest, RSTART + RLENGTH)
     }

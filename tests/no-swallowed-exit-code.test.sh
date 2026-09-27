@@ -90,6 +90,8 @@ want allow "$(printf 'cat > w.sh <<EOF\ncmd | tail -3; echo $?\nEOF')"
 want allow "$(printf 'cat > w.sh <<EOF\ncmd | tail -3; echo $?\nEOF\nbash w.sh; echo $?')"
 # 第二個 heredoc 的正文也是資料
 want allow "$(printf 'cat <<A <<B\na\nA\ncmd | tail -3; echo $?\nB\necho done')"
+# 一般 `<<` 不剝 tab：正文裡的 `\tEOF` 不是終止行，後面仍是正文（codex 第二意見抓到）
+want allow "$(printf 'cat <<EOF\n\tEOF\ncmd | tail -3; echo $?\nEOF')"
 # 沒有終止行的 heredoc：之後全是正文，不得出錯也不得誤殺
 want allow "$(printf 'cat <<EOF\ncmd | tail -3; echo $?')"
 # 正解與 PIPESTATUS 並存時照樣放行
