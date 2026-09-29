@@ -126,7 +126,7 @@ Follow `references/decision-consensus.md`: resolve material choices with Codex f
 - `git diff <BASE_SHA>..HEAD --stat` — empty diff → stop, report to the user, do not dispatch
 
 For automated review, run a reviewer via Workflow `agent()` (or Agent tool directly for a single-file review) using the template at `mao-execute/code-reviewer-prompt.md`:
-- Model & effort: default **B2** = `model:"sonnet"` + `effort:'medium'` (same routing as mao-execute; see `references/model-routing.md`). High-risk changes (security/auth/data) → **A** = omit `model` (inherits the session model) + `effort:'high'`
+- Model & effort: default **B2** = `model:"sonnet"` + `effort:'medium'` in Workflow `agent()`; via the Agent tool use `subagent_type:"eng-flow:tier-b2"`, since the Agent tool cannot pass effort (same routing as mao-execute; see `references/model-routing.md`). High-risk changes (security/auth/data) → **A** = omit `model` (inherits the session model) + `effort:'high'`
 - Provide git SHAs (BASE_SHA from the merge-base above, and HEAD)
 - Include task/plan requirements
 - List changed files
