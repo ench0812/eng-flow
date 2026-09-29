@@ -40,12 +40,17 @@ Fable 5.1 的官方指引明寫：**為舊模型寫的 prompt 往往過度規定
 
 ### 成本：次要變數，不是判準
 
-| | Input $/MTok | Output $/MTok |
-|---|---|---|
-| `claude-fable-5-1` | 10.00 | 50.00 |
-| `claude-opus-5-5` | 4.00 | 20.00 |
+| | Tier | Input $/MTok | Output $/MTok | Cache read $/MTok |
+|---|---|---|---|---|
+| `claude-fable-5-1` | D | 10.00 | 50.00 | 0.25 |
+| `claude-opus-5-5` | Session / A | 4.00 | 20.00 | 0.20 |
+| `claude-sonnet-5-5` | B1 / B2 | 2.00 | 10.00 | 0.20 |
 
-貴 2.5 倍且貴在 output。但**把這個當主判準會做出錯的決定**：一次 plan 起草約 200k input / 15k output，D 是 $2.75、主線是 $1.10，**差 $1.65**——對照一份要指導好幾天實作的 plan、以及切片錯誤造成的 48.5% 返工，這個價差不成比例。
+（價格來源：claude-api skill 的模型表，cached 2026-09-25；Anthropic first-party API 牌價。`sonnet` 別名在 Anthropic API 上解析為 Sonnet 5.5。）
+
+Fable 比 Opus 貴 2.5 倍且貴在 output。但**把這個當主判準會做出錯的決定**：一次 plan 起草約 200k input / 15k output，D 是 $2.75、主線是 $1.10，**差 $1.65**——對照一份要指導好幾天實作的 plan、以及切片錯誤造成的 48.5% 返工，這個價差不成比例。
+
+**B 層與 A 層**：Sonnet 的 input／output 單價都是 Opus 的一半，同樣 200k / 15k 的量在 Sonnet 上是 $0.55（假設兩邊 token 數相同；實際 output 量隨 effort 與模型而變）。但 **cache read 兩者同價（$0.20）**，所以 context 大多命中快取的派工，實際價差會比「一半」小。這個價差是 A「節制使用」的成本面理由，**不是**選 tier 的判準——B1/B2/A 之間照樣依任務不確定性選，也不要為了省錢把該走 A 的降到 B（見 Rules 的 When unsure）。
 
 成本只在**高頻、可重跑**的任務上才是主要變數，而那類任務照上面的判準本來就不該走 D。仍然要知道的兩件事：
 
