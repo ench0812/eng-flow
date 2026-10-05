@@ -316,6 +316,22 @@ case "$out" in
   *) ng "Write/Edit 動過的檔案所屬 repo 會被檢查" "未報出 $OTHER_TOP" ;;
 esac
 
+# [regression 2026-10-05] transcript 裡的 cwd 本身就是目錄，必須原樣解析成它自己的 repo。
+# Windows 上的 jq（實測 1.8.2）輸出 CRLF，多行清單除了最後一行每行都帶 \r；目錄字串帶
+# \r 時 [ -d ] 判為否，被當成檔案剝掉一層而變成「父目錄」——排序較前的那個 cwd repo
+# 就整個漏掉。檔案路徑剝掉最後一段時剛好連 \r 一起剝掉，所以只有 cwd 會中。
+# 只在會輸出 CRLF 的 jq 上有鑑別力；Linux 的 jq 輸出 LF，本條在那裡恆綠。
+CRA="$SANDBOX/cr-a"; CRB="$SANDBOX/cr-b"
+for d in "$CRA" "$CRB"; do
+  git init -q -b main "$d"; echo x > "$d/x.txt"; git_q "$d" add x.txt; git_q "$d" commit -qm "cr local $(basename "$d")"
+done
+TR_CR="$SANDBOX/tr_cr.jsonl"; mktr "$TR_CR" "$CRA"
+jq -cn --arg c "$CRB" '{cwd:$c, message:{content:[]}}' >> "$TR_CR"
+out="$(fire_tr "$SANDBOX" s_cr "$TR_CR")"
+CRA_TOP="$(top_of "$CRA")"; CRB_TOP="$(top_of "$CRB")"
+case "$out" in *"$CRA_TOP"*) ok "多個 transcript cwd：排序在前的 repo 也被檢查" ;; *) ng "多個 transcript cwd：排序在前的 repo 也被檢查" "未報出 $CRA_TOP" ;; esac
+case "$out" in *"$CRB_TOP"*) ok "多個 transcript cwd：排序在後的 repo 被檢查" ;; *) ng "多個 transcript cwd：排序在後的 repo 被檢查" "未報出 $CRB_TOP" ;; esac
+
 # transcript 不存在或欄位缺漏時，不得整支失效——退回只看 cwd。
 out="$(fire_tr "$WORK" s32 "$SANDBOX/no-such-transcript.jsonl")"
 case "$out" in

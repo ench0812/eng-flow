@@ -150,6 +150,11 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
   take() {  # take <mode>：把 stdin 的路徑逐一餵給 add_repo
     local mode="${1:-}" d
     while IFS= read -r d; do
+      # 【先去掉行尾 \r】(2026-10-05 週回顧): Windows 上的 jq（實測 1.8.2）輸出 CRLF，
+      # 多行清單除了最後一行都帶 \r。目錄字串帶 \r 時下面的 [ -d ] 判為否、被剝掉一層，
+      # transcript 裡的 cwd 就被解析成父目錄，那個 repo 整個漏檢（檔案路徑剝最後一段時
+      # 剛好連 \r 一起剝掉，所以只有 cwd 會中）。
+      d="${d%$'\r'}"
       [ -n "$d" ] || continue
       # cwd 本來就是目錄；file_path 是檔案，取其所在目錄。
       # 用參數展開而非 printf|sed：後者每個路徑要開一個子行程，實測 23 個
