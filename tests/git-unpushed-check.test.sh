@@ -43,6 +43,28 @@ warns(){ [ -n "$(fire "$1" "$2")" ] && ok "$3" || ng "$3" "預期有警告，實
 
 git_q(){ git -C "$1" -c user.email=t@t -c user.name=t -c commit.gpgsign=false "${@:2}"; }
 
+# 數 hook 對 git 問了幾次 rev-parse --show-toplevel：PATH 前面放一支 git shim，
+# 記一筆後交給真的 git。用在效能回歸（每次約 30-80ms，次數就是成本）。
+REAL_GIT="$(command -v git)"
+SHIM_DIR="$SANDBOX/shim"; RP_LOG="$SANDBOX/rp.log"
+mkdir -p "$SHIM_DIR"
+printf '#!/usr/bin/env bash\ncase " $* " in *" rev-parse --show-toplevel "*) echo x >> "%s" ;; esac\nexec "%s" "$@"\n' \
+  "$RP_LOG" "$REAL_GIT" > "$SHIM_DIR/git"
+chmod +x "$SHIM_DIR/git"
+mktr_reads(){ # mktr_reads <file> <cwd值> <dir> <n>：同一目錄底下 n 個 Read 過的檔
+  local i; : > "$1"
+  for i in $(seq 1 "$4"); do
+    jq -cn --arg c "$2" --arg f "$3/f$i.txt" \
+      '{cwd:$c, message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f}}]}}' >> "$1"
+  done
+}
+count_rp(){ # count_rp <allow_temp 0|1> <cwd> <session> <transcript> -> rev-parse 次數
+  : > "$RP_LOG"
+  jq -cn --arg c "$2" --arg s "$3" --arg t "$4" '{session_id:$s, cwd:$c, transcript_path:$t}' \
+    | GIT_GUARD_ALLOW_TEMP="$1" PATH="$SHIM_DIR:$PATH" bash "$HOOK" >/dev/null 2>&1
+  wc -l < "$RP_LOG" | tr -cd '0-9'
+}
+
 # --- 建一個有遠端的 repo ---
 REMOTE="$SANDBOX/remote.git"
 WORK="$SANDBOX/work"
@@ -311,6 +333,25 @@ echo s > "$SPACED/s.txt"
 git_q "$SPACED" add s.txt
 git_q "$SPACED" commit -qm "spaced path commit"
 warns "$SPACED" s20 "[regression] 路徑含空格的 repo 仍能被檢查到"
+
+echo "== 不列入的路徑只問 git 一次（效能回歸）=="
+# [regression 2026-10-05] 前綴短路只涵蓋已確認的 repo；不是 repo 的目錄與頂層在臨時
+# 目錄的 repo 每個檔案都重問一次 git。實際事故：一份 110MB transcript 問了 1,065 次、
+# 相異路徑 32 個，整支 30.6 秒、超過 15 秒 timeout，git-guard 在那些回合靜默沒跑。
+# 斷言用次數不用秒數：秒數隨機器浮動，次數才是決定性的成本。
+PLAIN="$SANDBOX/plain-dir"; mkdir -p "$PLAIN"
+TR_PLAIN="$SANDBOX/tr_plain.jsonl"; mktr_reads "$TR_PLAIN" "$PLAIN" "$PLAIN" 20
+n_plain="$(count_rp 1 "$PLAIN" s_perf_plain "$TR_PLAIN")"
+[ -n "$n_plain" ] && [ "$n_plain" -ge 1 ] && [ "$n_plain" -le 2 ] \
+  && ok "同一個非 repo 目錄的 20 個檔只問 git 一次（實得 $n_plain）" \
+  || ng "同一個非 repo 目錄的 20 個檔只問 git 一次" "rev-parse 次數 ${n_plain:-?}"
+# 臨時目錄底下的 repo（session scratchpad 裡的 worktree 就是這種）：刻意不設
+# GIT_GUARD_ALLOW_TEMP，讓它走真實的排除路徑。$NOUP 在 mktemp -d 底下且是 repo。
+TR_TMPREPO="$SANDBOX/tr_tmprepo.jsonl"; mktr_reads "$TR_TMPREPO" "$SANDBOX" "$NOUP" 20
+n_tmp="$(count_rp 0 "$SANDBOX" s_perf_tmp "$TR_TMPREPO")"
+[ -n "$n_tmp" ] && [ "$n_tmp" -ge 1 ] && [ "$n_tmp" -le 3 ] \
+  && ok "臨時目錄 repo 的 20 個檔只問 git 一次（實得 $n_tmp）" \
+  || ng "臨時目錄 repo 的 20 個檔只問 git 一次" "rev-parse 次數 ${n_tmp:-?}"
 
 echo "== 非 repo / 異常輸入不得出錯 =="
 silent "$SANDBOX" s13 "非 git 目錄 → 靜默"

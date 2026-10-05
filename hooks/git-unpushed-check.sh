@@ -57,6 +57,7 @@ transcript="$(printf '%s' "$input" | "$JQ" -r '.transcript_path // ""' 2>/dev/nu
 repos=""
 writable=""     # 其中「本 session 有寫入證據」的 repo（正規化頂層），只有這些能進 auto 桶
 tops_norm=()    # 已解析出的 repo 頂層（正斜線形式），用於前綴短路
+not_repo=""     # 問過 git、結論是「不列入」的路徑（不是 repo，或頂層在臨時目錄），同一路徑不再問
 
 # 效能守則（實測逼出來的，改動前請先量）：本函式對 transcript 取出的每個路徑
 # 都會跑一次，而一個 session 可以有 20+ 個相異路徑。在 Windows/Git Bash 上，
@@ -104,14 +105,22 @@ add_repo() {
         return 0 ;;
     esac
   done
-  top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || return 0
-  [ -n "$top" ] || return 0
+  # 【負向結果也要記】(2026-10-05 週回顧): 前綴短路只涵蓋「已確認是 repo」的路徑；
+  # 不是 repo 的目錄（session scratchpad 最典型）與頂層落在臨時目錄的 repo 不會進
+  # tops_norm，於是同一個目錄底下每個檔案都重問一次 git。實測一份 110MB transcript：
+  # 1,065 次 rev-parse、相異路徑只有 32 個，整支跑 30.6 秒，超過 hooks.json 的 15 秒
+  # timeout 被取消——該週 632 次 Stop 有 180 次如此，git-guard 在那些回合靜默沒跑。
+  # 只記「不列入」的結論：是 repo 的那一支已在 tops_norm，且寫入證據的補記必須
+  # 繼續走上面的前綴迴圈，不能被這裡短路掉。
+  case "$not_repo" in *"|$np|"*) return 0 ;; esac
+  top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || { not_repo="$not_repo|$np|"; return 0; }
+  [ -n "$top" ] || { not_repo="$not_repo|$np|"; return 0; }
   ntop="${top//\\//}"
   # 【臨時目錄要對 repo 頂層判定，不是對被存取的路徑】(複查抓到): 對入參判定的話，
   # D:/Projects/myapp/.cache/vite 這種子路徑會讓【整個 myapp】被丟掉——而漏掉的正是
   # 本 hook 唯一要防的東西。放在 rev-parse 之後、用 $ntop 判定；fixture 那種
   # /tmp/tmp.XXX/work 的 toplevel 本身就在臨時根底下，排除行為不變。
-  is_temp_path "$ntop" && return 0
+  is_temp_path "$ntop" && { not_repo="$not_repo|$np|"; return 0; }
   case "$repos" in *"|$top|"*) return 0 ;; esac
   repos="$repos|$top|"
   [ "$mode" = w ] && writable="$writable|$ntop|"
