@@ -25,12 +25,18 @@
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
-#   映射(嚴重度用語同 mao-review taxonomy;2026-09-23 使用者裁定 critical/required 改用 gpt-6-sol):
-#     critical          -> gpt-6-sol    / high   退路 gpt-6-astra  / low
-#     required          -> gpt-6-sol    / medium 退路 gpt-5.6-terra / high
-#     optional/nit/fyi  -> gpt-6-luna   / max    退路 gpt-5.6-luna  / max
+#   映射(嚴重度用語同 mao-review taxonomy;2026-10-05 使用者裁定 critical/required 改用
+#   gpt-6.1-sol、effort 各降一階,critical/required/plan 的退路一律 gpt-6-luna/max):
+#     critical          -> gpt-6.1-sol  / medium 退路 gpt-6-luna   / max
+#     required          -> gpt-6.1-sol  / low    退路 gpt-6-luna   / max
+#     optional/nit/fyi  -> gpt-6-luna   / max    退路 gpt-5.6-luna / max
 #     doc --kind plan   -> gpt-6-astra  / 依嚴重度 critical=high、required=medium、其餘=low
-#                          退路 gpt-5.6-sol / 同 effort(使用者裁定:astra 留給計畫階段補全面性)
+#                          退路 gpt-6-luna / max(使用者裁定:astra 留給計畫階段補全面性)
+#
+#   【2026-10-05 改用 gpt-6.1-sol 的依據】使用者裁定,不是本機實測的結果。官方(2026-09-29 DevDay)
+#   宣稱 6.1-sol 接近 astra 的能力、單價為 astra 的五分之一、cached input 比 6-sol 便宜一半。
+#   effort 各降一階(critical high→medium、required medium→low)同屬裁定;下方 8 缺陷測資
+#   尚未對 6.1-sol 重跑,所以下表的 recall 數字描述的是舊檔位,不代表現行檔位。
 #   --severity 未傳/未知 -> fallback gpt-6-luna / max(對齊最低一級:沒說嚴重度就不燒旗艦額度;
 #                            腳本仍印警告要求呼叫端補傳,別靠 fallback 過日子)。
 #   「退路」= 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型,機制見映射表下方。
@@ -45,7 +51,7 @@
 #     gpt-6-luna/max        6.5/8  42,164   14,342  305   (SQLi 與 nil panic 被降成 Optional、漏 TOCTOU)
 #   sol/medium 與 terra/high 抓到的一樣多,時間減半、未快取 input 少三成。sol/high 的 B6 只看到
 #   「任意字串都能通過」的安全面(半分),【沒有看到部署時序面】——那一軸仍是 astra 獨有(見下),
-#   所以 critical 的退路選 astra 而不是 5.6。terra/high 在 09-07 是 7.5/8、這次 7/8,差在 B6 的
+#   所以當時 critical 的退路選 astra(2026-10-05 起改為 luna,見映射)。terra/high 在 09-07 是 7.5/8、這次 7/8,差在 B6 的
 #   安全面這次沒提:同一組合兩次差半分,樣本數 1 的雜訊就是這個量級,判讀時別把半分當訊號。
 #
 #   【critical 改用 gpt-6-astra/low 的依據】(2026-09-07 實測,非推測)。方法: 一份植入 8 個
@@ -85,13 +91,13 @@
 #        bash codex-review.sh --severity <...> --doc <path> --kind <spec|plan>
 #        --base 省略時自動偵測(origin/HEAD → main → master);--doc 與 --base 互斥。
 #
-# 前置: codex client >= 0.153.0 且帳號 plan 已 rollout GPT-6 Astra(critical 檔位要用),
-#        否則 gpt-6-astra slug 會被 server 回 400 invalid_request。0.153.0 是 astra 的
-#        minimal_client_version(bundled catalog 寫死),舊 client 連送都送不出去。
-#        required/optional 檔位仍是 gpt-5.6-*,只需要 >= 0.144.x + GPT-5.6 家族權限。
-#        判別「有沒有 astra 權限」最省的方法: 一次極小呼叫
-#          printf 'reply OK' | codex exec -m gpt-6-astra --sandbox read-only --skip-git-repo-check -
-#        通了就有(實測固定開銷約 16.6k input / 12.3k cached,可忽略)。
+# 前置: codex client >= 0.160.0(gpt-6.1-sol,critical/required 用)且帳號已 rollout 該模型;
+#        optional 與各退路的 gpt-6-luna 要 >= 0.155.0,plan 的 gpt-6-astra 要 >= 0.153.0。
+#        版本不足不會失敗,會退到各檔位的退路(機制見映射表下方)。【模型目錄依 client 版本過濾】:
+#        舊 client 的 models_cache.json 裡沒有某模型,不代表帳號沒有它(2026-10-05 實測)。
+#        判別「有沒有某模型權限」最省的方法: 一次極小呼叫
+#          printf 'reply OK' | codex exec -m gpt-6.1-sol --sandbox read-only --skip-git-repo-check -
+#        通了就有(實測固定開銷約 15k tokens,可忽略)。
 #
 # 結束碼: 環境缺失(codex 未裝/未授權、diff 模式不在 repo) → 印提示並 exit 0(不阻斷);
 #          用量/額度上限 → 印 RATE_LIMITED 並 exit 0(不阻斷、不重試、不計 round);
@@ -106,8 +112,8 @@
 set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
-CRIT_MODEL="gpt-6-sol";        CRIT_EFFORT="high"       # critical
-REQ_MODEL="gpt-6-sol";         REQ_EFFORT="medium"      # required
+CRIT_MODEL="gpt-6.1-sol";      CRIT_EFFORT="medium"     # critical
+REQ_MODEL="gpt-6.1-sol";       REQ_EFFORT="low"         # required
 LOW_MODEL="gpt-6-luna";        LOW_EFFORT="max"         # optional / nit / fyi
 FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="max"    # --severity 未傳/未知時的保底(對齊 optional)
 # 計畫文件(doc 模式 --kind plan)一律用 astra,不看嚴重度選模型——使用者 2026-09-23 裁定:
@@ -123,13 +129,14 @@ PLAN_MODEL="gpt-6-astra"
 # CODEX_HOME 裝錯了 home)。與其防每一種覆蓋方式,不如每次呼叫都自己檢查、不夠就退回。
 # 退回只發生在【模型不可用】這一類錯誤;額度、網路、codex 崩潰照原路徑走 RATE_LIMITED/FAILED,
 # 絕不被退回機制吞掉(否則「複查沒發生」會被偽裝成「用舊模型複查過了」)。
-# critical 的退路刻意用 astra 而不是 5.6: astra/low 是 critical 在 2026-09-23 之前的現行模型,
-# 也是實測中唯一抓到「契約新欄位 × 舊生產者 × 部署順序」這類跨版本時序缺陷的(B6,見 header),
-# 只需 client 0.153.0。退路是「新模型用不了時的次佳選擇」,不是「最便宜的選擇」。
-CRIT_LEGACY_MODEL="gpt-6-astra";   CRIT_LEGACY_EFFORT="low"
-REQ_LEGACY_MODEL="gpt-5.6-terra";  REQ_LEGACY_EFFORT="high"
+# 2026-10-05 使用者裁定: critical/required/plan 的退路一律 gpt-6-luna/max(只需 client 0.155.0)。
+# optional 的主模型本身就是 luna/max,退到自己等於沒有退路,所以維持 gpt-5.6-luna/max。
+# (被取代的舊安排: critical 退 astra/low——09-07 實測唯一抓到跨版本時序缺陷 B6 的檔位;
+#  required 退 5.6-terra/high;plan 退 5.6-sol 同 effort。)
+CRIT_LEGACY_MODEL="gpt-6-luna";    CRIT_LEGACY_EFFORT="max"
+REQ_LEGACY_MODEL="gpt-6-luna";     REQ_LEGACY_EFFORT="max"
 LOW_LEGACY_MODEL="gpt-5.6-luna";   LOW_LEGACY_EFFORT="max"
-PLAN_LEGACY_MODEL="gpt-5.6-sol"    # 舊世代旗艦,client 0.144 即可;effort 沿用 plan_effort_for 的值
+PLAN_LEGACY_MODEL="gpt-6-luna";    PLAN_LEGACY_EFFORT="max"   # 不再沿用 plan_effort_for 的值
 # 計畫文件的 effort: low 起跳,因為 09-07 實測 astra/low 已經 8/8,再往上買到的是推理深度
 # 而不是覆蓋率;計畫文件量少、astra 單價高,預設不必拉到頂,嚴重度高才加深。
 plan_effort_for() {
@@ -142,8 +149,10 @@ plan_effort_for() {
 
 # 各模型在 Codex 目錄公布的最低 client 版本(2026-09-22 對線上目錄的實測值;
 # 0.154 被拒、0.155 通過)。未列出的模型回 0.0.0 = 不做前置判斷,交給執行期退回兜底。
+# gpt-6.1-sol: 2026-10-05 實測 0.156.1 的目錄沒有它、0.160.0 有(0.157~0.159 未測,取保守值)。
 min_client_for() {
   case "$1" in
+    gpt-6.1-sol)          echo "0.160.0" ;;
     gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
     gpt-6-astra)          echo "0.153.0" ;;
     gpt-5.6-*)            echo "0.144.0" ;;
@@ -585,7 +594,7 @@ esac
 # 警告照常印出——呼叫端漏傳嚴重度仍然是該被看見的呼叫端錯誤。
 if [ "$DOC_MODE" -eq 1 ] && [ "$KIND" = "plan" ]; then
   EFFORT="$(plan_effort_for "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')")"
-  MODEL="$PLAN_MODEL"; LEGACY_MODEL="$PLAN_LEGACY_MODEL"; LEGACY_EFFORT="$EFFORT"
+  MODEL="$PLAN_MODEL"; LEGACY_MODEL="$PLAN_LEGACY_MODEL"; LEGACY_EFFORT="$PLAN_LEGACY_EFFORT"
 fi
 USED_LEGACY=0   # 本次諮詢是否已改用舊模型(前置檢查或執行期退回);退回最多一次
 

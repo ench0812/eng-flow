@@ -54,17 +54,18 @@ if ! grep -qE '^##[[:space:]]*安全與可逆性聲明' "$QUESTION" 2>/dev/null;
   exit 2
 fi
 
-# 映射與退路和 codex-review.sh 同一套(2026-09-23 使用者裁定;依據見該檔 header)。
+# 映射與退路和 codex-review.sh 同一套(2026-10-05 使用者裁定;依據見該檔 header)。
 # 退路 = 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型。
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
-  critical)         MODEL="gpt-6-sol";    EFFORT="high";   LEGACY_MODEL="gpt-6-astra";   LEGACY_EFFORT="low" ;;
-  required)         MODEL="gpt-6-sol";    EFFORT="medium"; LEGACY_MODEL="gpt-5.6-terra"; LEGACY_EFFORT="high" ;;
+  critical)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="max" ;;
+  required)         MODEL="gpt-6.1-sol";  EFFORT="low";    LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="max" ;;
   optional|nit|fyi) MODEL="gpt-6-luna";   EFFORT="max";    LEGACY_MODEL="gpt-5.6-luna";  LEGACY_EFFORT="max" ;;
   *) echo "[codex-decide] 警告: 未知 severity '$SEVERITY',用 required 檔位。" >&2
-     MODEL="gpt-6-sol"; EFFORT="medium"; LEGACY_MODEL="gpt-5.6-terra"; LEGACY_EFFORT="high" ;;
+     MODEL="gpt-6.1-sol"; EFFORT="low"; LEGACY_MODEL="gpt-6-luna"; LEGACY_EFFORT="max" ;;
 esac
 min_client_for() {
   case "$1" in
+    gpt-6.1-sol)          echo "0.160.0" ;;
     gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
     gpt-6-astra)          echo "0.153.0" ;;
     gpt-5.6-*)            echo "0.144.0" ;;
