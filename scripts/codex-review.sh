@@ -93,7 +93,9 @@
 #
 # 前置: codex client >= 0.160.0(gpt-6.1-sol,critical/required 用)且帳號已 rollout 該模型;
 #        optional 與各退路的 gpt-6-luna 要 >= 0.155.0,plan 的 gpt-6-astra 要 >= 0.153.0。
-#        版本不足不會失敗,會退到各檔位的退路(機制見映射表下方)。【模型目錄依 client 版本過濾】:
+#        主模型版本不足會退到各檔位的退路(機制見映射表下方),但退路本身也有門檻:
+#        critical/required/plan 的退路 gpt-6-luna 要 0.155.0,所以【實際最低支援版本是 0.155.0】,
+#        低於它這三檔會在退路被拒而 FAILED(退回只做一次)。【模型目錄依 client 版本過濾】:
 #        舊 client 的 models_cache.json 裡沒有某模型,不代表帳號沒有它(2026-10-05 實測)。
 #        判別「有沒有某模型權限」最省的方法: 一次極小呼叫
 #          printf 'reply OK' | codex exec -m gpt-6.1-sol --sandbox read-only --skip-git-repo-check -

@@ -56,6 +56,7 @@ fi
 
 # 映射與退路和 codex-review.sh 同一套(2026-10-05 使用者裁定;依據見該檔 header)。
 # 退路 = 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型。
+# 退路 gpt-6-luna 本身要 client 0.155.0:低於它時退了也會被拒,結果是 FAILED exit 1(停下交使用者)。
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
   critical)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="max" ;;
   required)         MODEL="gpt-6.1-sol";  EFFORT="low";    LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="max" ;;
