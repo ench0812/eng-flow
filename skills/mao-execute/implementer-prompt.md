@@ -23,7 +23,8 @@ You have no channel to ask questions mid-task. If requirements, approach, or dep
 5. Report back
 
 Work from: [directory]
-While working: if something unexpected changes what the task should do, return `NEEDS_CONTEXT` or `DONE_WITH_CONCERNS` instead of guessing.
+While working: if something unexpected changes what the task should do, return `NEEDS_CONTEXT` or `DONE_WITH_CONCERNS` instead of guessing. Otherwise keep working until every part of the task is done — returning after one part to ask whether to continue leaves the rest undone, because nobody can answer you mid-task.
+When the task is done and its checks pass, report. Beyond the tests and steps this prompt asks for, don't add features, tests, files, docs or refactors, and don't start your own extra review or hardening rounds or launch reviewer sub-agents — spec review and code review run after you. If you think something extra would help, put it in `concerns`.
 
 ## Code Organization
 - Follow file structure from the plan
@@ -35,7 +36,7 @@ While working: if something unexpected changes what the task should do, return `
 It is always OK to say "this is too hard for me." STOP and escalate when:
 - Task requires architectural decisions with multiple valid approaches
 - You need context beyond what was provided
-- You feel uncertain about correctness
+- You are uncertain about correctness and the tests you can run cannot settle it (run them first — uncertainty a test can resolve is not a reason to stop)
 - Task involves restructuring the plan didn't anticipate
 
 ## Report Format (schema: implementerStatus)

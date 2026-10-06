@@ -41,6 +41,6 @@ Also check:
 
 ## Report Format (schema: reviewVerdict)
 Return an object matching:
-- `verdict`: APPROVE | REQUEST_CHANGES
+- `verdict`: APPROVE | REQUEST_CHANGES — REQUEST_CHANGES only when at least one issue is Critical or Required
 - `strengths`: string (what's done well)
-- `issues`: [{ severity: Critical|Required|Optional|Nit, file, line, description }]
+- `issues`: [{ severity: Critical|Required|Optional|Nit, file, line, description }] — every issue you found, including low-severity ones and ones you are unsure about (say so in `description`). Label severity instead of leaving a finding out — apart from formatting a linter would catch, the DON'T list above limits what blocks the merge, not what gets reported, and the orchestrator triages the list. A non-empty list with verdict APPROVE is normal.
