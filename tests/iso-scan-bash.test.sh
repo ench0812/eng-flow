@@ -45,7 +45,10 @@ check "reset --soft"               "git reset --soft HEAD~1" allow
 check "clean -fd"                  "git clean -fd" ask
 check "clean -f via -c cfg"        "git -c core.autocrlf=false clean -fd" ask
 check "clean -n dry run"           "git clean -n" allow
-check "branch -D"                  "git branch -D foo" ask
+check "branch -D (not gated)"      "git branch -D foo" allow
+check "worktree cleanup + branch -D" "git worktree remove ../wt && git branch -D feat" allow
+check "branch -D + reset --hard"   "git branch -D feat && git reset --hard" ask
+check "branch -D + no-verify push" "git branch -D feat && git push --no-verify" deny
 check "branch -d safe"             "git branch -d foo" allow
 check "checkout dot"               "git checkout ." ask
 check "checkout -- dot"            "git checkout -- ." ask

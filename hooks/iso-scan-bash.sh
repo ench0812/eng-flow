@@ -42,9 +42,11 @@ if printf '%s' "$cmd" | grep -qE '(^|[[:space:]])git[[:space:]]+([^&|;]*[[:space
   ask "[ISO 27001 A.8.32] 'git clean -f' (or combined flags like -fd/-fdx) permanently deletes untracked files. Confirm this is intended before proceeding."
 fi
 
-if printf '%s' "$cmd" | grep -qE '(^|[[:space:]])git[[:space:]]+([^&|;]*[[:space:]])?branch[^&|;]*(^|[[:space:]])-D([[:space:]]|$)'; then
-  ask "[ISO 27001 A.8.32] 'git branch -D' force-deletes a branch, discarding unmerged commits. Confirm this is intended before proceeding."
-fi
+# 'git branch -D' deliberately NOT gated (removed 2026-10-07, user decision after the rule ran stably).
+# It is reversible with one command: git prints the deleted tip ("Deleted branch x (was a96ec99)") and the
+# reflog keeps it, so `git branch x a96ec99` restores it. It is also routine: after a squash merge `-d`
+# always refuses, so every worktree cleanup needs `-D`, and an ask on a routine step trains people to
+# click through the asks above, which guard work that has no other copy.
 
 if printf '%s' "$cmd" | grep -qE '(^|[[:space:]])git[[:space:]]+([^&|;]*[[:space:]])?(checkout|restore)[[:space:]]+(--[[:space:]]+)?\.([[:space:]]|$)'; then
   ask "[ISO 27001 A.8.32] Reverting the whole working tree discards uncommitted local changes. Confirm this is intended before proceeding."
