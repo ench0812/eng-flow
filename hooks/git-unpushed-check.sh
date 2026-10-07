@@ -206,10 +206,46 @@ EOF
   done < "$ROOTS_FILE"
 fi
 
+# 共用分支（2026-10-07）：推送目標若是這些分支，維持原本最嚴的授權條件（本 session 寫入
+# 證據＋最多 3 筆）；其餘視為 feature 分支，目的地明確就照推，不再停下來問。
+# 判定只看名稱與遠端預設分支，不打 API——同本檔「不連線」的成本前提。
+# 遠端預設分支多問一次 git，但只在已確定要示警的 repo 上跑，乾淨路徑不受影響。
+is_shared_branch() {  # is_shared_branch <top> <remote> <branch>
+  case "$3" in
+    main|master|develop|development|dev|trunk|staging|production|prod|gh-pages|release|release/*|release-*) return 0 ;;
+  esac
+  # 讀完整 symbolic ref、去掉完整的 refs/remotes/<remote>/ 前綴（codex 第三輪 Required）：
+  # 短名稱用 ${d#*/} 只去掉第一段，遠端名稱含 `/` 時會截錯，共用的預設分支就被當成 feature。
+  local d
+  d="$(git -C "$1" symbolic-ref -q "refs/remotes/$2/HEAD" 2>/dev/null)"
+  case "$d" in "refs/remotes/$2/"*) [ "${d#"refs/remotes/$2/"}" = "$3" ] && return 0 ;; esac
+  return 1
+}
+# 推送指令一律固定遠端＋完整目的 refspec（codex 2026-10-07 Required）：裸 `git push` 的目的地
+# 會被 remote.<r>.push、branch.<b>.pushRemote、push.default 改掉——例如 remote.origin.push=
+# HEAD:refs/heads/main 會讓追蹤 feature 上游的分支直接推進 main，繞過共用分支的授權條件。
+# 參數用 printf %q 跳脫：分支名稱可以合法地含 `;` 等字元（git check-ref-format 接受 feat/x;echo），
+# 執行者照字面貼上就會多跑一個指令。另外 safe_ref 先把這類名稱擋在 auto 桶外。
+mk_push_cmd() {  # mk_push_cmd <top> <remote> <branch> [u]
+  # --no-follow-tags：push.followTags=true 的 repo 會順帶發布 HEAD 可達的 annotated tag，
+  # 那不在「推這個分支」的授權範圍內（codex 第四輪 Optional）。
+  printf 'git -C %q push --no-follow-tags%s %q %q' "$1" "${4:+ -u}" "$2" "HEAD:refs/heads/$3"
+}
+safe_ref() {  # safe_ref <name>...：全部只含保守字元集才回 0
+  local n
+  for n in "$@"; do
+    case "$n" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  done
+  return 0
+}
+NOTE_UNSAFE="（分支或遠端名稱含特殊字元，不提供自動推送指令）"
+# feature 分支沒有寫入證據時附的說明（不再因此轉 ask，見上方 is_shared_branch）。
+NOTE_NO_WRITE="（本 session 沒有寫入證據；推送目標是 feature 分支，依 2026-10-07 使用者裁定不必確認 commit 歸屬）"
+
 # --- 逐 repo 判定 ---
 findings=""
-auto_findings=""   # 有上游且 fast-forward：例行推送，不需要逐一問人
-ask_findings=""    # 無上游、或落後遠端：要人決定
+auto_findings=""   # fast-forward 且目的地明確：照列出的推送指令推，不需要逐一問人
+ask_findings=""    # 目的地不明確、落後遠端、或推共用分支但授權條件不足：要人決定
 # 必須用 while read 逐行讀，不能用 `for x in $(...)`：後者會依空白斷詞，
 # 路徑含空格的 repo（Windows 上很常見，例如 D:/My Projects/foo）會被切成碎片，
 # 於是該 repo 永遠檢查不到——正是本 hook 要防的那種靜默漏檢。
@@ -233,17 +269,70 @@ while IFS= read -r top; do
     case "$ahead"  in ''|*[!0-9]*) ahead=0 ;; esac
     case "$behind" in ''|*[!0-9]*) behind=0 ;; esac
     [ "$ahead" -gt 0 ] || continue
+    push_cmd=""; pr_remote=""; pr_branch=""; pr_u=""
+    cmp_ref='@{u}'   # 列 commit 用的比較基準；用 ref 本身，不用顯示用的短名稱
     upstream="$(git -C "$top" rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '<upstream>')"
-    if [ "$behind" -gt 0 ]; then
+    branch="$(git -C "$top" branch --show-current 2>/dev/null)"
+    # 遠端與上游分支要從分支設定讀，不可從 "origin/main" 這個字串用第一個 `/` 拆（codex 第二輪
+    # Required）：遠端名稱本身可以含 `/`，`team/origin` 與 `team` 可以同時存在，拆錯就會推到
+    # 另一個 repository。讀不到、或上游是本地分支（remote 為 "."），一律當成不明確。
+    urem="$(git -C "$top" config --get "branch.$branch.remote" 2>/dev/null)"
+    umerge="$(git -C "$top" config --get "branch.$branch.merge" 2>/dev/null)"
+    ubranch="${umerge#refs/heads/}"
+    if [ -z "$branch" ] || [ -z "$urem" ] || [ "$urem" = . ] || [ -z "$umerge" ] || [ "$ubranch" = "$umerge" ]; then
+      urem='<upstream>'; ubranch='<upstream>'; upstream='<upstream>'
+    fi
+    ntop_chk="${top//\\//}"
+    has_write=0; case "$writable" in *"|$ntop_chk|"*) has_write=1 ;; esac
+    if [ -n "$branch" ] && [ "$upstream" != '<upstream>' ] && [ "$branch" != "$ubranch" ]; then
+      # 【上游名稱與本地分支不同】(2026-10-07): `git worktree add -b feat/x origin/main` 或
+      # `git checkout -b feat/x origin/main` 會自動把起點設成上游，於是 feat/x 的上游是
+      # origin/main。這不代表要推到 main——目的地是遠端同名的 feat/x。舊版把它當成一般的
+      # 「領先上游」並指示「推上去」：裸打 `git push` 在 push.default=simple 下會被 git 拒絕，
+      # 但 push.default=upstream 的 repo 會直接推進 main。所以這裡一律給出明確的推送指令。
+      if is_shared_branch "$top" "$urem" "$branch"; then
+        bucket=ask
+        reason="分支 $branch 的上游是 $upstream（名稱不同），而 $branch 本身是共用分支名稱——推去哪要使用者決定"
+      elif git -C "$top" rev-parse -q --verify "refs/remotes/$urem/$branch" >/dev/null 2>&1; then
+        # 遠端已有同名分支：快轉與否要對它判斷，不是對起點分支。用完整 ref——短名稱
+        # "origin/feat/x" 在本地另有同名分支時會解析到本地分支（codex 第三輪 Optional）。
+        cmp_ref="refs/remotes/$urem/$branch"
+        lr2="$(git -C "$top" rev-list --left-right --count "$cmp_ref...HEAD" 2>/dev/null)"
+        behind="${lr2%%[	 ]*}"; ahead="${lr2##*[	 ]}"
+        case "$ahead"  in ''|*[!0-9]*) ahead=0 ;; esac
+        case "$behind" in ''|*[!0-9]*) behind=0 ;; esac
+        [ "$ahead" -gt 0 ] || continue   # 遠端同名分支已涵蓋 HEAD，沒有東西會遺失
+        upstream="$urem/$branch"
+        if [ "$behind" -gt 0 ]; then
+          bucket=ask
+          reason="領先 $upstream $ahead 筆未推送，但也落後 $behind 筆（非 fast-forward，要先整合）"
+        else
+          bucket=auto
+          reason="feature 分支 $branch 領先遠端同名分支 $upstream $ahead 筆未推送"
+          pr_remote="$urem"; pr_branch="$branch"; pr_u=u
+        fi
+      else
+        bucket=auto
+        reason="feature 分支 $branch 從 $upstream 切出、遠端還沒有同名分支，領先 $ahead 筆未推送"
+        pr_remote="$urem"; pr_branch="$branch"; pr_u=u
+      fi
+      [ "$bucket" = auto ] && [ "$has_write" = 0 ] && reason="$reason$NOTE_NO_WRITE"
+    elif [ "$behind" -gt 0 ]; then
       reason="領先 $upstream $ahead 筆未推送，但也落後 $behind 筆（非 fast-forward，要先整合）"
       bucket=ask
+    elif [ "$upstream" != '<upstream>' ] && ! is_shared_branch "$top" "$urem" "$ubranch"; then
+      # 已用 -u 推過的 feature 分支：目的地就是它的上游，快轉，照推。
+      bucket=auto
+      reason="feature 分支 $ubranch 領先 $upstream $ahead 筆未推送"
+      pr_remote="$urem"; pr_branch="$ubranch"; pr_u=""
+      [ "$has_write" = 0 ] && reason="$reason$NOTE_NO_WRITE"
     else
+      pr_remote="$urem"; pr_branch="$ubranch"; pr_u=""
       reason="領先 $upstream $ahead 筆未推送"
       # 【auto 桶要求本 session 有寫入證據】(複查抓到): 範圍收集刻意寬鬆（連 Read 過的
       # repo 都納入，多報方向安全），但【授權】不能跟著寬鬆——push 是這條路徑上唯一
       # 不可逆的動作。只讀過就自動推，等於把使用者自己留在那個 repo 的 WIP commit
       # 推出去，而那筆 commit 根本不是這次工作產生的。
-      ntop_chk="${top//\\//}"
       case "$writable" in
         *"|$ntop_chk|"*)
           # 【清單截斷就不能授權】(codex 第三輪抓到): 下面只列最近 3 筆，而指示要執行者
@@ -263,6 +352,7 @@ while IFS= read -r top; do
     fi
   else
     bucket=ask
+    push_cmd=""; pr_remote=""; pr_branch=""; pr_u=""; cmp_ref=""
     # 沒有上游追蹤。空 repo（尚無 commit）不算，那沒有東西會遺失。
     git -C "$top" rev-parse HEAD >/dev/null 2>&1 || continue
     upstream=""
@@ -276,6 +366,31 @@ while IFS= read -r top; do
       reason="分支 $branch 沒有上游追蹤（HEAD 已被某個 remote-tracking ref 涵蓋，尚可確認有備份）"
     else
       reason="分支 $branch 沒有上游追蹤，且 HEAD 不在任何 remote-tracking ref 內（無遠端備份）"
+      # 【目的地其實明確的情況】(2026-10-07): 只有一個遠端、在具名的 feature 分支上、遠端還沒有
+      # 同名分支——推去哪只有一種合理答案，就是 `push -u <唯一遠端> <分支>`。沒有遠端、多個遠端、
+      # detached HEAD、共用分支名稱，或遠端已有同名分支（要先判斷快轉）都維持 ask。
+      remotes="$(git -C "$top" remote 2>/dev/null)"; remotes="${remotes//$'\r'/}"
+      case "$remotes" in
+        ''|*$'\n'*) ;;   # 零個或多個遠端
+        *)
+          if [ "$branch" != "<detached>" ] && ! is_shared_branch "$top" "$remotes" "$branch" \
+             && ! git -C "$top" rev-parse -q --verify "refs/remotes/$remotes/$branch" >/dev/null 2>&1; then
+            bucket=auto
+            reason="feature 分支 $branch 沒有上游追蹤、尚無遠端備份，唯一的遠端是 $remotes"
+            pr_remote="$remotes"; pr_branch="$branch"; pr_u=u
+            case "$writable" in *"|${top//\\//}|"*) ;; *) reason="$reason$NOTE_NO_WRITE" ;; esac
+          fi ;;
+      esac
+    fi
+  fi
+  # 推送指令在這裡統一組出：固定遠端＋完整 refspec，參數跳脫；名稱不安全就不給指令、轉 ask。
+  if [ "$bucket" = auto ]; then
+    if [ "$pr_remote" = '<upstream>' ]; then
+      bucket=ask; reason="$reason（無法從分支設定確認遠端與上游分支，不提供自動推送指令）"
+    elif safe_ref "$pr_remote" "$pr_branch"; then
+      push_cmd="$(mk_push_cmd "$top" "$pr_remote" "$pr_branch" "$pr_u")"
+    else
+      bucket=ask; reason="$reason$NOTE_UNSAFE"
     fi
   fi
   head_sha="$(git -C "$top" rev-parse HEAD 2>/dev/null)" || continue
@@ -293,7 +408,7 @@ while IFS= read -r top; do
   # commit 歸屬這種語意判斷留給執行者。往 hook 裡再堆推斷（比對 session 起始時間、
   # 配對 tool_result 確認寫入成功）只會擴大誤判面，而誤判的代價是不可逆的對外推送。
   subjects="$(git -C "$top" log --format='      %h %ad %s' --date=relative \
-                ${upstream:+"$upstream"..}HEAD 2>/dev/null | head -3)"
+                ${cmp_ref:+"$cmp_ref"..}HEAD 2>/dev/null | head -3)"
   # 用 wc -l 不用 grep -c：工作目錄乾淨時 grep 會印 0 但以 status 1 結束，
   # 後面的 `|| echo 0` 於是再補一個 0，dirty 變成兩行的 "0\n0"，警告裡就會
   # 出現異常的數字。wc 永遠 exit 0。
@@ -303,6 +418,9 @@ while IFS= read -r top; do
   - $top
       $reason；未提交變更 $dirty 筆
 $subjects"
+  # auto 桶附上確切的推送指令：上游名稱可能與分支不同（見上方），讓執行者自己組指令就有推錯目標的機會。
+  [ "$bucket" = auto ] && [ -n "$push_cmd" ] && entry="$entry
+      推送指令：$push_cmd"
   # 分兩桶輸出。理由是「該不該停下來問人」在這兩類之間差很多，混在一起講會讓
   # 真正需要決定的那幾筆被例行項目淹沒——同樣是「範圍不對的警告會被忽略」那條。
   if [ "$bucket" = auto ]; then auto_findings="$auto_findings$entry"
@@ -328,18 +446,22 @@ EOF
     additionalContext: (
       "[git-guard] 偵測到已 commit 但尚未推送到遠端的工作。\n\n" +
       (if ($auto | length) > 0 then
-        "【可自行處理，不需要開一輪確認】有上游、fast-forward、且本 session 寫入過：" + $auto + "\n\n" +
-        "  推之前先看一眼上面列出的 commit 主旨與時間：確認它們是【本 session 做的】。\n" +
-        "  這一步不能省——hook 只能證明「這個 repo 被本 session 寫過」，證明不了「這些\n" +
-        "  未推 commit 是本次工作產生的」。repo 裡原本就有的 WIP 會長得一模一樣。\n" +
-        "  確認是本次的 → 推上去，用一兩句回報推了什麼。\n" +
-        "  認不出來、或混著更早的 commit → 別推，列給使用者決定。\n" +
+        "【可自行處理，不需要開一輪確認】fast-forward、目的地明確：" + $auto + "\n\n" +
+        "  一律照每筆列出的「推送指令」推，不要改打裸的 `git push`——上游名稱可能與分支不同\n" +
+        "  （feature 分支的上游常是 origin/main），裸指令有推進錯誤分支的機會。\n" +
+        "  推送目標是 feature 分支 → 直接推（2026-10-07 使用者裁定，不必確認 commit 歸屬），\n" +
+        "  用一兩句回報推了什麼；需要的話接著開 PR。\n" +
+        "  推送目標是共用分支（main 等）→ 先看一眼上面列出的 commit 主旨與時間，確認是\n" +
+        "  【本 session 做的】再推：hook 只能證明「這個 repo 被本 session 寫過」，證明不了\n" +
+        "  「這些 commit 是本次工作產生的」。認不出來、或混著更早的 commit → 別推，列給使用者。\n" +
         "  push 被拒或出現非預期輸出 → 停下來照實回報，不要重試或改用 force。\n\n"
        else "" end) +
       (if ($ask | length) > 0 then
-        "【要你先問使用者】沒有上游追蹤，或落後遠端（非 fast-forward）：" + $ask + "\n\n" +
-        "  這幾筆不要自行推送。沒有上游代表推去哪並不明確；落後遠端代表要先整合，\n" +
-        "  而整合方式（rebase／merge）是使用者的決定。列出來並提議處置。\n\n"
+        "【要你先問使用者】目的地不明確、落後遠端（非 fast-forward），或推共用分支但授權條件不足：" + $ask + "\n\n" +
+        "  這幾筆不要自行推送。目的地不明確（沒有遠端、多個遠端、detached HEAD、共用分支名稱）\n" +
+        "  代表推去哪要人決定；落後遠端代表要先整合，而整合方式（rebase／merge）是使用者的決定；\n" +
+        "  推共用分支但本 session 沒寫入過或超過 3 筆，代表無法確認那些 commit 屬於本次工作。\n" +
+        "  列出來並提議處置。\n\n"
        else "" end) +
       "判定只比對本機的 remote-tracking ref、不做 fetch：一般過期只會多報；\n" +
       "但遠端若被 force-push 或刪除，本檢查會漏報（已知盲點，非全稱保證）。\n" +

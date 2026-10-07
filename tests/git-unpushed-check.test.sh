@@ -369,6 +369,158 @@ n_tmp="$(count_rp 0 "$SANDBOX" s_perf_tmp "$TR_TMPREPO")"
   && ok "臨時目錄 repo 的 20 個檔只問 git 一次（實得 $n_tmp）" \
   || ng "臨時目錄 repo 的 20 個檔只問 git 一次" "rev-parse 次數 ${n_tmp:-?}"
 
+echo "== feature 分支：目的地明確就照推（2026-10-07）=="
+# 使用者裁定：推送目標是 feature 分支時，沒有寫入證據也不必停下來問；共用分支維持原條件。
+# 所有案例都用「只讀過」的 transcript，因為放寬的正是這一條——有寫入證據的情況本來就會進 auto。
+FREMOTE="$SANDBOX/feat-remote.git"; FWORK="$SANDBOX/feat-work"
+git init -q --bare "$FREMOTE"; git init -q -b main "$FWORK"
+echo s > "$FWORK/s.txt"; git_q "$FWORK" add s.txt; git_q "$FWORK" commit -qm seed
+git_q "$FWORK" remote add origin "$FREMOTE"; git_q "$FWORK" push -q -u origin main
+MAIN_SHA="$(git -C "$FREMOTE" rev-parse refs/heads/main)"
+fire_ro(){ # fire_ro <repo> <session>：transcript 只 Read 過該 repo 的檔，cwd 不是 repo
+  local tr="$SANDBOX/tr_ro_$2.jsonl"
+  jq -cn --arg c "$SANDBOX" --arg f "$1/s.txt" \
+    '{cwd:$c, message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f}}]}}' > "$tr"
+  fire_tr "$SANDBOX" "$2" "$tr"
+}
+in_auto(){ # in_auto <output> <repo>：repo 是否出現在 auto 段（ask 段之前）
+  local a="${1%%要你先問使用者*}"; case "$a" in *"$(basename "$2")"*) return 0 ;; esac; return 1
+}
+
+# (1) 從 origin/main 切出的 feature 分支，上游被 git 自動設成 origin/main（wt-228 的實際形狀）
+git_q "$FWORK" checkout -q -b feat/228-icons origin/main
+[ "$(git -C "$FWORK" rev-parse --abbrev-ref '@{u}')" = origin/main ] \
+  && ok "前提：feature 分支的上游是 origin/main" || ng "前提：feature 分支的上游是 origin/main" "fixture 形狀不對，以下斷言無鑑別力"
+for i in 1 2; do echo "f$i" > "$FWORK/f$i.txt"; git_q "$FWORK" add "f$i.txt"; git_q "$FWORK" commit -qm "feat commit $i"; done
+out_f="$(fire_ro "$FWORK" s_feat_new)"
+in_auto "$out_f" "$FWORK" && ok "上游是 origin/main 的 feature 分支（只讀過）→ auto 桶" || ng "上游是 origin/main 的 feature 分支（只讀過）→ auto 桶" "仍落在 ask 桶"
+case "$out_f" in *"push --no-follow-tags -u origin HEAD:refs/heads/feat/228-icons"*) ok "給出推到同名遠端分支的確切指令（完整 refspec）" ;; *) ng "給出推到同名遠端分支的確切指令（完整 refspec）" "沒有 push -u origin HEAD:refs/heads/feat/228-icons" ;; esac
+case "$out_f" in *"不必確認 commit 歸屬"*) ok "沒有寫入證據改成附註說明" ;; *) ng "沒有寫入證據改成附註說明" "缺少附註" ;; esac
+# 決定性的一條：真的執行 hook 給的指令，遠端 main 不得變動、feature 分支要建出來。
+cmd_f="$(printf '%s' "$out_f" | jq -r '.hookSpecificOutput.additionalContext' | sed -n 's/^ *推送指令：//p' | head -1)"
+eval "$cmd_f -q" 2>/dev/null
+[ "$(git -C "$FREMOTE" rev-parse refs/heads/main)" = "$MAIN_SHA" ] \
+  && ok "執行推送指令後遠端 main 未被改動" || ng "執行推送指令後遠端 main 未被改動" "main 被推進了"
+[ "$(git -C "$FREMOTE" rev-parse -q --verify refs/heads/feat/228-icons)" = "$(git -C "$FWORK" rev-parse HEAD)" ] \
+  && ok "執行推送指令後遠端有同名 feature 分支" || ng "執行推送指令後遠端有同名 feature 分支" "遠端沒有該分支或指向不對"
+silent "$FWORK" s_feat_after "推送後 → 靜默"
+
+# (2) 已用 -u 推過的 feature 分支又有新 commit → auto，指令是一般的 push
+echo f3 > "$FWORK/f3.txt"; git_q "$FWORK" add f3.txt; git_q "$FWORK" commit -qm "feat commit 3"
+out_f2="$(fire_ro "$FWORK" s_feat_tracked)"
+in_auto "$out_f2" "$FWORK" && ok "追蹤同名遠端的 feature 分支（只讀過）→ auto 桶" || ng "追蹤同名遠端的 feature 分支（只讀過）→ auto 桶" "仍落在 ask 桶"
+# (2b) codex Required：repo 自訂 remote.origin.push=HEAD:refs/heads/main 時，裸 `git push` 會推進 main。
+#      hook 給的指令必須帶完整目的 refspec，實際執行後 main 不得變動、feature 分支要前進。
+git_q "$FWORK" config remote.origin.push HEAD:refs/heads/main
+out_f2b="$(fire_ro "$FWORK" s_feat_pushcfg)"
+cmd_f2b="$(printf '%s' "$out_f2b" | jq -r '.hookSpecificOutput.additionalContext' | sed -n 's/^ *推送指令：//p' | head -1)"
+eval "$cmd_f2b -q" 2>/dev/null
+[ "$(git -C "$FREMOTE" rev-parse refs/heads/main)" = "$MAIN_SHA" ] \
+  && ok "自訂 remote.origin.push 指向 main 時，執行推送指令仍不動 main" || ng "自訂 remote.origin.push 指向 main 時，執行推送指令仍不動 main" "main 被推進了"
+[ "$(git -C "$FREMOTE" rev-parse refs/heads/feat/228-icons)" = "$(git -C "$FWORK" rev-parse HEAD)" ] \
+  && ok "自訂 remote.origin.push 時 feature 分支照常前進" || ng "自訂 remote.origin.push 時 feature 分支照常前進" "遠端 feature 分支沒前進"
+git_q "$FWORK" config --unset remote.origin.push
+echo f4 > "$FWORK/f4.txt"; git_q "$FWORK" add f4.txt; git_q "$FWORK" commit -qm "feat commit 4"
+
+# (3) feature 分支落後遠端同名分支（非 fast-forward）→ 仍要問
+FCLONE="$SANDBOX/feat-clone"; git clone -q "$FREMOTE" "$FCLONE" 2>/dev/null
+git_q "$FCLONE" checkout -q -B feat/228-icons origin/feat/228-icons 2>/dev/null
+echo r > "$FCLONE/r.txt"; git_q "$FCLONE" add r.txt; git_q "$FCLONE" commit -qm "remote side"; git_q "$FCLONE" push -q origin feat/228-icons
+git_q "$FWORK" fetch -q origin
+out_f3="$(fire_ro "$FWORK" s_feat_div)"
+in_auto "$out_f3" "$FWORK" && ng "feature 分支非 fast-forward 不得進 auto 桶" "誤入 auto" || ok "feature 分支非 fast-forward 不得進 auto 桶"
+case "$out_f3" in *"非 fast-forward"*) ok "訊息說明是非 fast-forward" ;; *) ng "訊息說明是非 fast-forward（feature）" "未說明" ;; esac
+
+# (3b) 上游仍是 origin/main（推的時候沒帶 -u），而遠端已有同名分支：快轉判斷必須對遠端同名分支做。
+#      上面的 (3) 走的是「上游就是同名分支」那條路徑，照不到這裡（2026-10-07 mutation 沒轉紅時發現）。
+git_q "$FWORK" checkout -q -b feat/no-u origin/main
+echo w1 > "$FWORK/w1.txt"; git_q "$FWORK" add w1.txt; git_q "$FWORK" commit -qm "no-u 1"
+git_q "$FWORK" push -q origin feat/no-u
+[ "$(git -C "$FWORK" rev-parse --abbrev-ref '@{u}')" = origin/main ] \
+  && ok "前提：推過但上游仍是 origin/main" || ng "前提：推過但上游仍是 origin/main" "fixture 形狀不對"
+silent "$FWORK" s_nou_covered "遠端同名分支已涵蓋 HEAD → 靜默"
+git_q "$FCLONE" fetch -q origin; git_q "$FCLONE" checkout -q -B feat/no-u origin/feat/no-u 2>/dev/null
+echo w2 > "$FCLONE/w2.txt"; git_q "$FCLONE" add w2.txt; git_q "$FCLONE" commit -qm "no-u remote side"; git_q "$FCLONE" push -q origin feat/no-u
+echo w3 > "$FWORK/w3.txt"; git_q "$FWORK" add w3.txt; git_q "$FWORK" commit -qm "no-u local side"
+git_q "$FWORK" fetch -q origin
+out_f3b="$(fire_ro "$FWORK" s_nou_div)"
+in_auto "$out_f3b" "$FWORK" && ng "上游為 origin/main、落後遠端同名分支 → 不得進 auto 桶" "誤入 auto" || ok "上游為 origin/main、落後遠端同名分支 → 不得進 auto 桶"
+
+# (4) 分支名稱是共用分支（release/*）、上游卻是 origin/main → 目的地不明確，要問
+git_q "$FWORK" checkout -q -b release/1.0 origin/main
+echo rel > "$FWORK/rel.txt"; git_q "$FWORK" add rel.txt; git_q "$FWORK" commit -qm "release prep"
+out_f4="$(fire_ro "$FWORK" s_feat_shared)"
+in_auto "$out_f4" "$FWORK" && ng "共用分支名稱不得進 auto 桶" "誤入 auto" || ok "共用分支名稱不得進 auto 桶"
+
+# (5) 沒有上游、只有一個遠端、feature 分支 → auto，指令帶 -u
+git_q "$FWORK" checkout -q --no-track -b feat/no-up origin/main
+echo nu > "$FWORK/nu.txt"; git_q "$FWORK" add nu.txt; git_q "$FWORK" commit -qm "no upstream feature"
+out_f5="$(fire_ro "$FWORK" s_feat_noup)"
+in_auto "$out_f5" "$FWORK" && ok "無上游＋單一遠端＋feature 分支 → auto 桶" || ng "無上游＋單一遠端＋feature 分支 → auto 桶" "仍落在 ask 桶"
+case "$out_f5" in *"push --no-follow-tags -u origin HEAD:refs/heads/feat/no-up"*) ok "無上游時給出 push -u 指令" ;; *) ng "無上游時給出 push -u 指令" "指令不對" ;; esac
+# (5b) codex Required：`feat/x;echo` 是合法分支名稱，照字面貼上指令會多跑一個指令 → 不得進 auto 桶
+git_q "$FWORK" checkout -q -b 'feat/x;echo' origin/main
+echo sc > "$FWORK/sc.txt"; git_q "$FWORK" add sc.txt; git_q "$FWORK" commit -qm "special char branch"
+out_f5b="$(fire_ro "$FWORK" s_feat_unsafe)"
+in_auto "$out_f5b" "$FWORK" && ng "分支名稱含特殊字元不得進 auto 桶" "誤入 auto" || ok "分支名稱含特殊字元不得進 auto 桶"
+case "$out_f5b" in *"推送指令："*) ng "分支名稱含特殊字元時不給推送指令" "仍給了指令" ;; *) ok "分支名稱含特殊字元時不給推送指令" ;; esac
+git_q "$FWORK" checkout -q feat/no-up
+
+# (5c) codex 第二輪 Required：遠端名稱可以含 `/`。`team` 與 `team/origin` 同時存在、分支追蹤
+#      team/origin/main 時，用第一個 `/` 拆上游會誤判成遠端 `team`，推到另一個 repository。
+#      `git remote add` 會拒絕建出這種並存（superset of existing remote），但直接寫 config 可以，
+#      所以 fixture 用 git config 建：先 add team/origin，再以 config 補 team 與分支的追蹤設定。
+TEAMR="$SANDBOX/team-remote.git"; git init -q --bare "$TEAMR"
+git_q "$FWORK" remote add team/origin "$FREMOTE"
+git_q "$FWORK" fetch -q team/origin
+git_q "$FWORK" config remote.team.url "$TEAMR"
+git_q "$FWORK" config remote.team.fetch '+refs/heads/*:refs/remotes/team/*'
+git_q "$FWORK" checkout -q --no-track -b feat/slash team/origin/main
+git_q "$FWORK" config branch.feat/slash.remote team/origin
+git_q "$FWORK" config branch.feat/slash.merge refs/heads/main
+echo sl > "$FWORK/sl.txt"; git_q "$FWORK" add sl.txt; git_q "$FWORK" commit -qm "slash remote"
+[ "$(git -C "$FWORK" rev-parse --abbrev-ref '@{u}' 2>/dev/null)" = team/origin/main ] \
+  && ok "前提：上游是 team/origin/main" || ng "前提：上游是 team/origin/main" "fixture 形狀不對"
+[ "$(git -C "$FWORK" config branch.feat/slash.remote)" = team/origin ] \
+  && ok "前提：分支的遠端是 team/origin" || ng "前提：分支的遠端是 team/origin" "fixture 形狀不對"
+out_f5c="$(fire_ro "$FWORK" s_feat_slash)"
+cmd_f5c="$(printf '%s' "$out_f5c" | jq -r '.hookSpecificOutput.additionalContext' | sed -n 's/^ *推送指令：//p' | head -1)"
+eval "$cmd_f5c -q" 2>/dev/null
+[ -z "$(git -C "$TEAMR" for-each-ref refs/heads)" ] \
+  && ok "含 / 的遠端：沒有推到名稱為其前綴的另一個遠端" || ng "含 / 的遠端：沒有推到名稱為其前綴的另一個遠端" "推到 team 了"
+[ "$(git -C "$FREMOTE" rev-parse -q --verify refs/heads/feat/slash)" = "$(git -C "$FWORK" rev-parse HEAD)" ] \
+  && ok "含 / 的遠端：推到正確的 repository" || ng "含 / 的遠端：推到正確的 repository" "目標 repository 沒有該分支"
+git_q "$FWORK" checkout -q feat/no-up
+# (5d) codex 第三輪 Required：含 `/` 的遠端，預設分支不在名稱清單上（integration）。
+#      短名稱 team/origin/integration 用 ${d#*/} 會截成 origin/integration，共用分支就被當成 feature。
+git_q "$FWORK" push -q team/origin HEAD:refs/heads/integration
+git_q "$FWORK" fetch -q team/origin
+git_q "$FWORK" symbolic-ref refs/remotes/team/origin/HEAD refs/remotes/team/origin/integration
+git_q "$FWORK" checkout -q --no-track -b integration refs/remotes/team/origin/integration
+git_q "$FWORK" config branch.integration.remote team/origin
+git_q "$FWORK" config branch.integration.merge refs/heads/integration
+echo ig > "$FWORK/ig.txt"; git_q "$FWORK" add ig.txt; git_q "$FWORK" commit -qm "integration local"
+out_f5d="$(fire_ro "$FWORK" s_feat_slash_default)"
+in_auto "$out_f5d" "$FWORK" && ng "含 / 的遠端的預設分支（integration）仍視為共用分支" "被當成 feature 自動推送" || ok "含 / 的遠端的預設分支（integration）仍視為共用分支"
+git_q "$FWORK" checkout -q feat/no-up
+git_q "$FWORK" config --remove-section remote.team; git_q "$FWORK" remote remove team/origin
+
+# (5e) codex 第三輪 Optional：本地另有名為 origin/feat/amb 的分支時，短名稱會解析到本地分支，
+#      ahead 算成 0 而整筆漏報。比較必須用完整的 refs/remotes/... ref。
+git_q "$FWORK" checkout -q -b feat/amb origin/main
+echo a1 > "$FWORK/a1.txt"; git_q "$FWORK" add a1.txt; git_q "$FWORK" commit -qm "amb 1"
+git_q "$FWORK" push -q origin feat/amb
+echo a2 > "$FWORK/a2.txt"; git_q "$FWORK" add a2.txt; git_q "$FWORK" commit -qm "amb 2"
+git_q "$FWORK" branch origin/feat/amb HEAD
+out_f5e="$(fire_ro "$FWORK" s_feat_amb)"
+in_auto "$out_f5e" "$FWORK" && ok "本地有同名短名稱分支時仍正確判定領先遠端" || ng "本地有同名短名稱分支時仍正確判定領先遠端" "漏報或誤判"
+git_q "$FWORK" checkout -q feat/no-up
+# (6) 同一個情況但有兩個遠端 → 推去哪不明確，要問
+git_q "$FWORK" remote add second "$FREMOTE"
+out_f6="$(fire_ro "$FWORK" s_feat_tworemotes)"
+in_auto "$out_f6" "$FWORK" && ng "無上游＋多個遠端不得進 auto 桶" "誤入 auto" || ok "無上游＋多個遠端不得進 auto 桶"
+git_q "$FWORK" remote remove second
+
 echo "== 非 repo / 異常輸入不得出錯 =="
 silent "$SANDBOX" s13 "非 git 目錄 → 靜默"
 silent "/no/such/path/at/all" s14 "不存在的路徑 → 靜默"
