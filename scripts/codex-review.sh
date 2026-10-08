@@ -26,18 +26,30 @@
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
 #   映射(嚴重度用語同 mao-review taxonomy;2026-10-05 使用者裁定 critical/required 改用
-#   gpt-6.1-sol、effort 各降一階,critical/required/plan 的退路一律 gpt-6-luna/max):
-#     critical          -> gpt-6.1-sol  / medium 退路 gpt-6-luna   / max
-#     required          -> gpt-6.1-sol  / low    退路 gpt-6-luna   / max
-#     optional/nit/fyi  -> gpt-6-luna   / max    退路 gpt-5.6-luna / max
+#   gpt-6.1-sol;2026-10-08 依實測調整 effort,見下方【2026-10-08 實測】):
+#     critical          -> gpt-6.1-sol  / medium 退路 gpt-6-luna   / high
+#     required          -> gpt-6.1-sol  / medium 退路 gpt-6-luna   / high
+#     optional/nit/fyi  -> gpt-6-luna   / high   退路 gpt-6-astra  / low(2026-10-08 gpt-5.6 全面退出)
 #     doc --kind plan   -> gpt-6-astra  / 依嚴重度 critical=high、required=medium、其餘=low
-#                          退路 gpt-6-luna / max(使用者裁定:astra 留給計畫階段補全面性)
+#                          退路 gpt-6-luna / high(使用者裁定:astra 留給計畫階段補全面性)
+#
+#   【2026-10-08 實測】植入 8 缺陷測資(C:/Users/markh/codex-effort-fixture),每格 3 次、評分表
+#   事先預登錄(數據在 C:/Users/markh/codex-effort-results/2026-10-08/,記憶
+#   codex-review-model-constraint-experiment):
+#     gpt-6.1-sol/medium  recall 中位數 8   未快取 25.8k  output 1.6k   64 秒
+#     gpt-6.1-sol/low                 7          13.6k         1.2k   51 秒  (最難的 B6 0/3 對 2/3)
+#     gpt-6-luna/max                  6          39.1k        16.5k  171 秒
+#     gpt-6-luna/high                 6          30.3k         3.6k   61 秒
+#   → required 由 low 升 medium(只多約 13 秒與 400 output,換回 B6 類;證據偏弱 p=0.24,取保守側);
+#     luna 一律 max→high(recall 相同、耗時 1/2.8、output 1/4.6,範圍不重疊)。
+#   同一輪也驗證:把讀檔指示改成「單一完成條件」或要求【已讀】附逐字原文,對 6.1-sol 無可辨別
+#   效果,所以 prompt 不動。luna 的「無重大遺漏」不等價於 sol(sol 12/12 次 ≥7、luna 9/9 次 ≤6.5)。
 #
 #   【2026-10-05 改用 gpt-6.1-sol 的依據】使用者裁定,不是本機實測的結果。官方(2026-09-29 DevDay)
 #   宣稱 6.1-sol 接近 astra 的能力、單價為 astra 的五分之一、cached input 比 6-sol 便宜一半。
 #   effort 各降一階(critical high→medium、required medium→low)同屬裁定;下方 8 缺陷測資
-#   尚未對 6.1-sol 重跑,所以下表的 recall 數字描述的是舊檔位,不代表現行檔位。
-#   --severity 未傳/未知 -> fallback gpt-6-luna / max(對齊最低一級:沒說嚴重度就不燒旗艦額度;
+#   當時尚未對 6.1-sol 重跑,所以下表的 recall 數字描述的是舊檔位(2026-10-08 已重跑,見上)。
+#   --severity 未傳/未知 -> fallback gpt-6-luna / high(對齊最低一級:沒說嚴重度就不燒旗艦額度;
 #                            腳本仍印警告要求呼叫端補傳,別靠 fallback 過日子)。
 #   「退路」= 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型,機制見映射表下方。
 #
@@ -115,9 +127,9 @@ set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
 CRIT_MODEL="gpt-6.1-sol";      CRIT_EFFORT="medium"     # critical
-REQ_MODEL="gpt-6.1-sol";       REQ_EFFORT="low"         # required
-LOW_MODEL="gpt-6-luna";        LOW_EFFORT="max"         # optional / nit / fyi
-FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="max"    # --severity 未傳/未知時的保底(對齊 optional)
+REQ_MODEL="gpt-6.1-sol";       REQ_EFFORT="medium"      # required(2026-10-08 由 low 升,見檔頭實測)
+LOW_MODEL="gpt-6-luna";        LOW_EFFORT="high"        # optional / nit / fyi(2026-10-08 由 max 降)
+FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="high"   # --severity 未傳/未知時的保底(對齊 optional)
 # 計畫文件(doc 模式 --kind plan)一律用 astra,不看嚴重度選模型——使用者 2026-09-23 裁定:
 # astra 留給計畫階段,輔助完善計畫的全面性。effort 仍隨嚴重度(見 plan_effort_for)。
 PLAN_MODEL="gpt-6-astra"
@@ -131,14 +143,17 @@ PLAN_MODEL="gpt-6-astra"
 # CODEX_HOME 裝錯了 home)。與其防每一種覆蓋方式,不如每次呼叫都自己檢查、不夠就退回。
 # 退回只發生在【模型不可用】這一類錯誤;額度、網路、codex 崩潰照原路徑走 RATE_LIMITED/FAILED,
 # 絕不被退回機制吞掉(否則「複查沒發生」會被偽裝成「用舊模型複查過了」)。
-# 2026-10-05 使用者裁定: critical/required/plan 的退路一律 gpt-6-luna/max(只需 client 0.155.0)。
-# optional 的主模型本身就是 luna/max,退到自己等於沒有退路,所以維持 gpt-5.6-luna/max。
+# 2026-10-05 使用者裁定: critical/required/plan 的退路一律 gpt-6-luna(只需 client 0.155.0);
+# 2026-10-08 依實測 effort 由 max 降為 high(見檔頭)。optional 的主模型本身就是 luna,退到自己
+# 等於沒有退路;同日使用者裁定 gpt-5.6 全面退出(最低 gpt-6),optional 改退 gpt-6-astra/low:
+# 退路是為「主模型因 client 版本或 rollout 不可用」而設,gpt-6-sol 與 luna 同需 client 0.155.0、
+# 會一起失效,astra 只需 0.153.0;astra/low 在 09-07 同一份測資是 8/8,且退路很少觸發。
 # (被取代的舊安排: critical 退 astra/low——09-07 實測唯一抓到跨版本時序缺陷 B6 的檔位;
 #  required 退 5.6-terra/high;plan 退 5.6-sol 同 effort。)
-CRIT_LEGACY_MODEL="gpt-6-luna";    CRIT_LEGACY_EFFORT="max"
-REQ_LEGACY_MODEL="gpt-6-luna";     REQ_LEGACY_EFFORT="max"
-LOW_LEGACY_MODEL="gpt-5.6-luna";   LOW_LEGACY_EFFORT="max"
-PLAN_LEGACY_MODEL="gpt-6-luna";    PLAN_LEGACY_EFFORT="max"   # 不再沿用 plan_effort_for 的值
+CRIT_LEGACY_MODEL="gpt-6-luna";    CRIT_LEGACY_EFFORT="high"
+REQ_LEGACY_MODEL="gpt-6-luna";     REQ_LEGACY_EFFORT="high"
+LOW_LEGACY_MODEL="gpt-6-astra";    LOW_LEGACY_EFFORT="low"
+PLAN_LEGACY_MODEL="gpt-6-luna";    PLAN_LEGACY_EFFORT="high"  # 不再沿用 plan_effort_for 的值
 # 計畫文件的 effort: low 起跳,因為 09-07 實測 astra/low 已經 8/8,再往上買到的是推理深度
 # 而不是覆蓋率;計畫文件量少、astra 單價高,預設不必拉到頂,嚴重度高才加深。
 plan_effort_for() {
@@ -157,7 +172,6 @@ min_client_for() {
     gpt-6.1-sol)          echo "0.160.0" ;;
     gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
     gpt-6-astra)          echo "0.153.0" ;;
-    gpt-5.6-*)            echo "0.144.0" ;;
     *)                    echo "0.0.0" ;;
   esac
 }
@@ -387,7 +401,9 @@ diff_delta_per_file() {  # $1=上一輪 diff 快照 $2=本輪 diff
 #        與那個阻礙無關,在正常 repo 位置一樣成立。)
 # 所以宣告裡三件事缺一不可: cwd 不是工作根、讀檔用絕對路徑、以及「存取被拒不等於沒有讀取權」。
 # 第三點是針對 (b) 那種錯誤歸因——它比讀不到本身更危險。
-PROMPT_POLICY_VERSION=3
+# v4(2026-10-08): 改送 -c features.memories=false。舊 session 的對話歷史可能已含 Memory 區塊
+# 與讀 ~/.codex/memories 的結果,resume 沿用它就等於旗標沒生效——升版讓 resume 退回 fresh。
+PROMPT_POLICY_VERSION=4
 
 access_note() {  # $1=工作根絕對路徑
   cat <<EOF
@@ -1052,17 +1068,23 @@ fi
 # 寫進 ~/.codex 的 session store。只有開啟 resume 才需要落地。
 EPHEMERAL_FLAG=""
 [ "$CODEX_REVIEW_RESUME" = "1" ] || EPHEMERAL_FLAG="--ephemeral"
+# 關掉 codex 的 memories(2026-10-08 實測): 使用者 config 開著 features.memories 時,每次都注入
+# 約 7.3k 字元的 Memory 區塊,而 gpt-6-luna 有 5/9 次因此去讀工作根以外的
+# ~/.codex/memories/MEMORY.md(sol 0/12)。複查不需要它;以非 ephemeral rollout 前後比對驗證
+# 這個旗標確實讓區塊消失(不是只看 config 被接受)。點狀覆寫,不用 --ignore-user-config——
+# 後者會一併丟掉 sandbox 修復依賴的 [windows] 設定。
+NO_MEMORIES_FLAG="features.memories=false"
 
 run_codex() {
 { { if [ "$SESSION_MODE" = "resume" ]; then
       printf '%s\n\n%s\n' "$RESUME_PROMPT" "$DELTA" \
         | "$CODEX_BIN" exec resume "$RESUME_ID" - --json -o "$LAST_FILE" \
-            -c sandbox_mode="read-only" $SKIP_GIT_FLAG \
+            -c sandbox_mode="read-only" $SKIP_GIT_FLAG -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT"
     else
       printf '%s\n' "$SEND_PAYLOAD" \
         | "$CODEX_BIN" exec --sandbox read-only --json -o "$LAST_FILE" $EPHEMERAL_FLAG $SKIP_GIT_FLAG \
-            --cd "$REPO_ROOT" \
+            --cd "$REPO_ROOT" -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT"
     fi
     echo "${PIPESTATUS[1]}" > "$RC_FILE"

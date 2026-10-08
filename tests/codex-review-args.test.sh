@@ -184,6 +184,9 @@ mk_stub 'printf "%s\n" "$@" > "'"$STUB"'/args.txt"; echo "無重大補充"'
 check_e2e "prompt 送達且回覆正常" 0 "無重大補充" "RATE_LIMITED"
 if grep -q "收斂問句" "$STUB/args.txt" 2>/dev/null; then pass=$((pass+1))
 else echo "FAIL [prompt 缺收斂問句指示]"; fail=$((fail+1)); fi
+# codex 的 memories 必須關掉(2026-10-08 實測: 注入 7.3k Memory 區塊、luna 會因此讀工作根以外的檔)
+if grep -qx "features.memories=false" "$STUB/args.txt" 2>/dev/null; then pass=$((pass+1))
+else echo "FAIL [exec 參數缺 -c features.memories=false]"; fail=$((fail+1)); fi
 
 # 收斂問句在場檢查: 有行首行 → 不印注意;缺 → 注意但仍完成(不是 FAILED,findings 仍有效)
 mk_stub 'printf "有一個發現\n收斂問句:無\n"; exit 0'
@@ -584,6 +587,7 @@ O_R="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"
 ok "resume: 走 resume 分支"          has "resume(11111111)" "$O_R"
 ok "resume: 用 exec resume 子指令"   has "^resume$" "$(cat "$ARGV")"
 ok "resume: 必帶 read-only sandbox"  has "^sandbox_mode=read-only$" "$(cat "$ARGV")"
+ok "resume: 必帶 memories off"       has "^features.memories=false$" "$(cat "$ARGV")"
 ok "resume: 送 delta 不送全文"       test "$(printf '%s' "$O_R" | sed -n 's/.*delta \([0-9][0-9]*\)\/\([0-9][0-9]*\) 字元.*/\1 \2/p' | awk '{print ($1<$2)?"y":"n"}')" = "y"
 
 # 去重與 resume 解耦的【真】命題: resume 開著時,相同內容仍要被擋
@@ -741,7 +745,7 @@ ok "退路/前置: 版本不足 → rc 0"                 test "$FB_RC" -eq 0
 ok "退路/前置: 版本不足 → 直接用舊模型、只問一次"  test "$FB_CALLS" = "$REQ_OLD"
 ok "退路/前置: 有印出改用舊模型的注意"          has "改用舊模型 $REQ_OLD" "$FB_OUT"
 ok "退路/前置: 完成行標出已退回"               has "已退回舊模型" "$FB_OUT"
-ok "退路/前置: 退路 effort 是 max"              has "模型=$REQ_OLD/max" "$FB_OUT"
+ok "退路/前置: 退路 effort 是 high"             has "模型=$REQ_OLD/high" "$FB_OUT"
 
 FB_REJECT="$REQ_NEW" fb_run required 0.160.0 reject-new
 ok "退路/執行期: 新模型被拒 → rc 0"             test "$FB_RC" -eq 0
@@ -751,7 +755,7 @@ ok "退路/執行期: 完成行標出已退回"             has "已退回舊模
 
 FB_REJECT="$CRIT_NEW" fb_run critical 0.160.0 reject-new
 ok "退路/critical 檔: 退到 critical 自己的舊模型" test "$FB_CALLS" = "$CRIT_NEW $CRIT_OLD"
-ok "退路/critical 檔: 退路 effort 是 max"        has "模型=$CRIT_OLD/max" "$FB_OUT"
+ok "退路/critical 檔: 退路 effort 是 high"       has "模型=$CRIT_OLD/high" "$FB_OUT"
 
 fb_run required 0.160.0 reject-all
 ok "退路/兩個都被拒: FAILED(rc 1)"              test "$FB_RC" -eq 1
@@ -781,6 +785,8 @@ ok "退路/正常: 完成行不得標退回"                 hasnt "已退回舊
 
 FB_REJECT="$LOW_NEW" fb_run optional 0.160.0 reject-new
 ok "退路/optional 檔: 退到 optional 自己的舊模型" test "$FB_CALLS" = "$LOW_NEW $LOW_OLD"
+# 主模型 high、退路 low,所以這行分辨得出「固定值」與「沿用主模型 effort」
+ok "退路/optional 檔: 退路 effort 是 low"       has "模型=$LOW_OLD/low" "$FB_OUT"
 
 # 計畫文件: 不論嚴重度都用 PLAN_MODEL,嚴重度只決定 effort;spec 仍走一般映射(對照)
 fb_run required 0.160.0 ok plan
@@ -794,8 +800,9 @@ fb_run required 0.160.0 ok spec
 ok "計畫/對照: spec 不受影響、走一般映射"         test "$FB_CALLS" = "$REQ_NEW"
 FB_REJECT="$PLAN_NEW" fb_run required 0.160.0 reject-new plan
 ok "計畫/退路: 計畫模型被拒 → 退到計畫專用舊模型" test "$FB_CALLS" = "$PLAN_NEW $PLAN_OLD"
-# 2026-10-05 裁定: 計畫的退路 effort 固定 max,不再沿用計畫 effort(這裡是 required → medium)
-ok "計畫/退路: 退路 effort 是 max、不沿用計畫 effort" has "模型=$PLAN_OLD/max" "$FB_OUT"
+# 計畫的退路 effort 固定(2026-10-05 裁定 max、2026-10-08 依實測改 high),不沿用計畫 effort
+# (這裡是 required → medium,所以 high 仍能分辨「固定值」與「沿用」)
+ok "計畫/退路: 退路 effort 是 high、不沿用計畫 effort" has "模型=$PLAN_OLD/high" "$FB_OUT"
 rm -rf "$FB"
 
 rm -rf "$STUB"

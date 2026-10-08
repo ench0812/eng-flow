@@ -54,22 +54,24 @@ if ! grep -qE '^##[[:space:]]*安全與可逆性聲明' "$QUESTION" 2>/dev/null;
   exit 2
 fi
 
-# 映射與退路和 codex-review.sh 同一套(2026-10-05 使用者裁定;依據見該檔 header)。
+# 映射與退路和 codex-review.sh 同一套(模型 2026-10-05 使用者裁定;effort 2026-10-08 依實測調整:
+# required low→medium、luna max→high。依據見該檔 header 的【2026-10-08 實測】)。
+# 同日使用者裁定 gpt-5.6 全面退出(最低 gpt-6):optional 退路改 gpt-6-astra/low。
 # 退路 = 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型。
-# 退路 gpt-6-luna 本身要 client 0.155.0:低於它時退了也會被拒,結果是 FAILED exit 1(停下交使用者)。
+# critical/required 的退路 gpt-6-luna 本身要 client 0.155.0(optional 的退路 astra 要 0.153.0):
+# 低於它時退了也會被拒,結果是 FAILED exit 1(停下交使用者)。
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
-  critical)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="max" ;;
-  required)         MODEL="gpt-6.1-sol";  EFFORT="low";    LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="max" ;;
-  optional|nit|fyi) MODEL="gpt-6-luna";   EFFORT="max";    LEGACY_MODEL="gpt-5.6-luna";  LEGACY_EFFORT="max" ;;
+  critical)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="high" ;;
+  required)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="high" ;;
+  optional|nit|fyi) MODEL="gpt-6-luna";   EFFORT="high";   LEGACY_MODEL="gpt-6-astra";   LEGACY_EFFORT="low" ;;
   *) echo "[codex-decide] 警告: 未知 severity '$SEVERITY',用 required 檔位。" >&2
-     MODEL="gpt-6.1-sol"; EFFORT="low"; LEGACY_MODEL="gpt-6-luna"; LEGACY_EFFORT="max" ;;
+     MODEL="gpt-6.1-sol"; EFFORT="medium"; LEGACY_MODEL="gpt-6-luna"; LEGACY_EFFORT="high" ;;
 esac
 min_client_for() {
   case "$1" in
     gpt-6.1-sol)          echo "0.160.0" ;;
     gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
     gpt-6-astra)          echo "0.153.0" ;;
-    gpt-5.6-*)            echo "0.144.0" ;;
     *)                    echo "0.0.0" ;;
   esac
 }
@@ -152,9 +154,12 @@ EOF
 OUT="$(mktemp)"; ERR="$(mktemp)"
 trap 'rm -f "$OUT" "$ERR" 2>/dev/null || true' EXIT
 
+# features.memories=false: 理由同 codex-review.sh 的 NO_MEMORIES_FLAG(注入 7.3k Memory 區塊、
+# luna 會因此讀工作根以外的檔)。
 run_codex() {
   printf '%s\n\n---\n\n%s\n' "$PROMPT" "$(cat "$QUESTION")" \
     | "$CODEX_BIN" exec -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
+        -c features.memories=false \
         --sandbox read-only $SKIP_GIT --cd "$REPO_ROOT" - >"$OUT" 2>"$ERR"
   RC=$?
 }
