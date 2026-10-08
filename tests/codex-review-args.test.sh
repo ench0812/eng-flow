@@ -428,6 +428,30 @@ O7="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE= CODEX_REVIEW_STATE="
 ok "diff: 清空排除清單則不排除"      hasnt "已排除" "$O7"
 ok "diff: 清空排除清單仍照常送出" has "fresh round=1" "$O7"
 
+# git diff 的 stderr 不得混進 payload(2026-10-08 實際送出過一行 CRLF 警告給 codex):
+# 排除清單非空時走 pathspec 那條 git diff,舊寫法用 2>&1 抓輸出。用 eol=lf + CRLF 工作檔讓
+# git 必定印出 "CRLF will be replaced by LF" 警告,再看 ledger 存下的 payload 快照。
+GW="$STUB2/repo-warn"; mkdir -p "$GW"
+( cd "$GW" && git init -q . && git config user.email t@t.t && git config user.name t \
+  && git config core.safecrlf warn \
+  && printf '* text=auto eol=lf\n' > .gitattributes && printf 'base\n' > w.txt \
+  && git add -A && git commit -qm i && git branch -M main ) >/dev/null 2>&1
+printf 'changed\r\nline2\r\n' > "$GW/w.txt"
+O8="$(cd "$GW" && PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$STUB2/lg-warn" CODEX_REVIEW_LOG="$STUB2/u-warn.tsv" \
+      bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff stderr: 前提——git 確實印出 CRLF 警告"  has "CRLF will be replaced by LF" "$O8"
+ok "diff stderr: 照常送出"                      has "fresh round=1" "$O8"
+PW="$(cat "$STUB2"/lg-warn/*.payload 2>/dev/null)"
+ok "diff stderr: payload 快照存在且是 diff"      has "^diff --git" "$PW"
+# 比對字串與前提同一段: 舊版 git 的措辭是 "warning: CRLF will be replaced by LF in w.txt."
+ok "diff stderr: 警告不得混進 payload"           hasnt "CRLF will be replaced by LF" "$PW"
+# 失敗路徑: stderr 改存暫存檔後,pathspec 壞掉仍要 FAILED、exit 1,並帶出 git 的錯誤原文
+O9="$(cd "$GW" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE=':(bogusmagic)x' CODEX_REVIEW_STATE="$STUB2/lg-bad" \
+      CODEX_REVIEW_LOG="$STUB2/u-bad.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"; rc9=$?
+ok "diff stderr: 無效 pathspec → exit 1"         test "$rc9" -eq 1
+ok "diff stderr: 無效 pathspec → FAILED"         has "FAILED: 排除 pathspec 無效" "$O9"
+ok "diff stderr: 帶出 git 錯誤原文"               has "git 訊息: .*magic" "$O9"
+
 # diff 模式輪次警示: 協議是「一輪一次」,所以警示線比 doc 嚴(預設 3)。
 # 每輪都改內容,避免被「與上一輪相同」的去重攔截擋掉。
 LG6="$STUB2/lg6"; DIFF_OUT=""

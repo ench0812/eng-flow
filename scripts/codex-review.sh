@@ -778,14 +778,23 @@ else
   # pathspec 用 ':/'(repo 根)而非 '.'(cwd 相對)——實測在子目錄下執行時,'.' 會把同 repo
   # 其他目錄的變更整批濾掉,而且還被標成「產生物」,等於靜默縮小複查範圍又給出錯誤理由。
   if [ "${#ALL_SPECS[@]}" -gt 0 ]; then
-    if ! DIFF="$(git diff "$MB" -- ':/' "${ALL_SPECS[@]}" 2>&1)"; then
+    # stderr 另存,不可 2>&1: git 的警告(例如 CRLF 轉換)會變成 payload 的一部分送給 codex
+    # (2026-10-08 實際送出過)。只在失敗時讀它取錯誤訊息;成功時同樣的警告上面 DIFF_ALL
+    # 已直接印到 stderr,不再重複。
+    DIFF_ERR="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/codex-diff-err-$$.txt")"
+    { : > "$DIFF_ERR"; } 2>/dev/null || {
+      echo "[codex-review] FAILED: 無法建立暫存檔 $DIFF_ERR(檢查 TMPDIR 是否可寫)——複查沒有發生。" >&2
+      exit 1; }
+    if ! DIFF="$(git diff "$MB" -- ':/' "${ALL_SPECS[@]}" 2>"$DIFF_ERR")"; then
       # 不接 rc 的話,pathspec 壞掉會讓 DIFF 為空 → 落到「全部變更都落在排除清單內」+ exit 0,
       # 把 git 錯誤當成良性 SKIP。那是 fail-open: 呼叫端會以為不用複查。
       echo "[codex-review] FAILED: 排除 pathspec 無效,diff 產生失敗——複查沒有發生,呼叫端不得視為已複查。" >&2
-      echo "  git 訊息: $(printf '%s' "$DIFF" | head -2)" >&2
+      echo "  git 訊息: $(head -2 "$DIFF_ERR")" >&2
       echo "  檢查 CODEX_REVIEW_EXCLUDE / CODEX_REVIEW_SECRET_EXCLUDE;或設 CODEX_REVIEW_EXCLUDE= 停用後重跑。" >&2
+      rm -f "$DIFF_ERR"
       exit 1
     fi
+    rm -f "$DIFF_ERR"
     NAMES_ALL="$(git diff --name-only "$MB" -- ':/' | sort)"
     NAMES_KEPT="$(git diff --name-only "$MB" -- ':/' "${ALL_SPECS[@]}" | sort)"
     if [ "${#SECR[@]}" -gt 0 ]; then
