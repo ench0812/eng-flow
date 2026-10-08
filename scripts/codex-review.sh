@@ -49,8 +49,9 @@
 #   宣稱 6.1-sol 接近 astra 的能力、單價為 astra 的五分之一、cached input 比 6-sol 便宜一半。
 #   effort 各降一階(critical high→medium、required medium→low)同屬裁定;下方 8 缺陷測資
 #   當時尚未對 6.1-sol 重跑,所以下表的 recall 數字描述的是舊檔位(2026-10-08 已重跑,見上)。
-#   --severity 未傳/未知 -> fallback gpt-6-luna / high(對齊最低一級:沒說嚴重度就不燒旗艦額度;
-#                            腳本仍印警告要求呼叫端補傳,別靠 fallback 過日子)。
+#   --severity 未傳/未知 -> fallback gpt-6-luna / high 退路 gpt-6.1-sol / low
+#                            (對齊最低一級:沒說嚴重度就不燒旗艦額度;腳本仍印警告要求呼叫端補傳,
+#                            別靠 fallback 過日子。退路 2026-10-08 使用者裁定由 astra/low 改 sol/low)。
 #   「退路」= 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型,機制見映射表下方。
 #
 #   【2026-09-23 改用 gpt-6-sol 的依據】沿用下方 09-07 的同一份 8 缺陷測資,但這次 prompt 取自
@@ -104,10 +105,12 @@
 #        --base 省略時自動偵測(origin/HEAD → main → master);--doc 與 --base 互斥。
 #
 # 前置: codex client >= 0.160.0(gpt-6.1-sol,critical/required 用)且帳號已 rollout 該模型;
-#        optional 與各退路的 gpt-6-luna 要 >= 0.155.0,plan 的 gpt-6-astra 要 >= 0.153.0。
+#        optional 與 critical/required/plan 退路的 gpt-6-luna 要 >= 0.155.0,plan 與 optional 退路的
+#        gpt-6-astra 要 >= 0.153.0,未指定嚴重度退路的 gpt-6.1-sol 要 >= 0.160.0。
 #        主模型版本不足會退到各檔位的退路(機制見映射表下方),但退路本身也有門檻:
 #        critical/required/plan 的退路 gpt-6-luna 要 0.155.0,所以【實際最低支援版本是 0.155.0】,
-#        低於它這三檔會在退路被拒而 FAILED(退回只做一次)。【模型目錄依 client 版本過濾】:
+#        低於它這三檔與未指定嚴重度都會 FAILED(退回只做一次;退路門檻也不夠時前置就直接 FAILED、
+#        不送注定被拒的請求)。【模型目錄依 client 版本過濾】:
 #        舊 client 的 models_cache.json 裡沒有某模型,不代表帳號沒有它(2026-10-05 實測)。
 #        判別「有沒有某模型權限」最省的方法: 一次極小呼叫
 #          printf 'reply OK' | codex exec -m gpt-6.1-sol --sandbox read-only --skip-git-repo-check -
@@ -154,6 +157,10 @@ CRIT_LEGACY_MODEL="gpt-6-luna";    CRIT_LEGACY_EFFORT="high"
 REQ_LEGACY_MODEL="gpt-6-luna";     REQ_LEGACY_EFFORT="high"
 LOW_LEGACY_MODEL="gpt-6-astra";    LOW_LEGACY_EFFORT="low"
 PLAN_LEGACY_MODEL="gpt-6-luna";    PLAN_LEGACY_EFFORT="high"  # 不再沿用 plan_effort_for 的值
+# 未傳/未知嚴重度的退路(2026-10-08 使用者裁定 gpt-6.1-sol/low,原與 optional 共用 astra/low)。
+# 已知取捨: sol 需 client 0.160.0、高於主模型 luna 的 0.155.0,所以 luna 因 client 版本不足
+# 失效時 sol 必然一起失效;這條退路只在「帳號尚未 rollout luna」時有作用。
+FALLBACK_LEGACY_MODEL="gpt-6.1-sol"; FALLBACK_LEGACY_EFFORT="low"
 # 計畫文件的 effort: low 起跳,因為 09-07 實測 astra/low 已經 8/8,再往上買到的是推理深度
 # 而不是覆蓋率;計畫文件量少、astra 單價高,預設不必拉到頂,嚴重度高才加深。
 plan_effort_for() {
@@ -602,10 +609,10 @@ case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
   optional|nit|fyi) MODEL="$LOW_MODEL";  EFFORT="$LOW_EFFORT";  SEV_SHOWN="$SEVERITY"
                     LEGACY_MODEL="$LOW_LEGACY_MODEL";  LEGACY_EFFORT="$LOW_LEGACY_EFFORT" ;;
   "")  MODEL="$FALLBACK_MODEL"; EFFORT="$FALLBACK_EFFORT"; SEV_SHOWN="(未指定)"
-       LEGACY_MODEL="$LOW_LEGACY_MODEL"; LEGACY_EFFORT="$LOW_LEGACY_EFFORT"
+       LEGACY_MODEL="$FALLBACK_LEGACY_MODEL"; LEGACY_EFFORT="$FALLBACK_LEGACY_EFFORT"
        echo "[codex-review] 警告: 未傳 --severity,fallback $FALLBACK_MODEL/$FALLBACK_EFFORT。呼叫端應依來源嚴重度指定(diff: 第一輪 review 最高判定;spec/plan: 設計風險自評)。" >&2 ;;
   *)   MODEL="$FALLBACK_MODEL"; EFFORT="$FALLBACK_EFFORT"; SEV_SHOWN="(未知:$SEVERITY)"
-       LEGACY_MODEL="$LOW_LEGACY_MODEL"; LEGACY_EFFORT="$LOW_LEGACY_EFFORT"
+       LEGACY_MODEL="$FALLBACK_LEGACY_MODEL"; LEGACY_EFFORT="$FALLBACK_LEGACY_EFFORT"
        echo "[codex-review] 警告: 未知 severity '$SEVERITY',fallback $FALLBACK_MODEL/$FALLBACK_EFFORT。有效值: critical|required|optional|nit|fyi。" >&2 ;;
 esac
 # 計畫文件改用 astra(嚴重度只決定 effort)。放在嚴重度映射之後覆寫,讓未知/未傳嚴重度的
@@ -655,6 +662,14 @@ CLIENT_VER="$("$CODEX_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-
 NEED_VER="$(min_client_for "$MODEL")"
 if [ -n "$CLIENT_VER" ] && [ -n "$LEGACY_MODEL" ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
    && ! version_ge "$CLIENT_VER" "$NEED_VER"; then
+  # 退路的門檻可能比主模型還高(2026-10-08 起未指定嚴重度退 gpt-6.1-sol、主模型是 luna):
+  # 這時改送退路注定被拒,而且失敗訊息會把原因誤判成「舊模型退役」。直接說清楚、不送。
+  LEGACY_NEED="$(min_client_for "$LEGACY_MODEL")"
+  if ! version_ge "$CLIENT_VER" "$LEGACY_NEED"; then
+    echo "[codex-review] FAILED: codex CLI $CLIENT_VER 低於主模型 $MODEL($NEED_VER)與退路 $LEGACY_MODEL($LEGACY_NEED)兩者的門檻——複查沒有發生,呼叫端不得視為已複查。" >&2
+    echo "  處置: 升級 codex CLI(codex --version 應 >= $NEED_VER);兩個 home 的 packages/standalone/current 要指向同一版。" >&2
+    exit 1
+  fi
   echo "[codex-review] 注意: codex CLI $CLIENT_VER 低於 $MODEL 需要的 $NEED_VER,本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT。" >&2
   echo "  這通常代表 PATH 上的 codex 被另一個安裝來源(例如 Orca 的 CODEX_HOME)蓋回舊版。" >&2
   echo "  升級並驗證: codex --version 應 >= $NEED_VER;兩個 home 的 packages/standalone/current 要指向同一版。" >&2
@@ -1110,7 +1125,12 @@ if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ -n "$LEGACY_MODEL" ] && [ "$
   # resume 輪原本只送 delta,改 fresh 就得送完整內容——而前面的長度守門量的是 delta。完整內容
   # 超過上限時不退回,讓它照原路徑走 FAILED(2026-09-23 codex 複查抓到:否則退回呼叫會繞過守門,
   # 送出一份注定在 turn/start 就被拒的內容)。
-  if [ "$SESSION_MODE" = "resume" ] && [ "${FULL_CHARS:-0}" -gt "$CODEX_SAFE_CHARS" ]; then
+  if [ -n "$CLIENT_VER" ] && ! version_ge "$CLIENT_VER" "$(min_client_for "$LEGACY_MODEL")"; then
+    # 退路門檻高於 client(例: 未指定嚴重度退 sol 要 0.160.0、client 0.155~0.159、帳號未開通 luna):
+    # 重送注定被拒,而且失敗訊息會誤導去改映射表。不重送,讓 FAILED 分支說出真正原因。
+    LEGACY_REASON="client-below-legacy"
+    echo "[codex-review] 注意: 伺服器不接受 $MODEL,但 codex CLI $CLIENT_VER 低於退路 $LEGACY_MODEL 需要的 $(min_client_for "$LEGACY_MODEL"),不重送。" >&2
+  elif [ "$SESSION_MODE" = "resume" ] && [ "${FULL_CHARS:-0}" -gt "$CODEX_SAFE_CHARS" ]; then
     echo "[codex-review] 注意: 伺服器不接受 $MODEL,但完整內容 ${FULL_CHARS} 字元超過安全上限,無法改用舊模型 fresh 重送。" >&2
   else
     echo "[codex-review] 注意: 伺服器不接受 $MODEL(帳號尚未開通或 client 版本不足),本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重跑一次。" >&2
@@ -1182,6 +1202,9 @@ if [ -z "$OUT_TRIMMED" ] || [ "$RC" -ne 0 ]; then
     # 兩種退回的診斷不同:前置退回時新模型【根本沒送出去】,不能說它被拒(2026-09-23 codex 複查抓到)。
     if [ "${LEGACY_REASON:-}" = "runtime" ]; then
       echo "  已知原因: 新模型與舊模型 '$MODEL' 都被伺服器拒絕——舊模型可能也已退役,需要更新檔案開頭的映射表。" >&2
+    elif [ "${LEGACY_REASON:-}" = "client-below-legacy" ]; then
+      echo "  已知原因: 伺服器不接受 '$MODEL'(帳號可能尚未開通),而 codex CLI $CLIENT_VER 也低於退路 '$LEGACY_MODEL' 的門檻,沒有可用的退路。" >&2
+      echo "            處置: 升級 codex CLI;映射表不需要改。" >&2
     elif [ "${LEGACY_REASON:-}" = "preflight" ]; then
       echo "  已知原因: client $CLIENT_VER 版本不足而直接改用舊模型 '$MODEL'(新模型未送出),但舊模型也被拒絕——" >&2
       echo "            舊模型可能已退役;升級 codex CLI 後新模型就不必走退路。" >&2

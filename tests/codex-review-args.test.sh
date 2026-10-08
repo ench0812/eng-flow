@@ -788,6 +788,36 @@ ok "退路/optional 檔: 退到 optional 自己的舊模型" test "$FB_CALLS" = 
 # 主模型 high、退路 low,所以這行分辨得出「固定值」與「沿用主模型 effort」
 ok "退路/optional 檔: 退路 effort 是 low"       has "模型=$LOW_OLD/low" "$FB_OUT"
 
+# 未傳/未知嚴重度: 主模型 luna/high,退路 gpt-6.1-sol/low(2026-10-08 使用者裁定)。字面值斷言
+# 是刻意的: 只用 map 從腳本讀預期值的話,常數被改錯測試照樣綠。
+FBK_NEW="$(map FALLBACK_MODEL)"; FBK_OLD="$(map FALLBACK_LEGACY_MODEL)"
+ok "未指定/裁定值: 主模型 gpt-6-luna"    test "$FBK_NEW" = "gpt-6-luna"
+ok "未指定/裁定值: 退路 gpt-6.1-sol"     test "$FBK_OLD" = "gpt-6.1-sol"
+fb_run "" 0.160.0 ok
+ok "未指定: 用 fallback 主模型、只問一次"  test "$FB_CALLS" = "$FBK_NEW"
+ok "未指定: effort 是 high"               has "模型=$FBK_NEW/high" "$FB_OUT"
+ok "未指定: 照樣警告呼叫端補傳"           has "未傳 --severity" "$FB_OUT"
+FB_REJECT="$FBK_NEW" fb_run "" 0.160.0 reject-new
+ok "未指定/退路: 先問 luna 再問 sol"      test "$FB_CALLS" = "$FBK_NEW $FBK_OLD"
+ok "未指定/退路: 退路 effort 是 low"       has "模型=$FBK_OLD/low" "$FB_OUT"
+# 前置版本檢查: 退路(sol 0.160.0)門檻高於主模型(luna 0.155.0)
+fb_run "" 0.156.0 ok
+ok "未指定/前置: 0.156 夠 luna → 只送 luna"       test "$FB_CALLS" = "$FBK_NEW"
+ok "未指定/前置: 0.156 不得觸發退路"              hasnt "改用舊模型" "$FB_OUT"
+fb_run "" 0.154.0 reject-all
+ok "未指定/前置: 主模型與退路門檻都不夠 → rc 1"   test "$FB_RC" -eq 1
+ok "未指定/前置: 一個請求都不送"                 test -z "$FB_CALLS"
+ok "未指定/前置: 說明兩者門檻都不夠"             has "兩者的門檻" "$FB_OUT"
+# 執行期: 帳號未開通 luna,而 client 0.156 也不夠退路 sol → 不重送,原因要說對(不是映射表)
+FB_REJECT="$FBK_NEW" fb_run "" 0.156.0 reject-new
+ok "未指定/執行期: rc 1"                         test "$FB_RC" -eq 1
+ok "未指定/執行期: 只送 luna、不重送 sol"         test "$FB_CALLS" = "$FBK_NEW"
+ok "未指定/執行期: 原因是 client 低於退路門檻"     has "低於退路" "$FB_OUT"
+ok "未指定/執行期: 不得誤導去改映射表"            hasnt "需要更新檔案開頭的映射表" "$FB_OUT"
+fb_run bogus 0.160.0 ok
+ok "未知嚴重度: 同 fallback 主模型"        test "$FB_CALLS" = "$FBK_NEW"
+ok "未知嚴重度: 照樣警告"                 has "未知 severity" "$FB_OUT"
+
 # 計畫文件: 不論嚴重度都用 PLAN_MODEL,嚴重度只決定 effort;spec 仍走一般映射(對照)
 fb_run required 0.160.0 ok plan
 ok "計畫/required: 用計畫專用模型"               test "$FB_CALLS" = "$PLAN_NEW"
