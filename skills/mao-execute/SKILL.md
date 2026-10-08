@@ -13,7 +13,7 @@ One fresh subagent per task. Two-stage review after each: spec compliance first,
 
 ## Process
 
-Before dispatching: if the plan contains a `## Not yet specified` section, confirm scope with the user before proceeding — do not dispatch against it.
+Before dispatching: if the plan contains a `## Not yet specified` section, never dispatch against the unspecified items themselves; only tasks that depend on them wait — when unsure whether a task depends on one, treat it as dependent. Dispatch every other task as usual, then confirm the open items with the user as the last action of that turn, per `references/decision-consensus.md` (pause only dependent work).
 
 Default: author a Workflow that runs each task through a three-stage pipeline (this is the default whenever the Workflow tool is available — it does not depend on `ultracode`). Each stage is one `agent()` call; prompts come from the three templates in this directory; returns are schema-validated.
 
@@ -48,13 +48,15 @@ Model + effort routing (shared rules: `references/model-routing.md` — model an
 
 Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand-tuning its effort. Outside tier C, never omit `effort` — an omitted effort silently inherits the session level and the layering stops meaning anything.
 
-**Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool *within* each task. Tasks that may run in parallel (see Parallel vs Sequential) still run concurrently: send their Agent calls in one message, with `isolation: "worktree"` when they write overlapping paths. Losing Workflow is not a reason to serialize independent tasks. The Agent tool has no `effort` parameter, so dispatch B-tier stages by plugin agent instead of `model:"sonnet"`: B1 → `subagent_type:"eng-flow:tier-b1"`, B2 → `subagent_type:"eng-flow:tier-b2"` (their frontmatter carries the model + effort pair). A plain `model:"sonnet"` would silently run at the session's effort level.
+**Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool *within* each task. Tasks that may run in parallel (see Parallel vs Sequential) still run concurrently: send their Agent calls in one message, with `isolation: "worktree"` when they write files or commit in the same working tree. Losing Workflow is not a reason to serialize independent tasks. The Agent tool has no `effort` parameter, so dispatch B-tier stages by plugin agent instead of `model:"sonnet"`: B1 → `subagent_type:"eng-flow:tier-b1"`, B2 → `subagent_type:"eng-flow:tier-b2"` (their frontmatter carries the model + effort pair). A plain `model:"sonnet"` would silently run at the session's effort level.
 
 ## Parallel vs Sequential
 
-**Parallel** (via `pipeline()`/`parallel()`): tasks with independent files AND independent type/interface contracts. Use `isolation:'worktree'` when parallel agents write to overlapping paths. Workflow manages concurrency natively (cap 16, excess queued) — no manual cap needed.
+**Parallel** (via `pipeline()`/`parallel()`): tasks with independent files AND independent type/interface contracts. Use `isolation:'worktree'` when parallel agents write files or commit in the same working tree; every stage of that task (implement, spec-review, code-review, re-dispatches) works in the same task worktree — pass its path to each — and the task's whole branch is integrated after review passes. Workflow manages concurrency natively (cap 16, excess queued) — no manual cap needed.
 
 **Must be sequential:** tasks sharing files, database migrations, dependency chains, or where task B's spec depends on task A's output types/interfaces.
+
+**Frozen-contract exception:** when the *only* dependency between two tasks is a type/interface contract, and they modify no files in common, freezing that contract in the plan before dispatch (fields, types, nullability, omitted-vs-empty, absent-field handling) lets both run in parallel; the cross-seam check runs when both land. It never lifts the other conditions above — shared files, migrations and real execution dependencies stay sequential.
 
 ## Handling Implementer Status
 
@@ -99,9 +101,9 @@ tokens alone does not prove improved outcomes. Feed this evidence to the user's 
 retrospective when available; do not create a new mandatory workflow or global rule per finding.
 
 ## Red Flags
-- Dispatching multiple agents on overlapping files without worktree isolation
+- Dispatching multiple agents that write files or commit in the same working tree without worktree isolation
 - Skipping spec review ("it looks fine")
 - Skipping code review ("spec passed, good enough")
 - Ignoring BLOCKED/NEEDS_CONTEXT escalations
 - Treating the implementer's DONE report as a substitute for actual review
-- Moving to next task while review has open issues
+- Starting a task that depends on this one while its review has open issues (independent tasks are not blocked; this task's own merge/integration still waits for review to clear)

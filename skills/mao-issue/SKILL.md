@@ -61,6 +61,8 @@ bash <plugin>/scripts/codex-review.sh --severity required --doc <scratchpad>/iss
 
 處置完成後才更新看板欄位、才進 `mao-plan`（需要拆解時）或直接 `mao-execute`。
 
+一批 issue 同時領取時，各張的 intake 共議與需要的 codex-decide 一開始就在背景並行跑，不要延到輪到那張時才逐張做；intake 閘本身保留（處置完才開工）。codex 依序或並行，以實測記憶體決定（Windows 看 commit 使用率 `PercentCommittedBytesInUse`，不是可用實體記憶體）。
+
 ## 三種「沒問成」要分開處置
 
 - `完成(…)` → 真的問到了。

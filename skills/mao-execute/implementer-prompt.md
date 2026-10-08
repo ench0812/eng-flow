@@ -18,9 +18,11 @@ You have no channel to ask questions mid-task. If requirements, approach, or dep
 ## Your Job
 1. Implement exactly what the task specifies
 2. Write tests (TDD if task requires) — expected values must come from an independent source, never recomputed by the implementation's own logic. Search existing tests first: extend/parameterize rather than add a parallel test; put regression tests at the lowest level that reproduces the issue; unit tests do no real I/O and no sleeps (fakes / fake clocks); behavior you remove or change takes its obsolete tests with it in the same commit
-3. Verify implementation works — run the affected test file(s) as you go; before committing, run the targeted scope: the task's test file(s) plus tests of modules that directly depend on what you changed. Do NOT run the full suite — it runs once at the final integration review, not per task. If you cannot confidently bound the affected scope (shared package, cross-cutting change), escalate to the full suite and say so in `testResults`. Paste the actual command output into `testResults`. A pass claim without output is not a verification.
-4. Commit your work
+3. Verify implementation works — run the affected test file(s) as you go; before your final commit, run the targeted scope: the task's test file(s) plus tests of modules that directly depend on what you changed. Do NOT run the full suite — it runs once at the final integration review, not per task. If you cannot confidently bound the affected scope (shared package, cross-cutting change), escalate to the full suite and say so in `testResults`. Paste the actual command output into `testResults`. A pass claim without output is not a verification.
+4. Commit your work — also after each completed step, as an unpushed checkpoint, so progress survives if you die mid-task (checkpoints are not deliveries; review gates merge/push/deploy, not them)
 5. Report back
+
+Resource limits: cap multi-worker test runners explicitly (e.g. `jest --maxWorkers=2`) — other agents share this machine. Wait for background work with a bounded poll (until-loop with a timeout), never by relying on a monitor to wake you.
 
 Work from: [directory]
 While working: if something unexpected changes what the task should do, return `NEEDS_CONTEXT` or `DONE_WITH_CONCERNS` instead of guessing. Otherwise keep working until every part of the task is done — returning after one part to ask whether to continue leaves the rest undone, because nobody can answer you mid-task.

@@ -1,6 +1,6 @@
 # Code Quality Reviewer Prompt Template
 
-Only dispatch after spec compliance review passes. Use as the `agent()` prompt string in the Workflow code-review stage (or the prompt for an Agent-tool subagent in fallback mode). Replace [bracketed] placeholders. BASE_SHA depends on review scope: per-task review inside mao-execute → the SHA this task started from (the previous task's HEAD), so the diff covers only this task; whole-branch review (mao-review) → the merge-base of the base branch and HEAD (`git merge-base <base> HEAD`), not the base branch tip, to exclude unrelated upstream commits.
+Only dispatch after spec compliance review passes. Use as the `agent()` prompt string in the Workflow code-review stage (or the prompt for an Agent-tool subagent in fallback mode). Replace [bracketed] placeholders. BASE_SHA depends on review scope: per-task review inside mao-execute → the `git rev-parse HEAD` recorded in the task's working tree when the task was first dispatched — kept unchanged across REQUEST_CHANGES re-dispatches — so the diff covers only this task whether tasks run sequentially, in parallel worktrees, or with checkpoint commits; whole-branch review (mao-review) → the merge-base of the base branch and HEAD (`git merge-base <base> HEAD`), not the base branch tip, to exclude unrelated upstream commits.
 
 ---
 
