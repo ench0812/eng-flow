@@ -52,7 +52,7 @@
 #   --severity 未傳/未知 -> fallback gpt-6-luna / high 退路 gpt-6.1-sol / low
 #                            (對齊最低一級:沒說嚴重度就不燒旗艦額度;腳本仍印警告要求呼叫端補傳,
 #                            別靠 fallback 過日子。退路 2026-10-08 使用者裁定由 astra/low 改 sol/low)。
-#   「退路」= 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型,機制見映射表下方。
+#   「退路」= 伺服器以「模型不可用」拒絕主模型(帳號 rollout 未輪到、模型下架)時改用的模型,機制見映射表下方。
 #
 #   【2026-09-23 改用 gpt-6-sol 的依據】沿用下方 09-07 的同一份 8 缺陷測資,但這次 prompt 取自
 #   現行 access_note(v3,含絕對路徑指示),且測資副本【移除了 GROUND-TRUTH.md】——codex 在沙箱內
@@ -104,13 +104,9 @@
 #        bash codex-review.sh --severity <...> --doc <path> --kind <spec|plan>
 #        --base 省略時自動偵測(origin/HEAD → main → master);--doc 與 --base 互斥。
 #
-# 前置: codex client >= 0.160.0(gpt-6.1-sol,critical/required 用)且帳號已 rollout 該模型;
-#        optional 與 critical/required/plan 退路的 gpt-6-luna 要 >= 0.155.0,plan 與 optional 退路的
-#        gpt-6-astra 要 >= 0.153.0,未指定嚴重度退路的 gpt-6.1-sol 要 >= 0.160.0。
-#        主模型版本不足會退到各檔位的退路(機制見映射表下方),但退路本身也有門檻:
-#        critical/required/plan 的退路 gpt-6-luna 要 0.155.0,所以【實際最低支援版本是 0.155.0】,
-#        低於它這三檔與未指定嚴重度都會 FAILED(退回只做一次;退路門檻也不夠時前置就直接 FAILED、
-#        不送注定被拒的請求)。【模型目錄依 client 版本過濾】:
+# 前置: 使用此 flow 的環境一律保持 codex client 最新版(2026-10-08 使用者裁定),腳本不做
+#        client 版本判斷、也不為舊版留相容路徑。帳號須已 rollout 該模型;伺服器以「模型不可用」
+#        拒絕時退回該檔位的退路一次(機制見映射表下方)。【模型目錄依 client 版本過濾】:
 #        舊 client 的 models_cache.json 裡沒有某模型,不代表帳號沒有它(2026-10-05 實測)。
 #        判別「有沒有某模型權限」最省的方法: 一次極小呼叫
 #          printf 'reply OK' | codex exec -m gpt-6.1-sol --sandbox read-only --skip-git-repo-check -
@@ -137,20 +133,16 @@ FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="high"   # --severity 未傳/未�
 # astra 留給計畫階段,輔助完善計畫的全面性。effort 仍隨嚴重度(見 plan_effort_for)。
 PLAN_MODEL="gpt-6-astra"
 
-# --- 各檔位的舊模型退路(2026-09-23 新增) ---
-# 為什麼要有: 新模型上線時有兩道閘,任一道沒過都會回同一句 400「not supported when using
-# Codex with a ChatGPT account」——(a) client 版本低於該模型在 Codex 目錄公布的
-# minimal_client_version;(b) 帳號的分批 rollout 還沒輪到。兩者從錯誤訊息完全分不出來。
-# 而且這台有兩個 CODEX_HOME(~/.codex 與 Orca 注入的 runtime home),任一方的安裝/更新都可能
-# 讓 PATH 上的 codex 退回舊版,且沒有任何訊號(2026-09-23 實際發生: 安裝程式因 Orca 注入的
-# CODEX_HOME 裝錯了 home)。與其防每一種覆蓋方式,不如每次呼叫都自己檢查、不夠就退回。
+# --- 各檔位的退路模型(2026-09-23 新增) ---
+# 為什麼要有: 伺服器會以同一句 400「not supported when using Codex with a ChatGPT account」
+# 拒絕帳號尚未 rollout 的模型(或已下架的模型)。這時改用該檔位的退路重跑一次。
+# 2026-10-08 起環境一律保持 codex client 最新版(使用者裁定),client 版本不再是考量,
+# 退路只為 rollout/下架而設;選退路的原則是「與主模型不同、且有實測品質」。
 # 退回只發生在【模型不可用】這一類錯誤;額度、網路、codex 崩潰照原路徑走 RATE_LIMITED/FAILED,
 # 絕不被退回機制吞掉(否則「複查沒發生」會被偽裝成「用舊模型複查過了」)。
-# 2026-10-05 使用者裁定: critical/required/plan 的退路一律 gpt-6-luna(只需 client 0.155.0);
-# 2026-10-08 依實測 effort 由 max 降為 high(見檔頭)。optional 的主模型本身就是 luna,退到自己
-# 等於沒有退路;同日使用者裁定 gpt-5.6 全面退出(最低 gpt-6),optional 改退 gpt-6-astra/low:
-# 退路是為「主模型因 client 版本或 rollout 不可用」而設,gpt-6-sol 與 luna 同需 client 0.155.0、
-# 會一起失效,astra 只需 0.153.0;astra/low 在 09-07 同一份測資是 8/8,且退路很少觸發。
+# 2026-10-05 使用者裁定: critical/required/plan 的退路一律 gpt-6-luna;2026-10-08 依實測 effort
+# 由 max 降為 high(見檔頭)。optional 的主模型本身就是 luna,退到自己等於沒有退路;同日使用者
+# 裁定 gpt-5.6 全面退出(最低 gpt-6),optional 改退 gpt-6-astra/low(09-07 同一份測資 8/8)。
 # (被取代的舊安排: critical 退 astra/low——09-07 實測唯一抓到跨版本時序缺陷 B6 的檔位;
 #  required 退 5.6-terra/high;plan 退 5.6-sol 同 effort。)
 CRIT_LEGACY_MODEL="gpt-6-luna";    CRIT_LEGACY_EFFORT="high"
@@ -158,8 +150,6 @@ REQ_LEGACY_MODEL="gpt-6-luna";     REQ_LEGACY_EFFORT="high"
 LOW_LEGACY_MODEL="gpt-6-astra";    LOW_LEGACY_EFFORT="low"
 PLAN_LEGACY_MODEL="gpt-6-luna";    PLAN_LEGACY_EFFORT="high"  # 不再沿用 plan_effort_for 的值
 # 未傳/未知嚴重度的退路(2026-10-08 使用者裁定 gpt-6.1-sol/low,原與 optional 共用 astra/low)。
-# 已知取捨: sol 需 client 0.160.0、高於主模型 luna 的 0.155.0,所以 luna 因 client 版本不足
-# 失效時 sol 必然一起失效;這條退路只在「帳號尚未 rollout luna」時有作用。
 FALLBACK_LEGACY_MODEL="gpt-6.1-sol"; FALLBACK_LEGACY_EFFORT="low"
 # 計畫文件的 effort: low 起跳,因為 09-07 實測 astra/low 已經 8/8,再往上買到的是推理深度
 # 而不是覆蓋率;計畫文件量少、astra 單價高,預設不必拉到頂,嚴重度高才加深。
@@ -171,31 +161,6 @@ plan_effort_for() {
   esac
 }
 
-# 各模型在 Codex 目錄公布的最低 client 版本(2026-09-22 對線上目錄的實測值;
-# 0.154 被拒、0.155 通過)。未列出的模型回 0.0.0 = 不做前置判斷,交給執行期退回兜底。
-# gpt-6.1-sol: 2026-10-05 實測 0.156.1 的目錄沒有它、0.160.0 有(0.157~0.159 未測,取保守值)。
-min_client_for() {
-  case "$1" in
-    gpt-6.1-sol)          echo "0.160.0" ;;
-    gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
-    gpt-6-astra)          echo "0.153.0" ;;
-    *)                    echo "0.0.0" ;;
-  esac
-}
-# $1 >= $2 ?(x.y.z 逐段比數字)。【刻意不用 sort -V】(2026-09-23 codex 複查抓到):macOS 的
-# BSD sort 不一定支援 -V,而比較出錯時舊寫法會得到「版本不夠」——在已經夠新的機器上靜默退回
-# 舊模型。純 bash 比較沒有外部相依;兩個參數都已由呼叫端限定為數字(grep -oE 抽出的版本、
-# min_client_for 的常數),10# 前綴防止 08/09 被當成八進位。
-version_ge() {
-  local IFS=. i a b
-  local -a x=($1) y=($2)
-  for i in 0 1 2; do
-    a="${x[i]:-0}"; b="${y[i]:-0}"
-    (( 10#$a > 10#$b )) && return 0
-    (( 10#$a < 10#$b )) && return 1
-  done
-  return 0
-}
 # 模型不可用類錯誤。刻意只收這幾種形態,不收泛用的 400/invalid_request——那會把 prompt 太長、
 # 參數錯誤之類的真失敗也吞進退回路徑,讓一個該修的呼叫端錯誤被舊模型掩蓋。
 MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access"
@@ -621,7 +586,7 @@ if [ "$DOC_MODE" -eq 1 ] && [ "$KIND" = "plan" ]; then
   EFFORT="$(plan_effort_for "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')")"
   MODEL="$PLAN_MODEL"; LEGACY_MODEL="$PLAN_LEGACY_MODEL"; LEGACY_EFFORT="$PLAN_LEGACY_EFFORT"
 fi
-USED_LEGACY=0   # 本次諮詢是否已改用舊模型(前置檢查或執行期退回);退回最多一次
+USED_LEGACY=0   # 本次諮詢是否已改用退路模型(執行期退回);退回最多一次
 
 # --- Gate 1: 安裝偵測 ---
 # 先查 PATH（Windows npm 版可能是 codex.cmd）；PATH 不全時（WSL/CI/git hook 等
@@ -654,27 +619,8 @@ if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
   exit 0
 fi
 
-# --- Gate 3: client 版本是否夠新(2026-09-23 新增) ---
-# 版本不夠就直接改用舊模型,省下一次注定失敗的往返。【讀不出版本時不降級】——「不知道」
-# 不等於「確認不夠」,這裡降級是犧牲複查品質換取可用性,只在有證據時才做;讀不出版本的
-# 情況交給執行期退回兜底(它看的是伺服器的實際回應,比這裡的推斷更權威)。
-CLIENT_VER="$("$CODEX_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-NEED_VER="$(min_client_for "$MODEL")"
-if [ -n "$CLIENT_VER" ] && [ -n "$LEGACY_MODEL" ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
-   && ! version_ge "$CLIENT_VER" "$NEED_VER"; then
-  # 退路的門檻可能比主模型還高(2026-10-08 起未指定嚴重度退 gpt-6.1-sol、主模型是 luna):
-  # 這時改送退路注定被拒,而且失敗訊息會把原因誤判成「舊模型退役」。直接說清楚、不送。
-  LEGACY_NEED="$(min_client_for "$LEGACY_MODEL")"
-  if ! version_ge "$CLIENT_VER" "$LEGACY_NEED"; then
-    echo "[codex-review] FAILED: codex CLI $CLIENT_VER 低於主模型 $MODEL($NEED_VER)與退路 $LEGACY_MODEL($LEGACY_NEED)兩者的門檻——複查沒有發生,呼叫端不得視為已複查。" >&2
-    echo "  處置: 升級 codex CLI(codex --version 應 >= $NEED_VER);兩個 home 的 packages/standalone/current 要指向同一版。" >&2
-    exit 1
-  fi
-  echo "[codex-review] 注意: codex CLI $CLIENT_VER 低於 $MODEL 需要的 $NEED_VER,本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT。" >&2
-  echo "  這通常代表 PATH 上的 codex 被另一個安裝來源(例如 Orca 的 CODEX_HOME)蓋回舊版。" >&2
-  echo "  升級並驗證: codex --version 應 >= $NEED_VER;兩個 home 的 packages/standalone/current 要指向同一版。" >&2
-  MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1; LEGACY_REASON="preflight"
-fi
+# (Gate 3「client 版本前置檢查」已於 2026-10-08 移除: 使用此 flow 的環境一律保持最新版,
+#  使用者裁定不考慮舊版支援。client 若真的過舊,伺服器會拒絕模型,由執行期退回處理。)
 
 # --- git repo 檢查: diff 模式必須在 repo 內;doc 模式不在 repo 時加旗標續跑 ---
 SKIP_GIT_FLAG=""
@@ -1116,7 +1062,7 @@ case "$RC" in ''|*[!0-9]*) RC=1 ;; esac   # RC_FILE 沒寫成(內層整個被砍
 run_codex
 
 # --- 執行期退回(2026-09-23 新增) ---
-# 前置版本檢查過了、伺服器仍拒絕模型(帳號 rollout 沒輪到、模型已退役、目錄門檻又被調高)
+# 伺服器拒絕模型(帳號 rollout 沒輪到、模型已退役;環境意外落後時 client 過舊也是同一句)
 # → 用該檔位的舊模型重跑【一次】。只認模型不可用這一類錯誤,且只在失敗時(RC 非 0)才看;
 # 模型可用時的任何輸出都不會觸發,review 內容裡剛好提到這些字也不會(那時 RC=0)。
 # 換了模型就不接續舊 session(resume 的歷史屬於另一個模型),一律 fresh 並送完整內容。
@@ -1125,12 +1071,7 @@ if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ -n "$LEGACY_MODEL" ] && [ "$
   # resume 輪原本只送 delta,改 fresh 就得送完整內容——而前面的長度守門量的是 delta。完整內容
   # 超過上限時不退回,讓它照原路徑走 FAILED(2026-09-23 codex 複查抓到:否則退回呼叫會繞過守門,
   # 送出一份注定在 turn/start 就被拒的內容)。
-  if [ -n "$CLIENT_VER" ] && ! version_ge "$CLIENT_VER" "$(min_client_for "$LEGACY_MODEL")"; then
-    # 退路門檻高於 client(例: 未指定嚴重度退 sol 要 0.160.0、client 0.155~0.159、帳號未開通 luna):
-    # 重送注定被拒,而且失敗訊息會誤導去改映射表。不重送,讓 FAILED 分支說出真正原因。
-    LEGACY_REASON="client-below-legacy"
-    echo "[codex-review] 注意: 伺服器不接受 $MODEL,但 codex CLI $CLIENT_VER 低於退路 $LEGACY_MODEL 需要的 $(min_client_for "$LEGACY_MODEL"),不重送。" >&2
-  elif [ "$SESSION_MODE" = "resume" ] && [ "${FULL_CHARS:-0}" -gt "$CODEX_SAFE_CHARS" ]; then
+  if [ "$SESSION_MODE" = "resume" ] && [ "${FULL_CHARS:-0}" -gt "$CODEX_SAFE_CHARS" ]; then
     echo "[codex-review] 注意: 伺服器不接受 $MODEL,但完整內容 ${FULL_CHARS} 字元超過安全上限,無法改用舊模型 fresh 重送。" >&2
   else
     echo "[codex-review] 注意: 伺服器不接受 $MODEL(帳號尚未開通或 client 版本不足),本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重跑一次。" >&2
@@ -1199,15 +1140,10 @@ if [ -z "$OUT_TRIMMED" ] || [ "$RC" -ne 0 ]; then
   # 走到這裡而錯誤仍是「模型不可用」,代表執行期退回已經試過(或該檔位沒有退路)、舊模型也被拒。
   # 這時不是版本或 rollout 的問題能解釋的,要人看——舊模型可能也已退役,映射表需要更新。
   if grep -qiE 'invalid_request|minimal_client_version|unknown model|model_not_found|not supported when using Codex' "$ERR_FILE" 2>/dev/null; then
-    # 兩種退回的診斷不同:前置退回時新模型【根本沒送出去】,不能說它被拒(2026-09-23 codex 複查抓到)。
     if [ "${LEGACY_REASON:-}" = "runtime" ]; then
       echo "  已知原因: 新模型與舊模型 '$MODEL' 都被伺服器拒絕——舊模型可能也已退役,需要更新檔案開頭的映射表。" >&2
-    elif [ "${LEGACY_REASON:-}" = "client-below-legacy" ]; then
-      echo "  已知原因: 伺服器不接受 '$MODEL'(帳號可能尚未開通),而 codex CLI $CLIENT_VER 也低於退路 '$LEGACY_MODEL' 的門檻,沒有可用的退路。" >&2
-      echo "            處置: 升級 codex CLI;映射表不需要改。" >&2
-    elif [ "${LEGACY_REASON:-}" = "preflight" ]; then
-      echo "  已知原因: client $CLIENT_VER 版本不足而直接改用舊模型 '$MODEL'(新模型未送出),但舊模型也被拒絕——" >&2
-      echo "            舊模型可能已退役;升級 codex CLI 後新模型就不必走退路。" >&2
+      echo "            也可能是 codex CLI 意外落後(環境應保持最新版):先確認 codex --version 是最新版、兩個" >&2
+      echo "            home 的 packages/standalone/current 一致,升級後再判斷要不要改映射表。" >&2
     else
       echo "  已知原因: server 不接受模型 '$MODEL',且該檔位沒有可退回的舊模型。" >&2
     fi

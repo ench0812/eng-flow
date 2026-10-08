@@ -677,9 +677,9 @@ ok "cwd: prompt 宣告 == --cd 實傳" test \
 rm -rf "$STUB2"
 
 # --- 舊模型退路(2026-09-23 新增) ---
-# 兩道退回: Gate 3 看 client 版本(前置)、執行期看伺服器是否以「模型不可用」拒絕。
-# 兩個負控組是這一段的重點: 一般錯誤【不可】觸發退回(否則真失敗會被舊模型掩蓋成成功),
-# 讀不出版本時【不可】降級(「不知道」不等於「確認不夠」)。
+# 只剩執行期退回: 伺服器以「模型不可用」拒絕主模型時改用退路一次。client 版本前置檢查已於
+# 2026-10-08 移除(環境一律保持最新版)。負控組的重點: 一般錯誤【不可】觸發退回(否則真失敗
+# 會被舊模型掩蓋成成功)。
 # 模型名一律從腳本讀出來斷言——映射表改了測試不必跟著改,也不會因為寫死舊值而恆綠。
 map() { sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$SCRIPT" | head -1; }
 REQ_NEW="$(map REQ_MODEL)";  REQ_OLD="$(map REQ_LEGACY_MODEL)"
@@ -687,23 +687,6 @@ CRIT_NEW="$(map CRIT_MODEL)"; CRIT_OLD="$(map CRIT_LEGACY_MODEL)"
 LOW_NEW="$(map LOW_MODEL)";  LOW_OLD="$(map LOW_LEGACY_MODEL)"
 PLAN_NEW="$(map PLAN_MODEL)"; PLAN_OLD="$(map PLAN_LEGACY_MODEL)"
 ok "退路: 映射表讀得到(否則以下斷言全部沒意義)" test -n "$REQ_NEW" -a -n "$REQ_OLD" -a -n "$CRIT_NEW" -a -n "$CRIT_OLD" -a -n "$LOW_NEW" -a -n "$LOW_OLD" -a -n "$PLAN_NEW" -a -n "$PLAN_OLD"
-
-# version_ge: 直接抽腳本裡的函式來測(不另抄一份以免 drift)
-eval "$(awk '/^version_ge\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPT")"
-if type version_ge >/dev/null 2>&1; then
-  ok "版本比較: 0.156.1 >= 0.155.0"            version_ge 0.156.1 0.155.0
-  ok "版本比較: 0.155.0 >= 0.155.0(相等)"      version_ge 0.155.0 0.155.0
-  ok "版本比較: 0.154.9 < 0.155.0"             bash -c "$(declare -f version_ge); ! version_ge 0.154.9 0.155.0"
-  ok "版本比較: 0.153.4 < 0.155.0"             bash -c "$(declare -f version_ge); ! version_ge 0.153.4 0.155.0"
-  ok "版本比較: 0.156.1 < 0.160.0"             bash -c "$(declare -f version_ge); ! version_ge 0.156.1 0.160.0"
-  ok "版本比較: 1.0.0 >= 0.999.9(跨主版號)"     version_ge 1.0.0 0.999.9
-  ok "版本比較: 0.10.0 >= 0.9.0(字串比會判反)"   version_ge 0.10.0 0.9.0
-  ok "版本比較: 0.08.0 不被當八進位"            version_ge 0.08.0 0.7.9
-else
-  echo "FAIL [抽取 version_ge] 腳本結構可能已改"; fail=$((fail+1))
-fi
-# 防回歸: sort -V 在 macOS 的 BSD sort 不一定可用,出錯時會把夠新的 client 誤判成太舊
-ok "版本比較: 腳本不得用 sort -V(只看非註解行)" bash -c "! grep -v '^[[:space:]]*#' '$SCRIPT' | grep -q 'sort -V'"
 
 FB="$(mktemp -d)"
 cat > "$FB/codex" <<'STUBEOF'
@@ -739,19 +722,18 @@ fb_run() { # $1=severity $2=版本(空=讀不出) $3=模式 [$4=kind,預設 spec
   FB_CALLS="$(tr '\n' ' ' < "$FB/log$FB_N" | sed 's/ $//')"
 }
 
-# 0.156.1 是 2026-10-05 升級前的實際版本: 夠 gpt-6-luna(0.155)、不夠 gpt-6.1-sol(0.160)
-fb_run required 0.156.1 ok
-ok "退路/前置: 版本不足 → rc 0"                 test "$FB_RC" -eq 0
-ok "退路/前置: 版本不足 → 直接用舊模型、只問一次"  test "$FB_CALLS" = "$REQ_OLD"
-ok "退路/前置: 有印出改用舊模型的注意"          has "改用舊模型 $REQ_OLD" "$FB_OUT"
-ok "退路/前置: 完成行標出已退回"               has "已退回舊模型" "$FB_OUT"
-ok "退路/前置: 退路 effort 是 high"             has "模型=$REQ_OLD/high" "$FB_OUT"
+# 2026-10-08 起不做 client 版本前置判斷: 即使 --version 回報很舊的版本,也只送主模型、不降級
+# (版本過舊時由伺服器拒絕、走執行期退回)。有人把前置降級加回來,這一組會轉紅。
+fb_run required 0.150.0 ok
+ok "不做版本前置: 舊版號也只送主模型"           test "$FB_CALLS" = "$REQ_NEW"
+ok "不做版本前置: 不得出現改用舊模型"           hasnt "改用舊模型" "$FB_OUT"
 
 FB_REJECT="$REQ_NEW" fb_run required 0.160.0 reject-new
 ok "退路/執行期: 新模型被拒 → rc 0"             test "$FB_RC" -eq 0
 ok "退路/執行期: 先問新模型再問舊模型"          test "$FB_CALLS" = "$REQ_NEW $REQ_OLD"
 ok "退路/執行期: 有印出伺服器不接受的注意"       has "伺服器不接受 $REQ_NEW" "$FB_OUT"
 ok "退路/執行期: 完成行標出已退回"             has "已退回舊模型" "$FB_OUT"
+ok "退路/執行期: 退路 effort 是 high"           has "模型=$REQ_OLD/high" "$FB_OUT"
 
 FB_REJECT="$CRIT_NEW" fb_run critical 0.160.0 reject-new
 ok "退路/critical 檔: 退到 critical 自己的舊模型" test "$FB_CALLS" = "$CRIT_NEW $CRIT_OLD"
@@ -761,12 +743,8 @@ fb_run required 0.160.0 reject-all
 ok "退路/兩個都被拒: FAILED(rc 1)"              test "$FB_RC" -eq 1
 ok "退路/兩個都被拒: 只退一次,不無限重試"        test "$FB_CALLS" = "$REQ_NEW $REQ_OLD"
 ok "退路/兩個都被拒: 指出舊模型可能也已退役"      has "都被伺服器拒絕" "$FB_OUT"
-
-# 前置退回後舊模型又被拒: 新模型根本沒送出去,診斷不得說它被拒
-fb_run required 0.156.1 reject-all
-ok "退路/前置後被拒: 只問過舊模型一次"            test "$FB_CALLS" = "$REQ_OLD"
-ok "退路/前置後被拒: 診斷講明新模型未送出"         has "新模型未送出" "$FB_OUT"
-ok "退路/前置後被拒: 不得說兩個都被拒"            hasnt "都被伺服器拒絕" "$FB_OUT"
+# 不做版本判斷後,client 意外落後也是這個症狀;訊息要先叫人確認升級,不能只叫人改映射表
+ok "退路/兩個都被拒: 提示先確認 codex CLI 最新"   has "codex CLI 意外落後" "$FB_OUT"
 
 # 負控組 1: 一般錯誤不可觸發退回——否則「複查沒發生」會被偽裝成「用舊模型複查過了」
 fb_run required 0.160.0 generic
@@ -774,13 +752,8 @@ ok "退路/負控(一般錯誤): 仍是 FAILED"            test "$FB_RC" -eq 1
 ok "退路/負控(一般錯誤): 只問一次、不退回"        test "$FB_CALLS" = "$REQ_NEW"
 ok "退路/負控(一般錯誤): 不得出現改用舊模型"      hasnt "改用舊模型" "$FB_OUT"
 
-# 負控組 2: 讀不出版本不可降級——交給執行期退回兜底
-fb_run required "" ok
-ok "退路/負控(讀不出版本): 用新模型"             test "$FB_CALLS" = "$REQ_NEW"
-ok "退路/負控(讀不出版本): 不得出現改用舊模型"    hasnt "改用舊模型" "$FB_OUT"
-
 fb_run required 0.160.0 ok
-ok "退路/正常: 版本夠且模型可用 → 只用新模型"      test "$FB_CALLS" = "$REQ_NEW"
+ok "退路/正常: 模型可用 → 只用新模型"           test "$FB_CALLS" = "$REQ_NEW"
 ok "退路/正常: 完成行不得標退回"                 hasnt "已退回舊模型" "$FB_OUT"
 
 FB_REJECT="$LOW_NEW" fb_run optional 0.160.0 reject-new
@@ -800,20 +773,6 @@ ok "未指定: 照樣警告呼叫端補傳"           has "未傳 --severity" "$
 FB_REJECT="$FBK_NEW" fb_run "" 0.160.0 reject-new
 ok "未指定/退路: 先問 luna 再問 sol"      test "$FB_CALLS" = "$FBK_NEW $FBK_OLD"
 ok "未指定/退路: 退路 effort 是 low"       has "模型=$FBK_OLD/low" "$FB_OUT"
-# 前置版本檢查: 退路(sol 0.160.0)門檻高於主模型(luna 0.155.0)
-fb_run "" 0.156.0 ok
-ok "未指定/前置: 0.156 夠 luna → 只送 luna"       test "$FB_CALLS" = "$FBK_NEW"
-ok "未指定/前置: 0.156 不得觸發退路"              hasnt "改用舊模型" "$FB_OUT"
-fb_run "" 0.154.0 reject-all
-ok "未指定/前置: 主模型與退路門檻都不夠 → rc 1"   test "$FB_RC" -eq 1
-ok "未指定/前置: 一個請求都不送"                 test -z "$FB_CALLS"
-ok "未指定/前置: 說明兩者門檻都不夠"             has "兩者的門檻" "$FB_OUT"
-# 執行期: 帳號未開通 luna,而 client 0.156 也不夠退路 sol → 不重送,原因要說對(不是映射表)
-FB_REJECT="$FBK_NEW" fb_run "" 0.156.0 reject-new
-ok "未指定/執行期: rc 1"                         test "$FB_RC" -eq 1
-ok "未指定/執行期: 只送 luna、不重送 sol"         test "$FB_CALLS" = "$FBK_NEW"
-ok "未指定/執行期: 原因是 client 低於退路門檻"     has "低於退路" "$FB_OUT"
-ok "未指定/執行期: 不得誤導去改映射表"            hasnt "需要更新檔案開頭的映射表" "$FB_OUT"
 fb_run bogus 0.160.0 ok
 ok "未知嚴重度: 同 fallback 主模型"        test "$FB_CALLS" = "$FBK_NEW"
 ok "未知嚴重度: 照樣警告"                 has "未知 severity" "$FB_OUT"

@@ -57,9 +57,8 @@ fi
 # 映射與退路和 codex-review.sh 同一套(模型 2026-10-05 使用者裁定;effort 2026-10-08 依實測調整:
 # required low→medium、luna max→high。依據見該檔 header 的【2026-10-08 實測】)。
 # 同日使用者裁定 gpt-5.6 全面退出(最低 gpt-6):optional 退路改 gpt-6-astra/low。
-# 退路 = 新模型因 client 版本不足或帳號 rollout 未輪到而不可用時改用的舊模型。
-# critical/required 的退路 gpt-6-luna 本身要 client 0.155.0(optional 的退路 astra 要 0.153.0):
-# 低於它時退了也會被拒,結果是 FAILED exit 1(停下交使用者)。
+# 退路 = 伺服器以「模型不可用」拒絕主模型(帳號 rollout 未輪到、模型下架)時改用的模型。
+# 環境一律保持 codex client 最新版(2026-10-08 使用者裁定),不做 client 版本判斷。
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
   critical)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="high" ;;
   required)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="high" ;;
@@ -67,25 +66,6 @@ case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
   *) echo "[codex-decide] 警告: 未知 severity '$SEVERITY',用 required 檔位。" >&2
      MODEL="gpt-6.1-sol"; EFFORT="medium"; LEGACY_MODEL="gpt-6-luna"; LEGACY_EFFORT="high" ;;
 esac
-min_client_for() {
-  case "$1" in
-    gpt-6.1-sol)          echo "0.160.0" ;;
-    gpt-6-sol|gpt-6-luna) echo "0.155.0" ;;
-    gpt-6-astra)          echo "0.153.0" ;;
-    *)                    echo "0.0.0" ;;
-  esac
-}
-# 逐段比數字;不用 sort -V(macOS 的 BSD sort 不一定支援,出錯時會被誤判成版本不夠)
-version_ge() {
-  local IFS=. i a b
-  local -a x=($1) y=($2)
-  for i in 0 1 2; do
-    a="${x[i]:-0}"; b="${y[i]:-0}"
-    (( 10#$a > 10#$b )) && return 0
-    (( 10#$a < 10#$b )) && return 1
-  done
-  return 0
-}
 MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access"
 USED_LEGACY=0
 
@@ -106,13 +86,6 @@ fi
 if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
   echo "[codex-decide] SKIP: codex 未授權 —— 停下交使用者。" >&2
   exit 3
-fi
-# client 版本不夠就直接改用舊模型;讀不出版本時不降級,交給執行期退回兜底。
-CLIENT_VER="$("$CODEX_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-NEED_VER="$(min_client_for "$MODEL")"
-if [ -n "$CLIENT_VER" ] && [ "$LEGACY_MODEL" != "$MODEL" ] && ! version_ge "$CLIENT_VER" "$NEED_VER"; then
-  echo "[codex-decide] 注意: codex CLI $CLIENT_VER 低於 $MODEL 需要的 $NEED_VER,本次改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT。" >&2
-  MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
