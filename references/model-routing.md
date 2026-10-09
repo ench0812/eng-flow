@@ -9,13 +9,13 @@ Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能
 | **A** | opus（繼承主線） | `high` | 平行深度任務、跨模組驗證 — **節制使用** | Omit `model` + `effort:'high'` |
 | **B1** | sonnet | `xhigh` | 複雜商業邏輯、演算法 — 執行層首選工程師 | Workflow：`model:"sonnet"` + `effort:'xhigh'`；Agent tool：`subagent_type:"eng-flow:tier-b1"` |
 | **B2** | sonnet | `medium` | Spec 明確的實作、標準重構 | Workflow：`model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"` |
-| **C** | haiku | **不設** | 樣板、config、migration、文件 | `model:"haiku"`，`effort` 留空 |
+| **C** | haiku（Haiku 5.5） | low | 樣板、config、migration、文件 | `model:"haiku"` + `effort:'low'`；Agent tool 用 `eng-flow:tier-c` |
 
 **檔位名稱跨模型不等值**（2026-10-06，依官方 prompting 指南，未在本機 eval）：`opus` 解析為 Opus 5.5，其 API 預設是 `medium` 而非 `high`，官方量測 5.5 的 `medium` 在 coding／知識工作上已追平或超過 Opus 5 的 `high`，且同一檔位下 5.5 想得比 5 多——所以 Session／A 的 `high` 比 Opus 5 時代貴，這是刻意保留的（使用者 2026-10-06 裁定維持）。`sonnet` 解析為 Sonnet 5.5，官方對 agentic coding 的起點是 `medium`（spec 明確）／`high`（較難較長），`xhigh` 只給量測過有增益的工作；B1 維持 `xhigh` 是使用者裁定，副作用與對策見沿革。來源（2026-10-06 讀取）：`platform.claude.com/docs/en/build-with-claude/effort` 的各模型建議檔位，以及 `.../prompt-engineering/prompting-claude-opus-5-5`、`prompting-claude-opus-5`、`prompting-claude-sonnet-5-5`、`prompting-claude-sonnet-5`。
 
-B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想出解法（演算法、跨模組互動、狀態機、並行/交易邏輯）→ B1；解法已寫在 spec/plan 裡、只是落地成 code → B2。C 層刻意不設 effort——樣板與文件不需要推理預算，交給模型自己的預設。
+B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想出解法（演算法、跨模組互動、狀態機、並行/交易邏輯）→ B1；解法已寫在 spec/plan 裡、只是落地成 code → B2。C 層 effort 定為 low（2026-10-09 起；原為「刻意不設」——那是 Haiku 4.5 不支援 effort 時的寫法，Haiku 5.5 支援 effort、預設 medium，而 omit 會繼承 session 的 high）。
 
-**B 層走 Agent tool 時必須指名 plugin agent**（2026-09-29）：Agent tool 只有 `model` 參數、沒有 `effort`，直接寫 `model:"sonnet"` 會讓 effort 繼承 session 的 `effortLevel`（目前 `high`）——B1 少一檔、B2 多兩檔，而且沒有任何提示。`agents/tier-b1.md`、`agents/tier-b2.md` 把 model + effort 寫在 frontmatter（plugin agent 支援這兩個欄位），隨 plugin 發佈，不依賴本機 `~/.claude/agents/`。A 層照舊 omit `model`＋繼承 session，C 層不設 effort，所以 Agent tool 直接派不受影響。
+**B 層走 Agent tool 時必須指名 plugin agent**（2026-09-29）：Agent tool 只有 `model` 參數、沒有 `effort`，直接寫 `model:"sonnet"` 會讓 effort 繼承 session 的 `effortLevel`（目前 `high`）——B1 少一檔、B2 多兩檔，而且沒有任何提示。`agents/tier-b1.md`、`agents/tier-b2.md`、`agents/tier-c.md` 把 model + effort 寫在 frontmatter（plugin agent 支援這兩個欄位），隨 plugin 發佈，不依賴本機 `~/.claude/agents/`。A 層照舊 omit `model`＋繼承 session，所以 Agent tool 直接派不受影響；C 層自 Haiku 5.5 起支援 effort，直接寫 `model:"haiku"` 會繼承 session 的 high，所以同樣要用 `eng-flow:tier-c`。
 
 ### D 層的判準：有沒有快速的驗證迴路
 
@@ -64,7 +64,7 @@ Fable 比 Opus 貴 2.5 倍且貴在 output。但**把這個當主判準會做出
 
 ### D 層的兩個硬限制
 
-**Effort 無法明寫**：Agent tool 只有 `model` 參數、**沒有 `effort`**，所以 D 層派工的 effort 繼承 session 的 `effortLevel`。這違反本文件「除 C 層外一律明寫」的規則，是工具限制不是疏忽。要明寫得改走 Workflow `agent()` 的 `opts.effort` 或具名 agent 的 frontmatter——skill 刻意不那樣做，因為它要能在沒有本機 `~/.claude/agents/` 的機器上照跑。（2026-09-29 起 B 層已改用隨 plugin 發佈的 `agents/tier-b*.md` 解決同一個問題，所以「依賴本機 agents」這個理由對 plugin agent 不成立；D 層要不要比照加一個 `tier-d` 是另一個決定，尚未做。）**Fable 5.1 的 thinking 恆開**（`{type:"disabled"}` 與 `budget_tokens` 都回 400），所以「沒明寫 effort」不等於「沒有推理預算」，只等於「用 session 的檔位」。
+**Effort 無法明寫**：Agent tool 只有 `model` 參數、**沒有 `effort`**，所以 D 層派工的 effort 繼承 session 的 `effortLevel`。這違反本文件「每一層都明寫」的規則，是工具限制不是疏忽。要明寫得改走 Workflow `agent()` 的 `opts.effort` 或具名 agent 的 frontmatter——skill 刻意不那樣做，因為它要能在沒有本機 `~/.claude/agents/` 的機器上照跑。（2026-09-29 起 B 層、2026-10-09 起 C 層已改用隨 plugin 發佈的 `agents/tier-b*.md`／`agents/tier-c.md` 解決同一個問題，所以「依賴本機 agents」這個理由對 plugin agent 不成立；D 層要不要比照加一個 `tier-d` 是另一個決定，尚未做。）**Fable 5.1 的 thinking 恆開**（`{type:"disabled"}` 與 `budget_tokens` 都回 400），所以「沒明寫 effort」不等於「沒有推理預算」，只等於「用 session 的檔位」。
 
 **ZDR 組織不可用**：Fable 5.1 要求 30 天資料保留，未經 Anthropic 明確授權的零資料保留組織呼叫它會回 `400 invalid_request_error`。症狀是硬失敗而非靜默降級，所以好診斷；但這條流程若搬到有 ZDR 設定的環境，Draft Stage 會整段失效——照各 skill 的「Fable 不可用時」分支走主線自己做即可。
 
@@ -72,9 +72,9 @@ Fable 比 Opus 貴 2.5 倍且貴在 output。但**把這個當主判準會做出
 
 - **mao-execute pipeline**: implement 依任務性質選 B1 或 B2（plan 標記 architecture-level / high-uncertainty 的升 A）；spec-review / code-review 走 B2，安全 / 認證 / 資料完整性相關的升 A。
 - **mao-review reviewer dispatch**: default B2（Workflow：`model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"`）。High-risk changes (security, auth, data integrity) → A（omit `model` + `effort:'high'`）。
-- **Plugin agents** (`agents/`, invoked as `eng-flow:<name>`): tier-b1=B1, tier-b2=B2。B 層在 Agent tool 路徑上唯一能帶 effort 的方式；Workflow `agent()` 直接寫 `model` + `effort` 即可，不需要它們。
-- **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=A, root-cause-debugger=A, implementer=B2（其定義就是「依明確 spec 落地」）, mechanical-scanner=C。These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
-- **Effort 寫在哪**：Workflow `agent()` 用 `opts.effort`；agent 定義檔（plugin `agents/*.md` 或 `~/.claude/agents/*.md`）用 frontmatter `effort:`；Agent tool 本身帶不了。除 C 層外一律明寫——session 有自己的 effortLevel，omit 會讓 stage 悄悄繼承它、失去分層的意義。
+- **Plugin agents** (`agents/`, invoked as `eng-flow:<name>`): tier-b1=B1, tier-b2=B2, tier-c=C。B、C 層在 Agent tool 路徑上唯一能帶 effort 的方式；Workflow `agent()` 直接寫 `model` + `effort` 即可，不需要它們。
+- **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=A, root-cause-debugger=A, implementer=B2（其定義就是「依明確 spec 落地」）, mechanical-scanner=C；另有同名覆蓋內建版的 `Explore`（Haiku 5.5／medium，2026-10-09）。These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
+- **Effort 寫在哪**：Workflow `agent()` 用 `opts.effort`；agent 定義檔（plugin `agents/*.md` 或 `~/.claude/agents/*.md`）用 frontmatter `effort:`；Agent tool 本身帶不了。每一層都明寫（C 層自 Haiku 5.5 起也支援 effort）——session 有自己的 effortLevel，omit 會讓 stage 悄悄繼承它、失去分層的意義。
 - **Draft stage dispatch**: mao-brainstorm 2.5 與 mao-plan Draft Stage 走 D（`model:"fable"`），一次，之後不再出現。Fable 不可用時由主線自己走完該階段並在交付時講一句，**不要為此停下來問使用者**——它是加速器不是必要條件。
 - When unsure: 升 tier（B2→B1→A），不要拆開 model 與 effort 的配對去單獨拉 effort；也不要用降 model 來省成本（能力降級是反向操作）。確定機械化才進 C。**D 不在這條階梯上**——它是階段性的路由，不是「A 之上的一格」，任務難度再高也不是升 D 的理由。
 - **沿革**：2026-08-05 曾把 implement stage 單獨校準為 `effort:'high'`（理由：high→xhigh 對範疇明確任務邊際效益遞減、每輪思考延遲照付，平行化省下的時間不該被吃回去）。該結論已被本版吸收成 **B1**——差別是現在由「任務不確定性」決定 implement 走 B1 還是 B2，而不是整條 implement stage 一律 high。2026-09-29 使用者裁定 B1 改為 `xhigh`（sonnet 解析為 Sonnet 5.5，其 effort 檔位相對 Sonnet 5 重新校準；B2 維持 `medium`），並新增 `tier-b1`／`tier-b2` plugin agent 讓 Agent tool 路徑也守得住這組配對。2026-10-06 依 Sonnet 5.5／Opus 5.5 官方 prompting 指南調整派工 prompt（**effort 值全部不變**，使用者裁定 B1 保留 `xhigh`、Session／A 保留 `high`）：(1) Sonnet 5.5 在 `xhigh`／`max` 做完後會自行開審查與強化輪、甚至派 reviewer subagent，官方實測加一段「做完且檢查通過就停、不自行開審查輪」可省約三分之一成本且品質不變——已加進 `tier-b1.md` 與 `mao-execute/implementer-prompt.md`（後者讓 Workflow 路徑同樣受約束，Workflow 不讀 agent 本文）；(2) Sonnet 5.5 在 `low`／`medium` 的長任務容易做到一半停下來確認，而 subagent 沒有中途提問的管道，停下＝半成品——`tier-b2.md`、`implementer-prompt.md` 與本機 `implementer.md` 加了「做到完」段，並把「對正確性沒把握就停」收窄成「測試也分辨不出時才停」；(3) Sonnet 5／Opus 5 會照「別挑剔」類指令字面壓低 reviewer 的回報量（recall 下降而能力沒變），`code-reviewer-prompt.md` 與 `senior-reviewer.md` 改成「找到的全數回報、以嚴重度標籤分級」，分流交給呼叫端；(4) 驗證段改用官方措辭：只做語法檢查、或檢查指令根本沒起來，都不算驗證。以上四點都是廠商指南的聲稱，本機沒有前後對照量測。

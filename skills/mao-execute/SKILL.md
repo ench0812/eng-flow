@@ -44,11 +44,11 @@ Model + effort routing (shared rules: `references/model-routing.md` — model an
 | implement — spec 明確、只是落地 | **B2** | `model:"sonnet"` + `effort:'medium'` |
 | spec-review / code-review | **B2** | `model:"sonnet"` + `effort:'medium'` |
 | 任何 architecture-level / high-uncertainty / 安全相關的 stage | **A** | omit `model`（inherits session）+ `effort:'high'` |
-| 樣板、config、migration、文件這類機械高量 stage | **C** | `model:"haiku"`，`effort` 留空 |
+| 樣板、config、migration、文件這類機械高量 stage | **C** | `model:"haiku"` + `effort:'low'` |
 
-Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand-tuning its effort. Outside tier C, never omit `effort` — an omitted effort silently inherits the session level and the layering stops meaning anything.
+Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand-tuning its effort. Never omit `effort`, tier C included (Claude Haiku 5.5 supports effort, so an omitted one inherits the session level too) — an omitted effort silently inherits the session level and the layering stops meaning anything.
 
-**Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool *within* each task. Tasks that may run in parallel (see Parallel vs Sequential) still run concurrently: send their Agent calls in one message, with `isolation: "worktree"` when they write files or commit in the same working tree. Losing Workflow is not a reason to serialize independent tasks. The Agent tool has no `effort` parameter, so dispatch B-tier stages by plugin agent instead of `model:"sonnet"`: B1 → `subagent_type:"eng-flow:tier-b1"`, B2 → `subagent_type:"eng-flow:tier-b2"` (their frontmatter carries the model + effort pair). A plain `model:"sonnet"` would silently run at the session's effort level.
+**Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool *within* each task. Tasks that may run in parallel (see Parallel vs Sequential) still run concurrently: send their Agent calls in one message, with `isolation: "worktree"` when they write files or commit in the same working tree. Losing Workflow is not a reason to serialize independent tasks. The Agent tool has no `effort` parameter, so dispatch B-tier stages by plugin agent instead of `model:"sonnet"`: B1 → `subagent_type:"eng-flow:tier-b1"`, B2 → `subagent_type:"eng-flow:tier-b2"`, C → `subagent_type:"eng-flow:tier-c"` (their frontmatter carries the model + effort pair). A plain `model:"sonnet"` or `model:"haiku"` would silently run at the session's effort level.
 
 ## Parallel vs Sequential
 
@@ -63,7 +63,7 @@ Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand
 **DONE:** Proceed to spec review.
 **DONE_WITH_CONCERNS:** Read concerns. If correctness/scope issue → address first. If observation → note and proceed.
 **NEEDS_CONTEXT:** Provide missing context and re-dispatch.
-**BLOCKED:** Assess: context problem → provide context. Task too large → split. Plan wrong → escalate to user.
+**BLOCKED:** Assess: context problem → provide context. Task too large → split. "Needs a higher tier" (a tier-C or B2 agent hit a judgment call) → re-dispatch one tier up (C → B2 → B1). Plan wrong → escalate to user.
 
 ## Prompt Templates
 
