@@ -42,6 +42,11 @@ run() { # $1=severity ; REJECT 由呼叫端環境帶入
 models() { awk 'p=="-m"{print} {p=$0}' "$T/calls.log" | tr '\n' ' ' | sed 's/ $//'; }
 efforts() { grep -o 'model_reasoning_effort=.*' "$T/calls.log" | sed 's/model_reasoning_effort=//' | tr '\n' ' ' | sed 's/ $//'; }
 memflags() { grep -cx 'features.memories=false' "$T/calls.log"; }
+isoflags() { grep -cx -- '--ignore-user-config' "$T/calls.log"; }
+# 假 CODEX_HOME: [windows] 前面故意放別段的 sandbox 鍵(段落判斷寫錯就會帶成 "wrong")
+mkdir -p "$T/codexhome"
+printf 'notes = """\n[windows]\nsandbox = "wrong"\n"""\n[other]\nsandbox = "wrong"\n[windows] # backend\nsandbox = "elevated" # chosen\n' > "$T/codexhome/config.toml"
+export CODEX_HOME="$T/codexhome"
 
 for row in "critical gpt-6.1-sol medium" "required gpt-6.1-sol medium" "optional gpt-6-luna high" "nit gpt-6-luna high" "bogus gpt-6.1-sol medium"; do
   set -- $row
@@ -50,6 +55,8 @@ for row in "critical gpt-6.1-sol medium" "required gpt-6.1-sol medium" "optional
   ok "$1: 模型 $2"                  test "$(models)" = "$2"
   ok "$1: effort $3"                test "$(efforts)" = "$3"
   ok "$1: 帶 memories off"          test "$(memflags)" -eq 1
+  ok "$1: 帶 --ignore-user-config"  test "$(isoflags)" -eq 1
+  ok "$1: windows.sandbox 原值帶回" test "$(grep -cx 'windows.sandbox="elevated"' "$T/calls.log")" -eq 1
 done
 
 # 執行期退回: 主模型被拒 → 用該檔的舊模型與其 effort 重問一次,兩次呼叫都帶 memories off
@@ -60,6 +67,7 @@ for row in "required gpt-6.1-sol gpt-6-luna high" "optional gpt-6-luna gpt-6-ast
   ok "$1 退回: 先問 $2 再問 $3"             test "$(models)" = "$2 $3"
   ok "$1 退回: 退路 effort $4"              test "$(efforts | awk '{print $2}')" = "$4"
   ok "$1 退回: 兩次都帶 memories off"       test "$(memflags)" -eq 2
+  ok "$1 退回: 兩次都帶 --ignore-user-config" test "$(isoflags)" -eq 2
 done
 
 # 不得再出現已退出的 gpt-5.6(2026-10-08 使用者裁定最低 gpt-6)

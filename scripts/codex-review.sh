@@ -433,7 +433,9 @@ jnum() {
 tsv() { local v="$1"; v="${v//$'\t'/ }"; v="${v//$'\n'/ }"; printf '%s' "$v"; }
 emit_telemetry() {  # $1=狀態(OK|OK_NOVERIFY|FAILED|RATE_LIMITED|SKIP_DEDUP|TOO_LARGE)
   local usage in_t cin_t out_t rea_t hit
-  usage="$(grep -o '"usage":{[^}]*}' "$JSON_FILE" 2>/dev/null | tail -1)"
+  # JSON_FILE 要到呼叫 codex 前才建立,而去重 SKIP／送出前長度守門在那之前就會記遙測——
+  # 沒有預設值時 set -u 會讓這兩條路徑以 unbound variable 崩潰(2026-10-12 實際踩到)。
+  usage="$(grep -o '"usage":{[^}]*}' "${JSON_FILE:-/dev/null}" 2>/dev/null | tail -1)"
   in_t="$(jnum "$usage" input_tokens)";  cin_t="$(jnum "$usage" cached_input_tokens)"
   out_t="$(jnum "$usage" output_tokens)"; rea_t="$(jnum "$usage" reasoning_output_tokens)"
   : "${in_t:=0}" "${cin_t:=0}" "${out_t:=0}" "${rea_t:=0}"
@@ -1032,20 +1034,47 @@ EPHEMERAL_FLAG=""
 # 關掉 codex 的 memories(2026-10-08 實測): 使用者 config 開著 features.memories 時,每次都注入
 # 約 7.3k 字元的 Memory 區塊,而 gpt-6-luna 有 5/9 次因此去讀工作根以外的
 # ~/.codex/memories/MEMORY.md(sol 0/12)。複查不需要它;以非 ephemeral rollout 前後比對驗證
-# 這個旗標確實讓區塊消失(不是只看 config 被接受)。點狀覆寫,不用 --ignore-user-config——
-# 後者會一併丟掉 sandbox 修復依賴的 [windows] 設定。
+# 這個旗標確實讓區塊消失(不是只看 config 被接受)。下面的 --ignore-user-config 之後使用者
+# config 本來就不讀,這行仍保留:codex 的 memories 預設值不保證是關的。
 NO_MEMORIES_FLAG="features.memories=false"
+# 不讀使用者的 config.toml(2026-10-13 新增,取代「點狀覆寫就好」的舊判斷):
+# ~/.codex 是 CLI 與 Codex 桌面版【共用】的 home,桌面版的 computer-use 會自己往裡面寫
+# notify(codex-computer-use.exe)、[mcp_servers.node_repl] 與 unified-computer-use plugin
+# (cua_repl MCP)。於是每次 `codex exec` 一啟動就拉起 cua_node 的 node_repl.exe,而 0.162.1
+# 的 sandbox setup 要【獨佔】同一個檔改 ACL → os error 32 → setup refresh had errors →
+# 每一次 shell 呼叫都失敗,複查全程讀不到檔(實測: 監看程序清單看到 codex.exe 拉起
+# node_repl.exe;關掉這三項後 shell 立即恢復)。點狀關閉擋不住「明天桌面版又注入一個新的」,
+# 而無人值守的複查本來就不需要使用者的任何 MCP/plugin/notify,所以整份不讀。
+# 唯一需要沿用的是 [windows] sandbox(沙箱修復依賴它):從使用者 config 讀出原值帶回,
+# 不寫死——使用者日後改它時這裡跟著走;讀不到就不帶,交給 codex 預設。
+CODEX_CFG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+# 解析要容得下 TOML 的行尾註解(`[windows] # x`、`sandbox = "elevated" # x`,2026-10-13 codex
+# 複查抓到第一版會把後者讀成 elevated#x);值只接受單純的模式字,因為要拼進 -c 覆寫。
+# 多行字串("""／''')裡的行可能長得像段落或鍵(例如 developer_instructions 裡的範例),整段略過。
+USER_WIN_SANDBOX="$(awk '
+  { n=gsub(/"""|\047\047\047/,"&") }
+  ml || n%2==1 { if (n%2==1) ml=!ml; next }
+  /^[[:space:]]*\[/ { h=$0; sub(/#.*/,"",h); gsub(/[[:space:]]/,"",h); s=(h=="[windows]"); next }
+  s && /^[[:space:]]*sandbox[[:space:]]*=/ {
+    v=$0; sub(/^[^=]*=[[:space:]]*/,"",v)
+    if (match(v,/^"[^"]*"/) || match(v,/^\047[^\047]*\047/)) v=substr(v,2,RLENGTH-2)
+    else { sub(/#.*/,"",v); gsub(/[[:space:]]/,"",v) }
+    if (v ~ /^[A-Za-z0-9_-]+$/) print v
+    exit
+  }' "$CODEX_CFG" 2>/dev/null)"
+ISOLATE_ARGS=(--ignore-user-config)
+[ -n "$USER_WIN_SANDBOX" ] && ISOLATE_ARGS+=(-c "windows.sandbox=\"$USER_WIN_SANDBOX\"")
 
 run_codex() {
 { { if [ "$SESSION_MODE" = "resume" ]; then
       printf '%s\n\n%s\n' "$RESUME_PROMPT" "$DELTA" \
-        | "$CODEX_BIN" exec resume "$RESUME_ID" - --json -o "$LAST_FILE" \
+        | "$CODEX_BIN" exec resume "$RESUME_ID" - --json -o "$LAST_FILE" "${ISOLATE_ARGS[@]}" \
             -c sandbox_mode="read-only" $SKIP_GIT_FLAG -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT"
     else
       printf '%s\n' "$SEND_PAYLOAD" \
         | "$CODEX_BIN" exec --sandbox read-only --json -o "$LAST_FILE" $EPHEMERAL_FLAG $SKIP_GIT_FLAG \
-            --cd "$REPO_ROOT" -c "$NO_MEMORIES_FLAG" \
+            "${ISOLATE_ARGS[@]}" --cd "$REPO_ROOT" -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT"
     fi
     echo "${PIPESTATUS[1]}" > "$RC_FILE"
@@ -1194,6 +1223,8 @@ if [ -n "$TOOL_FAIL_LINES" ]; then
   [ -n "$CODES" ] && echo "    OS 錯誤碼: $CODES" >&2
   echo "  處置: 標【推論】的項目照常看待;標【已讀】的項目要自己回頭核對,它可能根本沒讀成。" >&2
   echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\"" >&2
+  echo "  沙箱能跑但 exec 仍失敗時: 看 \$CODEX_HOME/.sandbox/setup_error.json 與當天 sandbox.<日期>.log 的 os error 32——" >&2
+  echo "    那是某個程序正握著 setup 要改 ACL 的檔(2026-10-13 實例: 桌面版注入的 MCP 拉起的 node_repl.exe)。" >&2
 fi
 # 【已知的偵測缺口,刻意留著】: 上面只掃 stderr。codex 也會把失敗以對話內容回饋給模型
 # ——2026-08-28 的 rollout 樣本裡形如 {"type":"input_text","text":"Script error:\nexec_command

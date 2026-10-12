@@ -129,9 +129,26 @@ trap 'rm -f "$OUT" "$ERR" 2>/dev/null || true' EXIT
 
 # features.memories=false: 理由同 codex-review.sh 的 NO_MEMORIES_FLAG(注入 7.3k Memory 區塊、
 # luna 會因此讀工作根以外的檔)。
+# --ignore-user-config ＋ 帶回使用者的 [windows] sandbox: 理由同 codex-review.sh 的 ISOLATE_ARGS
+# (桌面版往共用 ~/.codex 注入的 MCP 拉起 node_repl.exe,與 sandbox setup 互鎖,shell 全失敗)。
+CODEX_CFG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+# 解析規則與 codex-review.sh 相同(容得下行尾註解、略過多行字串、值只接受單純的模式字)。
+USER_WIN_SANDBOX="$(awk '
+  { n=gsub(/"""|\047\047\047/,"&") }
+  ml || n%2==1 { if (n%2==1) ml=!ml; next }
+  /^[[:space:]]*\[/ { h=$0; sub(/#.*/,"",h); gsub(/[[:space:]]/,"",h); s=(h=="[windows]"); next }
+  s && /^[[:space:]]*sandbox[[:space:]]*=/ {
+    v=$0; sub(/^[^=]*=[[:space:]]*/,"",v)
+    if (match(v,/^"[^"]*"/) || match(v,/^\047[^\047]*\047/)) v=substr(v,2,RLENGTH-2)
+    else { sub(/#.*/,"",v); gsub(/[[:space:]]/,"",v) }
+    if (v ~ /^[A-Za-z0-9_-]+$/) print v
+    exit
+  }' "$CODEX_CFG" 2>/dev/null)"
+ISOLATE_ARGS=(--ignore-user-config)
+[ -n "$USER_WIN_SANDBOX" ] && ISOLATE_ARGS+=(-c "windows.sandbox=\"$USER_WIN_SANDBOX\"")
 run_codex() {
   printf '%s\n\n---\n\n%s\n' "$PROMPT" "$(cat "$QUESTION")" \
-    | "$CODEX_BIN" exec -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
+    | "$CODEX_BIN" exec "${ISOLATE_ARGS[@]}" -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
         -c features.memories=false \
         --sandbox read-only $SKIP_GIT --cd "$REPO_ROOT" - >"$OUT" 2>"$ERR"
   RC=$?

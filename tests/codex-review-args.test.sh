@@ -188,6 +188,26 @@ else echo "FAIL [prompt 缺收斂問句指示]"; fail=$((fail+1)); fi
 if grep -qx "features.memories=false" "$STUB/args.txt" 2>/dev/null; then pass=$((pass+1))
 else echo "FAIL [exec 參數缺 -c features.memories=false]"; fail=$((fail+1)); fi
 
+# 不讀使用者 config(2026-10-13: 桌面版注入的 MCP 拉起 node_repl.exe 與 sandbox setup 互鎖),
+# 但 [windows] sandbox 要原值帶回。假 CODEX_HOME 的 config 在 [windows] 前面故意放一個別段的
+# sandbox 鍵:段落判斷寫錯就會帶成 "wrong"。
+CH="$STUB/codexhome"; mkdir -p "$CH"
+printf 'notify = ["x.exe"]\n[other]\nsandbox = "wrong"\n[windows]\nsandbox = "elevated"\n[mcp_servers.node_repl]\ncommand = "x"\n' > "$CH/config.toml"
+CODEX_HOME="$CH" check_e2e "隔離使用者 config" 0 "無重大補充" "RATE_LIMITED"
+if grep -qx -- "--ignore-user-config" "$STUB/args.txt" 2>/dev/null; then pass=$((pass+1))
+else echo "FAIL [exec 參數缺 --ignore-user-config]"; fail=$((fail+1)); fi
+if grep -qx 'windows.sandbox="elevated"' "$STUB/args.txt" 2>/dev/null && ! grep -q 'wrong' "$STUB/args.txt"; then pass=$((pass+1))
+else echo "FAIL [windows.sandbox 未從 [windows] 段原值帶回]"; fail=$((fail+1)); fi
+# TOML 行尾註解(段落標頭與值後面都有):第一版 awk 會讀不到段落或把值讀成 elevated#chosen
+printf 'developer_instructions = """\n[windows]\nsandbox = "unelevated"\n"""\n[windows] # backend\nsandbox = "elevated" # chosen\n' > "$CH/config.toml"
+CODEX_HOME="$CH" check_e2e "config 帶行尾註解" 0 "無重大補充" "RATE_LIMITED"
+if grep -qx 'windows.sandbox="elevated"' "$STUB/args.txt" 2>/dev/null; then pass=$((pass+1))
+else echo "FAIL [行尾註解時 windows.sandbox 解析錯誤]"; fail=$((fail+1)); fi
+printf 'model = "m"\n' > "$CH/config.toml"
+CODEX_HOME="$CH" check_e2e "config 無 [windows] 段" 0 "無重大補充" "RATE_LIMITED"
+if grep -qx -- "--ignore-user-config" "$STUB/args.txt" 2>/dev/null && ! grep -q '^windows.sandbox' "$STUB/args.txt"; then pass=$((pass+1))
+else echo "FAIL [無 [windows] 段時不該帶 windows.sandbox]"; fail=$((fail+1)); fi
+
 # 收斂問句在場檢查: 有行首行 → 不印注意;缺 → 注意但仍完成(不是 FAILED,findings 仍有效)
 mk_stub 'printf "有一個發現\n收斂問句:無\n"; exit 0'
 check_e2e "帶收斂問句 → 完成且無注意" 0 "完成(" "未附行首"
@@ -588,11 +608,16 @@ ok "resume: 走 resume 分支"          has "resume(11111111)" "$O_R"
 ok "resume: 用 exec resume 子指令"   has "^resume$" "$(cat "$ARGV")"
 ok "resume: 必帶 read-only sandbox"  has "^sandbox_mode=read-only$" "$(cat "$ARGV")"
 ok "resume: 必帶 memories off"       has "^features.memories=false$" "$(cat "$ARGV")"
+ok "resume: 必帶 --ignore-user-config" has "^--ignore-user-config$" "$(cat "$ARGV")"
 ok "resume: 送 delta 不送全文"       test "$(printf '%s' "$O_R" | sed -n 's/.*delta \([0-9][0-9]*\)\/\([0-9][0-9]*\) 字元.*/\1 \2/p' | awk '{print ($1<$2)?"y":"n"}')" = "y"
 
 # 去重與 resume 解耦的【真】命題: resume 開著時,相同內容仍要被擋
-O_D="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"
+O_D="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"; RC_D=$?
 ok "resume 開啟時去重仍生效"         has "SKIP: 送出內容與上一輪" "$O_D"
+# SKIP 在 JSON_FILE 建立前就記遙測;沒有預設值時 set -u 讓它以 unbound variable 崩潰、exit 非 0
+ok "去重 SKIP 路徑 exit 0"           test "$RC_D" -eq 0
+ok "去重 SKIP 路徑不崩潰"            bash -c "! printf '%s' \"\$1\" | grep -q 'unbound variable'" _ "$O_D"
+ok "去重 SKIP 記下遙測"              has "SKIP_DEDUP" "$(cat "$TSV7")"
 ok "FORCE=1 可略過去重攔截"          has "完成(" "$(run7 CODEX_REVIEW_FORCE=1)"
 
 # TTL 之外必須退回 fresh 並說明原因(resume 在窗口外比 fresh 更貴)
