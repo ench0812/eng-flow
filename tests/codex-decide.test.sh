@@ -40,7 +40,11 @@ if [ -n "\${EVENTS:-}" ]; then
   if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
     printf '{"type":"error","message":"model_not_found: %s"}\n' "\$model"; exit 1
   fi
-  [ -n "\$o" ] && printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無\n' > "\$o"
+  # 真 codex 的 -o 檔最後沒有結尾換行(NO_EOL=1 時照做)
+  if [ -n "\$o" ]; then
+    if [ -n "\${NO_EOL:-}" ]; then printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無' > "\$o"
+    else printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無\n' > "\$o"; fi
+  fi
   cat "\$EVENTS"; exit 0
 fi
 # 純文字模式(舊行為): 裁定印在 stdout,不寫 -o 檔 —— 腳本須退回 stdout
@@ -184,6 +188,11 @@ ok "基準: 呼叫帶 --json"                       test "$(grep -cx -- '--json'
 ok "基準: 呼叫帶 -o"                           test "$(grep -cx -- '-o' "$T/calls.log")" -eq 1
 # 事件流裡的 JSONL 不得被當成裁定印出來(最終訊息來自 -o 檔)
 ok "基準: stdout 不含 JSONL 事件"              lf_out_lacks '"type":"thread.started"'
+# 真 codex 的 -o 檔沒有結尾換行 → stdout 仍須以換行結尾(維持舊版從 stdout 捕獲時的輸出形狀;
+# 只取 stdout,2>&1 合併的 out.txt 看不出來)
+( cd "$T/repo" && NO_EOL=1 EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" --question "$T/q.md" --prefer A --severity required >"$T/stdout-only.txt" 2>/dev/null )
+ok "基準: -o 檔缺結尾換行 → stdout 補上"         test "$(tail -c1 "$T/stdout-only.txt" | od -An -c | tr -d ' ')" = '\n'
+ok "基準: 補換行後內容完整(五行契約都在)"        test "$(grep -c '^異議:無$' "$T/stdout-only.txt")" -eq 1
 
 # (a) 真實形狀的失敗 item → 無共識 exit 3,理由行帶錯誤類型
 lf_item "$LF_ERR" -1 failed | lf_events; lf_run

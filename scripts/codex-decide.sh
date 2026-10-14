@@ -191,6 +191,9 @@ if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ "$LEGACY_MODEL" != "$MODEL" 
 fi
 
 cat "$OUT"
+# -o 寫出的最後一則訊息沒有結尾換行(舊版從 stdout 捕獲時有);補上,維持原本的輸出形狀。
+# $( ) 會吃掉結尾換行,所以「非空」即代表缺換行。
+[ -s "$OUT" ] && [ -n "$(tail -c1 "$OUT")" ] && echo
 
 # 額度被擋的訊息在 --json 下可能只以 {"type":"error",…} 事件出現在 stdout,而下面的判定看 stderr 與
 # 裁定本體——不併入就會把額度被擋誤判成 FAILED(兩者處置方向不同: RATE_LIMITED exit 4、FAILED exit 1,
