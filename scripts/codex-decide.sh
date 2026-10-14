@@ -177,13 +177,17 @@ run_codex() {
   # 同 codex-review.sh 的判定。stdout 以 {"type": 起頭才算 JSONL: 那時 -o 檔空就是真的沒有輸出,
   # 留給後面的零輸出 FAILED,不能把一坨 JSONL 當成裁定。
   if [ ! -s "$OUT" ] && ! head -c 16 "$JSONL" 2>/dev/null | grep -q '^{"type":'; then cp "$JSONL" "$OUT" 2>/dev/null; fi
+  # --json 之後 codex 的錯誤(額度被擋、模型不可用…)可能只以 stdout 的 {"type":"error",…} 或
+  # {"type":"turn.failed","error":{"message":…}} 事件出現,stderr 是空的。把這兩種事件行併入 $ERR,
+  # 之後的「模型不可用 → 退回舊模型」與額度判定都只看 $ERR／$OUT。只併事件行,不併整份 JSONL
+  # (模型回覆內容不能帶進判定: agent_message 可能引用這些字樣)。
+  grep -oE '"type":"(error|turn\.failed)"[^}]*}' "$JSONL" 2>/dev/null >> "$ERR" || true
 }
 run_codex
 # 伺服器以「模型不可用」拒絕時用舊模型重問【一次】;其他錯誤照原路徑走 FAILED/RATE_LIMITED,
 # 不被退回機制吞掉——那會把「沒問成」偽裝成「用舊模型問過了」,而這裡的離開碼決定能不能逕行。
-# --json 之後錯誤可能只以 {"type":"error",…} 事件出現在 stdout,所以也要看 $JSONL。
 if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
-   && grep -qE "$MODEL_UNAVAILABLE_PAT" "$ERR" "$OUT" "$JSONL" 2>/dev/null; then
+   && grep -qE "$MODEL_UNAVAILABLE_PAT" "$ERR" "$OUT" 2>/dev/null; then
   echo "[codex-decide] 注意: 伺服器不接受 $MODEL,改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重問一次。" >&2
   MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1
   : > "$OUT"; : > "$ERR"; : > "$JSONL"
@@ -194,11 +198,6 @@ cat "$OUT"
 # -o 寫出的最後一則訊息沒有結尾換行(舊版從 stdout 捕獲時有);補上,維持原本的輸出形狀。
 # $( ) 會吃掉結尾換行,所以「非空」即代表缺換行。
 [ -s "$OUT" ] && [ -n "$(tail -c1 "$OUT")" ] && echo
-
-# 額度被擋的訊息在 --json 下可能只以 {"type":"error",…} 事件出現在 stdout,而下面的判定看 stderr 與
-# 裁定本體——不併入就會把額度被擋誤判成 FAILED(兩者處置方向不同: RATE_LIMITED exit 4、FAILED exit 1,
-# 都停下交使用者,但訊息與重試建議不同)。只併 error 事件行,不併整份 JSONL(避免模型回覆內容帶進判定)。
-grep -o '"type":"error"[^}]*}' "$JSONL" 2>/dev/null >> "$ERR" || true
 
 RATE_PAT="you'?ve (hit|reached) your usage limit|you have (hit|reached) your usage limit|reached your workspace credit limit|out of credits|quota exceeded|rate limit reached"
 if grep -qiE "$RATE_PAT" "$ERR" "$OUT" 2>/dev/null && ! grep -qE '^裁定[:：]' "$OUT" 2>/dev/null; then

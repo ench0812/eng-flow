@@ -38,13 +38,17 @@ for a in "\$@"; do [ "\$prev" = "-o" ] && o="\$a"; prev="\$a"; done
 # 最終訊息寫進 -o 指定的檔。JSON_ERR 非空 → 以 error 事件(只在 stdout、stderr 空)失敗。
 if [ -n "\${EVENTS:-}" ]; then
   if [ -n "\${JSON_ERR:-}" ]; then
-    # TURN_FAILED=1 → 只有 turn.failed 事件帶訊息(沒有獨立的 error 事件)
+    # 先印事件檔(可含 agent_message 等),再印失敗事件。TURN_FAILED=1 → 只有 turn.failed 事件帶訊息
+    # (沒有獨立的 error 事件)
+    cat "\$EVENTS"
     if [ -n "\${TURN_FAILED:-}" ]; then printf '{"type":"turn.failed","error":{"message":"%s"}}\n' "\$JSON_ERR"
     else printf '{"type":"error","message":"%s"}\n' "\$JSON_ERR"; fi
     exit 1
   fi
   if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
-    printf '{"type":"error","message":"model_not_found: %s"}\n' "\$model"; exit 1
+    if [ -n "\${TURN_FAILED:-}" ]; then printf '{"type":"turn.failed","error":{"message":"model_not_found: %s"}}\n' "\$model"
+    else printf '{"type":"error","message":"model_not_found: %s"}\n' "\$model"; fi
+    exit 1
   fi
   # 真 codex 的 -o 檔最後沒有結尾換行(NO_EOL=1 時照做);NO_O=1 → 完全不寫 -o 檔(exit 0 但沒有最終訊息)
   if [ -n "\$o" ] && [ -z "\${NO_O:-}" ]; then
@@ -278,6 +282,34 @@ ok "額度被擋只在 stdout error 事件 → RATE_LIMITED"  lf_out_has 'RATE_L
 REJECT=gpt-6.1-sol lf_run
 ok "模型不可用只在 stdout error 事件 → 退回舊模型"  test "$(models)" = "gpt-6.1-sol gpt-6-luna"
 ok "模型不可用只在 stdout error 事件 → 退回後共識"  lf_agreed
+# turn.failed 事件(error.message,沒有獨立的 error 事件)也要併入(2026-10-14 A 層審查):
+# 否則只有 turn.failed 帶額度訊息時會被分成 FAILED(exit 1)而不是 RATE_LIMITED(exit 4)
+TURN_FAILED=1 JSON_ERR="You've hit your usage limit. Upgrade to Pro" lf_run
+ok "額度被擋只在 turn.failed → exit 4"             test "$lf_rc" -eq 4
+ok "額度被擋只在 turn.failed → RATE_LIMITED"        lf_out_has 'RATE_LIMITED'
+TURN_FAILED=1 REJECT=gpt-6.1-sol lf_run
+ok "模型不可用只在 turn.failed → 退回舊模型"        test "$(models)" = "gpt-6.1-sol gpt-6-luna"
+ok "模型不可用只在 turn.failed → 退回後共識"        lf_agreed
+# 一般失敗(不是額度、不是模型不可用) → FAILED exit 1,不退回
+JSON_ERR=boom lf_run
+ok "一般 error 事件 → FAILED exit 1"                test "$lf_rc" -eq 1 -a "$(grep -c 'FAILED:' "$T/out.txt")" -eq 1
+ok "一般 error 事件 → 不重問(只呼叫一次)"           test "$(models)" = "gpt-6.1-sol"
+# 只併 error／turn.failed 事件行,不併整份 JSONL: agent_message 引用額度字樣或 model_not_found
+# 都不得把一般失敗誤判成 RATE_LIMITED／觸發舊模型退回(模型回覆內容不能帶進判定)
+{ lf_item "PROBE-OK" 0 completed
+  echo '{"type":"item.completed","item":{"id":"item_8","type":"agent_message","text":"You'\''ve hit your usage limit. Upgrade to Pro"}}'
+  echo '{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"model_not_found: gpt-6.1-sol"}}'; } | lf_events
+JSON_ERR=boom lf_run
+ok "agent_message 引用字樣 + 一般失敗 → 仍是 FAILED exit 1" test "$lf_rc" -eq 1 -a "$(grep -c 'FAILED:' "$T/out.txt")" -eq 1
+ok "agent_message 引用字樣 → 不得判成 RATE_LIMITED"   lf_out_lacks 'RATE_LIMITED'
+ok "agent_message 引用 model_not_found → 不得退回舊模型" test "$(models)" = "gpt-6.1-sol"
+
+# 守門: stdout 是 JSONL、-o 檔沒寫出、codex exit 0 → FAILED exit 1。不是把 JSONL 當裁定解析
+# (那會變成「缺少契約行」的 exit 3,看起來像模型沒照格式而不是諮詢根本沒拿到結果)
+lf_item "PROBE-OK" 0 completed | lf_events
+NO_O=1 lf_run
+ok "-o 沒寫出(JSONL 在 stdout、exit 0) → FAILED exit 1" test "$lf_rc" -eq 1 -a "$(grep -c 'FAILED:' "$T/out.txt")" -eq 1
+ok "-o 沒寫出 → 不是缺契約行的無共識"              lf_out_lacks '缺少契約行'
 # === LAUNCHFAIL-END ===
 
 # 不得再出現已退出的 gpt-5.6(2026-10-08 使用者裁定最低 gpt-6)

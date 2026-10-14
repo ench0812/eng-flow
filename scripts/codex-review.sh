@@ -1151,15 +1151,29 @@ fi
 # fallback 存在是為了讓測試用的 stub(印純文字、不寫 -o 檔)照舊可用。但它不能把
 # 「真 codex 印了 JSONL、-o 卻落空」也一起吞掉——那會讓呼叫端拿到一坨 JSON 當第二意見,
 # 外加一句「完成」,正是本腳本 header 說「假成功比直接報錯危險」要防的那一類。
+# --json 之後 codex 的錯誤(含額度被擋)可能只以 stdout 的 {"type":"error",...} 或
+# {"type":"turn.failed","error":{"message":...}} 事件出現(stderr 是空的),而 rate-limit 判定看的是
+# stderr 與 review 本體 —— 不補這一步,額度被擋會被誤判成 FAILED,而兩者處置方向相反
+# (RATE_LIMITED 不重試直接繼續;FAILED 不得放行)。只併入這兩種事件行,不併整份 JSONL,避免把模型
+# 回覆內容帶進判定造成誤判。
+# 【必須在下面的 OUT_FILE 分流之前】(2026-10-14): 先前這段在分流之後,而 -o 落空＋stdout 是 JSONL 的分支
+# 一律直接 FAILED,於是 JSONL 模式下額度被擋(stdout 只有事件、-o 空)永遠被分成 FAILED,這段併入形同死碼。
+grep -oE '"type":"(error|turn\.failed)"[^}]*}' "$JSON_FILE" 2>/dev/null >> "$ERR_FILE" || true
+
 if [ -s "$LAST_FILE" ]; then
   OUT_FILE="$LAST_FILE"
 elif head -c 16 "$JSON_FILE" 2>/dev/null | grep -q '^{"type":'; then
-  echo "[codex-review] FAILED: codex 有輸出但 -o 檔是空的,取不到 review 本體(exit=$RC)。" >&2
-  echo "  這不是「無重大遺漏」,是複查沒有拿到結果——呼叫端不得視為已複查。" >&2
-  echo "  codex stderr(末 20 行):" >&2
-  tail -n 20 "$ERR_FILE" >&2
-  emit_telemetry FAILED
-  exit 1
+  if is_rate_limited "$RC" "$ERR_FILE" "$LAST_FILE"; then
+    # 額度被擋: -o 空、stdout 只有事件流。OUT_FILE 指向(空的)-o 檔,交給下面的 RATE_LIMITED 分支處置。
+    OUT_FILE="$LAST_FILE"
+  else
+    echo "[codex-review] FAILED: codex 有輸出但 -o 檔是空的,取不到 review 本體(exit=$RC)。" >&2
+    echo "  這不是「無重大遺漏」,是複查沒有拿到結果——呼叫端不得視為已複查。" >&2
+    echo "  codex stderr(末 20 行):" >&2
+    tail -n 20 "$ERR_FILE" >&2
+    emit_telemetry FAILED
+    exit 1
+  fi
 else
   OUT_FILE="$JSON_FILE"
 fi
@@ -1167,12 +1181,6 @@ cat "$OUT_FILE"
 # -o 寫出的最後一則訊息沒有結尾換行,不補的話後續 stderr 狀態行會黏在 review 的最後一行上
 # (症狀: `收斂問句:...[codex-review] 用量: ...`)。$( ) 會吃掉結尾換行,所以「非空」即代表缺換行。
 [ -s "$OUT_FILE" ] && [ -n "$(tail -c1 "$OUT_FILE")" ] && echo
-
-# --json 之後 codex 的錯誤(含額度被擋)可能只以 {"type":"error",...} 事件出現在 stdout,
-# 而 rate-limit 判定看的是 stderr 與 review 本體 —— 不補這一步,額度被擋會被誤判成
-# FAILED,而兩者處置方向相反(RATE_LIMITED 不重試直接繼續;FAILED 不得放行)。
-# 只併入 error 事件行,不併整份 JSONL,避免把模型回覆內容帶進判定造成誤判。
-grep -o '"type":"error"[^}]*}' "$JSON_FILE" 2>/dev/null >> "$ERR_FILE" || true
 
 if is_rate_limited "$RC" "$ERR_FILE" "$OUT_FILE"; then
   echo "[codex-review] RATE_LIMITED: codex 回報用量/額度上限,本次諮詢沒有取得結果(codex exit=$RC)。" >&2

@@ -705,6 +705,9 @@ case "$1" in
   exec)
     o=""; prev=""
     for a in "$@"; do [ "$prev" = "-o" ] && o="$a"; prev="$a"; done
+    # 失敗模式(LF_FAIL 是一行失敗事件): 不寫 -o 檔,stdout 只有事件流 + 該失敗事件,stderr 空,exit 1
+    # ——忠實模擬 --json 下「額度被擋／失敗只出現在 stdout 事件」的形態
+    if [ -n "${LF_FAIL:-}" ]; then cat "$LF_EVENTS"; printf '%s\n' "$LF_FAIL"; exit 1; fi
     [ -n "$o" ] && printf '%s\n' "${LF_REVIEW_LINE:-- Required【已讀】 foo.go:1 確認有問題}" "收斂問句:無" > "$o"
     cat "$LF_EVENTS"
     [ -n "${LF_STDERR:-}" ] && cat "$LF_STDERR" >&2
@@ -730,6 +733,7 @@ lf_run() { # 合併 stdout+stderr;每次獨立 ledger,免得被「內容與上�
   local st; st="$(mktemp -d "$LF/st.XXXXXX")"
   PATH="$LF:$PATH" LF_EVENTS="$LF/ev.jsonl" CODEX_REVIEW_STATE="$st" CODEX_REVIEW_LOG="$LF/usage.tsv" \
     bash "$SCRIPT" --doc "$LF/spec.md" --kind spec --severity required 2>&1
+  echo $? > "$LF/rc"   # 子 shell 回不了離開碼: 寫檔,呼叫端用 $(cat "$LF/rc") 讀
 }
 lf_run_diff() { # 同 lf_run,但走 diff 模式(--base main)。LF_REPO 是一個有未提交變更的小 repo
   local st; st="$(mktemp -d "$LF/st.XXXXXX")"
@@ -862,6 +866,37 @@ ok "(z4) 部分失敗 → 完成行仍標警示"               lf_marked "$O"
 lf_item "PROBE-OK" 0 completed | lf_events; O="$(lf_run_diff)"
 ok "(z5) 無失敗 → 不印零查證契約句"               test "$(lf_zero "$O")" -eq 0
 ok "(z5) 無失敗 → 正常完成"                       lf_clean "$O"
+
+# (q) --json 下失敗只出現在 stdout 的事件(stderr 空、-o 檔空)(2026-10-14 A 層審查):
+# 先前 -o 落空＋stdout 是 JSONL 一律直接 FAILED,額度被擋永遠被分成 FAILED(exit 1)而不是
+# RATE_LIMITED(exit 0);而 turn.failed 事件(error.message)也沒有併入判定。
+lf_item "PROBE-OK" 0 completed | lf_events
+# (q1) 只有 turn.failed 帶額度訊息 → RATE_LIMITED,exit 0
+O="$(LF_FAIL='{"type":"turn.failed","error":{"message":"You'\''ve hit your usage limit. Upgrade to Pro"}}' lf_run)"
+ok "(q1) 只有 turn.failed 帶額度訊息 → RATE_LIMITED"  has 'RATE_LIMITED:' "$O"
+ok "(q1) RATE_LIMITED 離開碼 0"                        test "$(cat "$LF/rc")" = 0
+ok "(q1) 不得是 FAILED"                                hasnt 'FAILED:' "$O"
+# (q2) 獨立的 error 事件帶額度訊息 → 同上(這條路徑先前被 FAILED 分支預先攔掉,是死碼)
+O="$(LF_FAIL='{"type":"error","message":"You'\''ve hit your usage limit. Upgrade to Pro"}' lf_run)"
+ok "(q2) error 事件帶額度訊息 → RATE_LIMITED"          has 'RATE_LIMITED:' "$O"
+ok "(q2) RATE_LIMITED 離開碼 0"                        test "$(cat "$LF/rc")" = 0
+# (q3) 一般失敗(不是額度) → 仍是 FAILED exit 1
+O="$(LF_FAIL='{"type":"error","message":"boom"}' lf_run)"
+ok "(q3) 一般 error 事件 → FAILED"                     has 'FAILED: codex 有輸出但 -o 檔是空的' "$O"
+ok "(q3) FAILED 離開碼 1"                              test "$(cat "$LF/rc")" = 1
+ok "(q3) 不得是 RATE_LIMITED"                          hasnt 'RATE_LIMITED:' "$O"
+ok "(q3) FAILED 的 stderr 末段帶 error 事件"           has 'boom' "$O"
+# (q4) 只併 error／turn.failed 事件行,不併整份 JSONL: agent_message 引用額度字樣 + 一般失敗 → 仍是 FAILED
+{ lf_item "PROBE-OK" 0 completed
+  echo '{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"You'\''ve hit your usage limit. Upgrade to Pro"}}'; } | lf_events
+O="$(LF_FAIL='{"type":"turn.failed","error":{"message":"boom"}}' lf_run)"
+ok "(q4) agent_message 引用額度字樣 → 不被當成額度被擋"  has 'FAILED: codex 有輸出但 -o 檔是空的' "$O"
+ok "(q4) 不得是 RATE_LIMITED"                          hasnt 'RATE_LIMITED:' "$O"
+# (q5) 輸入過長不是額度問題 → FAILED(不得被新的放行路徑吞成 RATE_LIMITED)
+lf_item "PROBE-OK" 0 completed | lf_events
+O="$(LF_FAIL='{"type":"error","message":"Input exceeds the maximum length of 1048576 characters."}' lf_run)"
+ok "(q5) 輸入過長 → FAILED"                            has 'FAILED: codex 有輸出但 -o 檔是空的' "$O"
+ok "(q5) 輸入過長不得是 RATE_LIMITED"                  hasnt 'RATE_LIMITED:' "$O"
 rm -rf "$LF"
 # === LAUNCHFAIL-END ===
 
