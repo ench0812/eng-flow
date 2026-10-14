@@ -1303,7 +1303,6 @@ if [ -n "$TOOL_FAIL_LINES" ] || [ "$LAUNCH_FAIL_N" -gt 0 ]; then
   if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
     echo "  結構化偵測(codex --json 事件流): shell 呼叫啟動失敗 ${LAUNCH_FAIL_N} 次、正常啟動 ${SHELL_RAN_N} 次。錯誤類型(不含 cwd／命令列):" >&2
     printf '%s\n' "$LAUNCH_FAIL_TYPES" | sort | uniq -c | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
-    [ "$SHELL_ALL_FAILED" -eq 1 ] && echo "  【沒有任何一次 shell 呼叫真的起來】: 本輪所有結論都是推論,不得視為查證過的第二意見。" >&2
   fi
   if [ -n "$TOOL_FAIL_LINES" ]; then
     # 【不印原始行】: 那些訊息帶著失敗指令的完整命令列(形如 error=exec_command failed for
@@ -1361,6 +1360,7 @@ fi
 # 【兩邊必須對稱】: 只改一邊會破壞「兩者都沒有就不觸發」那條刻意的寧漏勿誤設計。
 FINDING_LINE='(Critical|Required|Optional|Nit|FYI)[^【]{0,80}'
 FINAL_STATUS=OK
+ZERO_VERIFY_WARNED=0   # 下面 diff 模式的「警示: 本輪【零查證】」印過就設 1,shell 全失敗的補印據此去重
 # 【不可在這裡接 `.*`】(2026-09-07 codex 第二輪抓到): 接了之後 `[^【]{0,80}` 那段距離限制
 # 完全失效——`.*` 能跨過任意內容包含另一個標註。實測漏報:
 #   「- Required【推論】 foo.go:1 尚未讀檔,因此不能標為【已讀】」
@@ -1385,6 +1385,7 @@ if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then
     echo "  codex 很可能一個檔案都沒讀成,所有意見都只從送進去的片段推得。" >&2
     echo "  處置: 不得視為已查證的第二意見。把每一項當成【待驗證的假說】,自己回頭核對後再決定處置;" >&2
     echo "        也不可據此對使用者稱「已完成 codex 複查」。" >&2
+    ZERO_VERIFY_WARNED=1
   fi
   # 最常見的成因是路徑寫法,不是真的沒有權限——這一句是要打斷「存取被拒 ⇒ 我沒有讀取權」的
   # 錯誤歸因,那個歸因會讓人跑去查沙箱設定,而真正該做的是確認 access_note 的絕對路徑指引。
@@ -1397,7 +1398,18 @@ fi
 
 # shell 全部啟動失敗 = 零查證的【結構化】證據: 與上面內容式判定(全標【推論】)落在同一個 telemetry
 # 狀態,報表看得出來這一輪沒有任何查證。部分失敗不降級(仍有指令真的起來)。
-[ "$SHELL_ALL_FAILED" -eq 1 ] && FINAL_STATUS=OK_NOVERIFY
+# 【呼叫端只認一份契約】: skills/mao-review/SKILL.md 教呼叫端看到 `警示: 本輪【零查證】` 就不得稱複查完成,
+# 所以這裡也印同一句,不另發明第二種說法。diff 模式的內容式判定已印過就不重複(ZERO_VERIFY_WARNED);
+# doc 模式內容式只印較軟的「注意」(對還沒落地的設計提意見本來就常常沒有原始碼可讀),但 shell 全部
+# 起不來在 doc 模式也是故障,不能套用那個寬容,所以這裡一定補印。
+if [ "$SHELL_ALL_FAILED" -eq 1 ]; then
+  FINAL_STATUS=OK_NOVERIFY
+  if [ "$ZERO_VERIFY_WARNED" -ne 1 ]; then
+    echo "[codex-review] 警示: 本輪【零查證】——codex 的 shell 全部啟動失敗(${LAUNCH_FAIL_N} 次、沒有任何一次正常啟動),所有結論都只從送進去的內容推得。" >&2
+    echo "  處置: 不得視為已查證的第二意見。把每一項當成【待驗證的假說】,自己回頭核對後再決定處置;" >&2
+    echo "        也不可據此對使用者稱「已完成 codex 複查」。" >&2
+  fi
+fi
 
 # 複查確實發生 → 推進 ledger、留 payload 快照給下一輪算 delta,並記一筆用量。
 persist_ledger

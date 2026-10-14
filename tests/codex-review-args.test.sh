@@ -705,7 +705,7 @@ case "$1" in
   exec)
     o=""; prev=""
     for a in "$@"; do [ "$prev" = "-o" ] && o="$a"; prev="$a"; done
-    [ -n "$o" ] && printf '%s\n' "- Required【已讀】 foo.go:1 確認有問題" "收斂問句:無" > "$o"
+    [ -n "$o" ] && printf '%s\n' "${LF_REVIEW_LINE:-- Required【已讀】 foo.go:1 確認有問題}" "收斂問句:無" > "$o"
     cat "$LF_EVENTS"
     [ -n "${LF_STDERR:-}" ] && cat "$LF_STDERR" >&2
     exit 0 ;;
@@ -731,6 +731,15 @@ lf_run() { # 合併 stdout+stderr;每次獨立 ledger,免得被「內容與上�
   PATH="$LF:$PATH" LF_EVENTS="$LF/ev.jsonl" CODEX_REVIEW_STATE="$st" CODEX_REVIEW_LOG="$LF/usage.tsv" \
     bash "$SCRIPT" --doc "$LF/spec.md" --kind spec --severity required 2>&1
 }
+lf_run_diff() { # 同 lf_run,但走 diff 模式(--base main)。LF_REPO 是一個有未提交變更的小 repo
+  local st; st="$(mktemp -d "$LF/st.XXXXXX")"
+  ( cd "$LF/repo" && PATH="$LF:$PATH" LF_EVENTS="$LF/ev.jsonl" CODEX_REVIEW_STATE="$st" CODEX_REVIEW_LOG="$LF/usage.tsv" \
+      bash "$SCRIPT" --severity required --base main 2>&1 )
+}
+mkdir -p "$LF/repo"
+( cd "$LF/repo" && git init -q . && git config user.email t@t.t && git config user.name t \
+  && printf 'base\n' > f.txt && git add -A && git commit -qm i && git branch -M main && printf 'changed\n' > f.txt ) >/dev/null 2>&1
+lf_zero() { printf '%s\n' "$1" | grep -c '警示: 本輪【零查證】'; }   # 零查證契約句出現幾次
 lf_done() { printf '%s\n' "$1" | grep '^\[codex-review\] 完成('; }   # 完成那一行
 lf_st16() { awk -F'\t' 'END{print $16}' "$LF/usage.tsv"; }
 lf_marked() { lf_done "$1" | grep -q '警示=codex shell 啟動失敗'; }  # 完成行帶警示
@@ -828,6 +837,31 @@ O="$(LF_STDERR="$LF/stderr.txt" lf_run)"
 ok "(i) 兩個來源同時有 → 警示塊只出現一次"    test "$(printf '%s\n' "$O" | grep -c '警示: codex 的 shell 工具至少失敗過一次')" -eq 1
 ok "(i) 兩個來源同時有 → 兩段證據都列出"      test "$(printf '%s\n' "$O" | grep -cE '結構化偵測|stderr 的失敗類型')" -eq 2
 ok "(i) 兩個來源同時有 → 完成行帶警示"        lf_marked "$O"
+
+# (z) 零查證契約(2026-10-14 A 層審查): skills/mao-review/SKILL.md 教呼叫端看到
+# `警示: 本輪【零查證】` 就不得稱複查完成。shell 全部起不來時【呼叫端只認這一句】,不另發明第二種說法。
+# 部分失敗時措辭維持現狀(不印這一句): 仍有指令真的起來。
+# (z1) doc 模式、shell 全失敗 → 印一次(doc 模式的內容式判定只印較軟的「注意」,不會代勞)
+lf_item "$LF_ERR" -1 failed | lf_events; O="$(lf_run)"
+ok "(z1) doc 模式 shell 全失敗 → 印零查證契約句一次" test "$(lf_zero "$O")" -eq 1
+ok "(z1) 契約句帶處置(不得稱已完成複查)"          has '不可據此對使用者稱「已完成 codex 複查」' "$O"
+# (z2) diff 模式、shell 全失敗、review 本體標了【已讀】(內容式判定不會觸發) → 印一次
+lf_item "$LF_ERR" -1 failed | lf_events; O="$(lf_run_diff)"
+ok "(z2) diff 模式內容式未觸發 → 結構化補印一次"  test "$(lf_zero "$O")" -eq 1
+ok "(z2) diff 模式確實走到完成"                   lf_marked "$O"
+# (z3) diff 模式、shell 全失敗、review 本體全標【推論】(內容式判定也觸發) → 仍只印一次(不重複)
+lf_item "$LF_ERR" -1 failed | lf_events
+O="$(LF_REVIEW_LINE='- Required【推論】 foo.go:1 可能有問題' lf_run_diff)"
+ok "(z3) 兩個判定都觸發 → 契約句只印一次"          test "$(lf_zero "$O")" -eq 1
+ok "(z3) 兩個判定都觸發仍走到完成"                 lf_marked "$O"
+# (z4) 部分失敗 → 不印(措辭維持現狀),但完成行仍標警示
+{ lf_item "$LF_ERR" -1 failed; lf_item "PROBE-OK" 0 completed; } | lf_events; O="$(lf_run_diff)"
+ok "(z4) 部分失敗 → 不印零查證契約句"             test "$(lf_zero "$O")" -eq 0
+ok "(z4) 部分失敗 → 完成行仍標警示"               lf_marked "$O"
+# (z5) 沒有失敗 → 不印
+lf_item "PROBE-OK" 0 completed | lf_events; O="$(lf_run_diff)"
+ok "(z5) 無失敗 → 不印零查證契約句"               test "$(lf_zero "$O")" -eq 0
+ok "(z5) 無失敗 → 正常完成"                       lf_clean "$O"
 rm -rf "$LF"
 # === LAUNCHFAIL-END ===
 
