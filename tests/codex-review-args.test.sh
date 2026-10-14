@@ -25,7 +25,9 @@ tmpd() { local d u; d="$(mktemp -d)" || return 1
     fi ;;
   esac
   [ -n "$d" ] && [ -d "$d" ] || return 1
-  [ -z "$(ls -A "$d" 2>/dev/null)" ] || return 1
+  # ls 失敗時 stdout 也是空的，只看輸出會把「列不出來」誤判成「空目錄」——先確認 ls 成功。
+  local listing; listing="$(ls -A "$d" 2>/dev/null)" || return 1
+  [ -z "$listing" ] || return 1
   printf '%s\n' "$d"
 }
 # 在任何寫入之前檢查 tmpd 的結果: 空字串／不是目錄／含冒號一律 FATAL 中止。
