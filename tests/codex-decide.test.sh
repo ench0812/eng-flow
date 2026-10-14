@@ -52,8 +52,8 @@ if [ -n "\${EVENTS:-}" ]; then
   fi
   # 真 codex 的 -o 檔最後沒有結尾換行(NO_EOL=1 時照做);NO_O=1 → 完全不寫 -o 檔(exit 0 但沒有最終訊息)
   if [ -n "\$o" ] && [ -z "\${NO_O:-}" ]; then
-    if [ -n "\${NO_EOL:-}" ]; then printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無' > "\$o"
-    else printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無\n' > "\$o"; fi
+    if [ -n "\${NO_EOL:-}" ]; then printf '裁定:A\n信心:高\n依據:%s\n理由:x\n異議:無' "\${STUB_BASIS:-已讀}" > "\$o"
+    else printf '裁定:A\n信心:高\n依據:%s\n理由:x\n異議:無\n' "\${STUB_BASIS:-已讀}" > "\$o"; fi
   fi
   cat "\$EVENTS"; exit 0
 fi
@@ -183,7 +183,8 @@ lf_events() { # stdin=item 行 → $T/ev.jsonl(帶頭尾事件)
 lf_rc=0
 lf_run() { # 環境變數(JSON_ERR／REJECT)由呼叫端用前綴帶入;離開碼存 lf_rc,輸出存 $T/out.txt
   rm -f "$T/calls.log" "$T/laa.log"
-  ( cd "$T/repo" && EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" --question "$T/q.md" --prefer A --severity required >"$T/out.txt" 2>&1 )
+  # LF_EXTRA: 額外參數(例如 --allow-inference);刻意不加引號,讓它在空值時完全消失
+  ( cd "$T/repo" && EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" --question "$T/q.md" --prefer A --severity required ${LF_EXTRA:-} >"$T/out.txt" 2>&1 )
   lf_rc=$?
 }
 lf_agreed()  { [ "$lf_rc" -eq 0 ] && grep -q '共識成立' "$T/out.txt"; }
@@ -221,6 +222,13 @@ ok "(a2) 訊息如實寫出正常啟動數"                lf_out_has '啟動失
 lf_item "CreateProcessAsUserW failed: 5" -1 failed | lf_events; lf_run
 ok "(a3) CreateProcess*W failed → exit 3"       lf_blocked
 ok "(a3) 理由行帶 OS 錯誤碼"                    lf_out_has 'CreateProcessAsUserW failed: 5'
+
+# (a4) 啟動失敗即使帶 --allow-inference 也是 exit 3(--allow-inference 只放行「本來就沒有程式碼可讀」,
+# 不放行「讀了但讀失敗」)。對照組: 同樣的旗標與 依據:推論,shell 正常 → 共識成立(證明旗標確實有作用)
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_BASIS=推論 LF_EXTRA=--allow-inference lf_run
+ok "(a4) 對照: --allow-inference＋依據推論＋shell 正常 → 共識成立" lf_agreed
+lf_item "$LF_ERR" -1 failed | lf_events; STUB_BASIS=推論 LF_EXTRA=--allow-inference lf_run
+ok "(a4) --allow-inference＋依據推論＋啟動失敗 → 仍 exit 3"      lf_blocked
 
 # (b) 成功的 item 輸出剛好以該字串開頭 → 不偵測
 lf_item "$LF_ERR" 0 completed | lf_events; lf_run
