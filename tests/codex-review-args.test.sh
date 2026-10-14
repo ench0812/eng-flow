@@ -11,25 +11,42 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$ROOT/scripts/codex-review.sh"
 DOC="$ROOT/README.md"   # 任一存在的檔案即可
 pass=0; fail=0
+# === TMP-PREAMBLE-BEGIN ===
 # 暫存目錄: TMPDIR 若設成 Windows 路徑(例如 D:/Temp),mktemp 會回「D:/Temp/tmp.xxx」,含冒號,
-# 放進 PATH 會被切斷(見下面 no_colon)。有 cygpath(Git Bash／MSYS)就轉成 /d/Temp/… 形式,沒有則照原樣。
-tmpd() { local d; d="$(mktemp -d)" || return 1
-  case "$d" in *:*) command -v cygpath >/dev/null 2>&1 && d="$(cygpath -u "$d")" ;; esac
-  printf '%s\n' "$d"; }
-FIX="$(tmpd)"
+# 放進 PATH 會被切斷(見 need_tmp)。有 cygpath(Git Bash／MSYS)就轉成 /d/Temp/… 形式。
+# 【轉換失敗不能讓路徑變成空字串】(2026-10-14 codex 收尾抓到): 舊版直接把 $(cygpath …) 賦值給路徑,
+# cygpath 失敗或印空時 tmpd 仍回傳成功、路徑為空,於是 "$DIR/bin/codex" 變成 /bin/codex,stub 被寫進
+# 系統目錄、覆寫既有程式。所以: 轉換成功【且非空】才取代原路徑;最終路徑必須是存在、且【空的】目錄
+# (剛建立的暫存目錄一定是空的;非空代表轉換拿到了別的東西,例如 /bin),否則回非 0。
+tmpd() { local d u; d="$(mktemp -d)" || return 1
+  case "$d" in *:*)
+    if command -v cygpath >/dev/null 2>&1; then
+      u="$(cygpath -u "$d" 2>/dev/null)" && [ -n "$u" ] && d="$u"
+    fi ;;
+  esac
+  [ -n "$d" ] && [ -d "$d" ] || return 1
+  [ -z "$(ls -A "$d" 2>/dev/null)" ] || return 1
+  printf '%s\n' "$d"
+}
+# 在任何寫入之前檢查 tmpd 的結果: 空字串／不是目錄／含冒號一律 FATAL 中止。
+# 含冒號: PATH 的分隔符是冒號,"$DIR:$PATH" 會被切斷,stub 不在 PATH 上,command -v codex 就會找到
+# 【真的 codex】——測試會真的送出諮詢(A 層審查者就因此誤叫了真 codex 15 次)。
+need_tmp() { # $1=tmpd 的結果 $2=變數名稱
+  if [ -z "$1" ] || [ ! -d "$1" ]; then
+    echo "FATAL: 暫存目錄 $2 建立或轉換失敗(值 '$1'),中止——空路徑會讓 \"\$$2/bin/codex\" 變成 /bin/codex" >&2; exit 1
+  fi
+  case "$1" in *:*) echo "FATAL: 暫存目錄 $2='$1' 含冒號,PATH 會被切斷、可能叫到真的 codex" >&2; exit 1 ;; esac
+}
+FIX="$(tmpd)"; need_tmp "$FIX" FIX
+# === TMP-PREAMBLE-END ===
 # Gate 隔離: 不可依賴「PATH 上找不到 codex」——腳本的 fallback 清單裡有 /usr/local/bin/codex,
 # 那是 Linux/macOS 的常見安裝位置,一旦命中這些 case 會拿 fixture 真的送出諮詢(花錢、打 API,
 # 而且要等到斷言拿不到 SKIP 才會叫)。改成確定性地在 Gate 2 擋下: login status 回非零。
-GATE="$(tmpd)"
+GATE="$(tmpd)"; need_tmp "$GATE" GATE
 printf '#!/usr/bin/env bash
 exit 1
 ' > "$GATE/codex"; chmod +x "$GATE/codex"
 trap 'rm -rf "$FIX" "$GATE"' EXIT
-# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號(例如 TMPDIR 設成 D:/Temp),"$DIR:$PATH" 會被切斷,
-# stub 不在 PATH 上,command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。每個會放進 PATH 的
-# 暫存目錄建立後都用 no_colon 擋下(2026-10-14,A 層審查者就因此誤叫了真 codex 15 次)。
-no_colon() { case "$1" in *:*) echo "FATAL: mktemp 目錄 '$1' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac; }
-no_colon "$FIX"; no_colon "$GATE"
 
 # 【所有斷言 helper 都必須定義在這裡,任何測試呼叫之前】(2026-09-07 踩過):
 # ok()/has()/hasnt() 原本定義在檔案中段(舊 306 行)。在它之前呼叫 `ok` 的話,bash 只會對
@@ -43,6 +60,42 @@ ok() { # $1=desc  $2..=條件(直接當指令跑)
 }
 has()  { printf '%s' "$2" | grep -q "$1"; }
 hasnt() { ! printf '%s' "$2" | grep -q "$1"; }
+
+# === TMPD-SELFCHECK-BEGIN ===
+# --- tmpd／need_tmp 自我檢查(2026-10-14 codex 收尾抓到) ---
+# 舊版 cygpath 失敗或印空時 tmpd 仍回傳成功且路徑為空 → "$FIX/…/codex" 變成 /…/codex、/bin/codex。這裡用假
+# mktemp(回一個含冒號、不存在的路徑)與各種壞掉的假 cygpath 驗證 tmpd 一律回非 0;探針目錄都在 $FIX 底下,
+# 全程不碰系統目錄。TP 底下的 mk 放假 mktemp,cy-* 各放一種假 cygpath。
+TP="$FIX/tmpd-probe"; mkdir -p "$TP/mk" "$TP/ok-dir" "$TP/busy-dir" "$TP/cy-empty" "$TP/cy-fail" "$TP/cy-gone" "$TP/cy-busy" "$TP/cy-ok"
+printf 'x' > "$TP/busy-dir/file"
+printf '#!/usr/bin/env bash\necho "D:/Temp/fake.dir"\n' > "$TP/mk/mktemp"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TP/cy-empty/cygpath"                     # 印空字串、exit 0
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TP/cy-fail/cygpath"                      # 失敗
+printf '#!/usr/bin/env bash\necho "%s"\n' "$TP/gone-dir" > "$TP/cy-gone/cygpath"    # 回一個不存在的路徑
+printf '#!/usr/bin/env bash\necho "%s"\n' "$TP/busy-dir" > "$TP/cy-busy/cygpath"    # 回一個存在但非空的目錄(不是新建的暫存目錄)
+printf '#!/usr/bin/env bash\necho "%s"\n' "$TP/ok-dir" > "$TP/cy-ok/cygpath"        # 回一個存在的空目錄(正常轉換)
+chmod +x "$TP"/mk/mktemp "$TP"/cy-*/cygpath
+tmpd_probe() { # $1=假 cygpath 的目錄名 → 印「rc=<tmpd 的離開碼> path=<它印出的路徑>」
+  ( export PATH="$TP/mk:$TP/$1:$PATH"; p=$(tmpd); echo "rc=$? path=<$p>" ); }
+ok "tmpd: cygpath 印空字串 → 回非 0、不印路徑"      test "$(tmpd_probe cy-empty)" = 'rc=1 path=<>'
+ok "tmpd: cygpath 失敗 → 回非 0、不印路徑"          test "$(tmpd_probe cy-fail)" = 'rc=1 path=<>'
+ok "tmpd: cygpath 回不存在的路徑 → 回非 0"          test "$(tmpd_probe cy-gone)" = 'rc=1 path=<>'
+ok "tmpd: cygpath 回非空的既有目錄 → 回非 0"        test "$(tmpd_probe cy-busy)" = 'rc=1 path=<>'
+ok "tmpd: 對照組 cygpath 正常轉換 → 成功並回該路徑" test "$(tmpd_probe cy-ok)" = "rc=0 path=<$TP/ok-dir>"
+need_tmp_rc() { ( need_tmp "$1" X ) >/dev/null 2>&1; echo $?; }
+ok "need_tmp: 空字串 → 中止"                        test "$(need_tmp_rc "")" = 1
+ok "need_tmp: 不存在的目錄 → 中止"                  test "$(need_tmp_rc "$TP/gone-dir")" = 1
+ok "need_tmp: 含冒號 → 中止"                        test "$(need_tmp_rc "D:/Temp/x")" = 1
+ok "need_tmp: 對照組 正常目錄 → 通過"               test "$(need_tmp_rc "$TP/ok-dir")" = 0
+# 每個 tmpd 呼叫點都在【同一行】帶 need_tmp(寫入之前就檢查)。pattern 用跳脫寫法,不會比對到這一行自己
+ok "每個 tmpd 呼叫點都帶 need_tmp"                  test "$(grep -E '="\$\(tmpd\)"' "$0" | grep -vc 'need_tmp')" -eq 0
+# 端到端: 把檔頭【實際的】tmpd／need_tmp／呼叫點(TMP-PREAMBLE 標記之間)抽出來,在假 mktemp＋壞掉的假 cygpath
+# 下執行,必須在印 REACHED(代表後面的寫入會開始)之前就 FATAL 中止。抽出的片段只有定義與賦值,不寫任何檔。
+for bad in cy-empty cy-fail cy-gone cy-busy; do
+  pre_out="$(PATH="$TP/mk:$TP/$bad:$PATH" bash -c "$(sed -n '/^# === TMP-PREAMBLE-BEGIN/,/^# === TMP-PREAMBLE-END/p' "$0"); echo REACHED" 2>&1)"; pre_rc=$?
+  ok "檔頭在 $bad 下於寫入前 FATAL 中止"            test "$pre_rc" -ne 0 -a "$(printf '%s' "$pre_out" | grep -c 'FATAL')" -ge 1 -a "$(printf '%s' "$pre_out" | grep -c 'REACHED')" -eq 0
+done
+# === TMPD-SELFCHECK-END ===
 
 check() {
   local desc="$1" expect="$2"; shift 2
@@ -155,7 +208,7 @@ check_rl "正常完成"                     no  0 "" "無重大遺漏"
 # --- rate limit 端到端(stub codex) ---
 # 這裡的 stub 只驗「腳本收到 rate limit 訊息後怎麼分流」,不驗 codex flag 是否正確
 # ——後者 stub 永遠測不出來(歷史教訓),仍由人工 E2E 覆蓋。
-STUB="$(tmpd)"; no_colon "$STUB"
+STUB="$(tmpd)"; need_tmp "$STUB" STUB
 STUB_DOC="$STUB/spec.md"; printf '# Fixture\n\ncontent\n' > "$STUB_DOC"
 mk_stub() { # $1 = exec 分支要跑的 shell 片段
   { echo '#!/usr/bin/env bash'
@@ -400,7 +453,7 @@ ok "delta: 列出未變更檔名"     has "a.py" "$DLT"
 ok "delta: 兩輪相同則無區塊"   hasnt "^diff --git" "$(diff_delta_per_file "$CG/old.diff" "$CG/old.diff")"
 
 # --- 成本治理: 端到端(stub codex) ---
-STUB2="$(tmpd)"; no_colon "$STUB2"
+STUB2="$(tmpd)"; need_tmp "$STUB2" STUB2
 mk_stub2() { { echo '#!/usr/bin/env bash'; echo 'case "$1" in'; echo '  login) exit 0 ;;'
                echo "  exec)  $1 ;;"; echo 'esac'; echo 'exit 0'; } > "$STUB2/codex"; chmod +x "$STUB2/codex"; }
 mk_stub2 'echo "無重大補充"; echo "收斂問句:無"; exit 0'
@@ -704,8 +757,7 @@ ok "cygpath 失敗(exit 1): 覆寫仍生效(保留原路徑)" laa_overridden 1
 # 輸出【以】啟動錯誤開頭)缺一不可,所以每個「不偵測」案例各自只違反其中一個條件,
 # 負控組(拿掉對應條件)才會只紅對應那一則。
 # review 本體固定帶一行【已讀】發現,免得內容式的零查證偵測(全標【推論】)干擾 telemetry 狀態欄。
-LF="$(tmpd)"
-no_colon "$LF"   # 理由見檔頭 no_colon: "$LF:$PATH" 被冒號切斷會叫到真的 codex
+LF="$(tmpd)"; need_tmp "$LF" LF   # 理由見檔頭 need_tmp: 空路徑會寫到 /bin,含冒號會讓 "$LF:$PATH" 被切斷而叫到真的 codex
 cat > "$LF/codex" <<'LFSTUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -738,7 +790,9 @@ lf_events() { # stdin=item 行 → $LF/ev.jsonl(帶頭尾事件);回傳檔路徑
 }
 lf_run() { # 合併 stdout+stderr;每次獨立 ledger,免得被「內容與上一輪相同」的去重攔掉
   # (不能用計數器: lf_run 在 $(...) 子 shell 裡跑,計數不會回傳父 shell,所有案例會共用同一個 ledger)
-  local st; st="$(mktemp -d "$LF/st.XXXXXX")"
+  # LF_STATE: 呼叫端指定就沿用同一個 ledger 目錄(去重測試要連續跑兩次);沒指定則每次新建
+  local st; st="${LF_STATE:-$(mktemp -d "$LF/st.XXXXXX")}"
+  [ -d "$st" ] || { echo "LF_RUN-ABORT: 狀態目錄 '$st' 不存在"; return 1; }
   PATH="$LF:$PATH" LF_EVENTS="$LF/ev.jsonl" CODEX_REVIEW_STATE="$st" CODEX_REVIEW_LOG="$LF/usage.tsv" \
     bash "$SCRIPT" --doc "$LF/spec.md" --kind spec --severity required 2>&1
   echo $? > "$LF/rc"   # 子 shell 回不了離開碼: 寫檔,呼叫端用 $(cat "$LF/rc") 讀
@@ -909,6 +963,36 @@ lf_item "PROBE-OK" 0 completed | lf_events
 O="$(LF_FAIL='{"type":"error","message":"Input exceeds the maximum length of 1048576 characters."}' lf_run)"
 ok "(q5) 輸入過長 → FAILED"                            has 'FAILED: codex 有輸出但 -o 檔是空的' "$O"
 ok "(q5) 輸入過長不得是 RATE_LIMITED"                  hasnt 'RATE_LIMITED:' "$O"
+
+# (d) shell 全部啟動失敗時不更新去重快照(2026-10-14 codex 收尾抓到): 這一輪沒有任何查證,若照樣記下
+# 「這份內容審過了」,排除故障後以相同內容重跑會被「內容與上一輪完全相同」的去重 SKIP 擋下,永遠沒機會重新查證。
+# 部分失敗仍有指令真的起來,維持原行為(照常記)。每組用自己的 ledger 目錄(LF_STATE)連續跑兩次相同內容。
+lf_skipped() { printf '%s\n' "$1" | grep -q 'SKIP: 送出內容與上一輪'; }
+lf_not_skipped() { ! lf_skipped "$1"; }
+lf_state() { mktemp -d "$LF/st.XXXXXX"; }
+# (d3) 對照組: shell 正常 → 連跑兩次,第二次被去重 SKIP(證明這個 harness 裡去重確實會觸發,否則 (d1) 恆真)
+D3="$(lf_state)"; lf_item "PROBE-OK" 0 completed | lf_events
+O1="$(LF_STATE="$D3" lf_run)"; O2="$(LF_STATE="$D3" lf_run)"
+ok "(d3) 對照: 正常第一次 → 完成"                      lf_ran_unmarked "$O1"
+ok "(d3) 對照: 正常第二次相同內容 → 去重 SKIP"         lf_skipped "$O2"
+# (d1) 全失敗: 第一次印「不更新去重快照」且沒有寫下快照;第二次(相同內容)不得 SKIP,必須重新送審
+D1="$(lf_state)"; lf_item "$LF_ERR" -1 failed | lf_events
+O1="$(LF_STATE="$D1" lf_run)"; O2="$(LF_STATE="$D1" lf_run)"
+ok "(d1) 全失敗 → 警示塊印出不更新去重快照"            has '本輪不更新去重快照' "$O1"
+ok "(d1) 全失敗 → 沒有寫下 payload 快照"               test "$(ls "$D1"/*.payload 2>/dev/null | wc -l)" -eq 0
+ok "(d1) 全失敗 → 沒有寫下 state"                      test "$(ls "$D1"/*.state 2>/dev/null | wc -l)" -eq 0
+ok "(d1) 相同內容重跑 → 不得 SKIP"                     lf_not_skipped "$O2"
+ok "(d1) 相同內容重跑 → 重新送審(完成行仍標警示)"      lf_marked "$O2"
+# (d2) 部分失敗維持原行為: 照常記,相同內容第二次被 SKIP;警示塊不印「不更新去重快照」
+D2="$(lf_state)"; { lf_item "$LF_ERR" -1 failed; lf_item "PROBE-OK" 0 completed; } | lf_events
+O1="$(LF_STATE="$D2" lf_run)"; O2="$(LF_STATE="$D2" lf_run)"
+ok "(d2) 部分失敗 → 不印「不更新去重快照」"            hasnt '本輪不更新去重快照' "$O1"
+ok "(d2) 部分失敗 → 相同內容第二次照舊被 SKIP"         lf_skipped "$O2"
+# (d4) 全失敗之後故障排除(同一份內容): 第二次正常完成而不是 SKIP;第三次才被 SKIP
+D4="$(lf_state)"; lf_item "$LF_ERR" -1 failed | lf_events; O1="$(LF_STATE="$D4" lf_run)"
+lf_item "PROBE-OK" 0 completed | lf_events; O2="$(LF_STATE="$D4" lf_run)"; O3="$(LF_STATE="$D4" lf_run)"
+ok "(d4) 全失敗後故障排除 → 同內容正常完成(未被 SKIP)"  lf_clean "$O2"
+ok "(d4) 正常完成之後才開始去重 → 第三次 SKIP"          lf_skipped "$O3"
 rm -rf "$LF"
 # === LAUNCHFAIL-END ===
 
@@ -998,7 +1082,7 @@ LOW_NEW="$(map LOW_MODEL)";  LOW_OLD="$(map LOW_LEGACY_MODEL)"
 PLAN_NEW="$(map PLAN_MODEL)"; PLAN_OLD="$(map PLAN_LEGACY_MODEL)"
 ok "退路: 映射表讀得到(否則以下斷言全部沒意義)" test -n "$REQ_NEW" -a -n "$REQ_OLD" -a -n "$CRIT_NEW" -a -n "$CRIT_OLD" -a -n "$LOW_NEW" -a -n "$LOW_OLD" -a -n "$PLAN_NEW" -a -n "$PLAN_OLD"
 
-FB="$(tmpd)"; no_colon "$FB"
+FB="$(tmpd)"; need_tmp "$FB" FB
 cat > "$FB/codex" <<'STUBEOF'
 #!/usr/bin/env bash
 case "$1" in

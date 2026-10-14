@@ -1311,6 +1311,7 @@ if [ -n "$TOOL_FAIL_LINES" ] || [ "$LAUNCH_FAIL_N" -gt 0 ]; then
   if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
     echo "  結構化偵測(codex --json 事件流): shell 呼叫啟動失敗 ${LAUNCH_FAIL_N} 次、正常啟動 ${SHELL_RAN_N} 次。錯誤類型(不含 cwd／命令列):" >&2
     printf '%s\n' "$LAUNCH_FAIL_TYPES" | sort | uniq -c | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
+    [ "$SHELL_ALL_FAILED" -eq 1 ] && echo "  本輪不更新去重快照,排除故障後以相同內容重跑會重新送審(不會被 SKIP 擋下)。" >&2
   fi
   if [ -n "$TOOL_FAIL_LINES" ]; then
     # 【不印原始行】: 那些訊息帶著失敗指令的完整命令列(形如 error=exec_command failed for
@@ -1422,7 +1423,13 @@ if [ "$SHELL_ALL_FAILED" -eq 1 ]; then
 fi
 
 # 複查確實發生 → 推進 ledger、留 payload 快照給下一輪算 delta,並記一筆用量。
-persist_ledger
+# 【shell 全部啟動失敗時不推進 ledger、不覆蓋快照】(2026-10-14 codex 收尾抓到): 這一輪沒有任何查證,
+# 若照樣記下「這份內容審過了」,排除故障後以相同內容重跑會被去重 SKIP 擋下(內容與快照逐位元組相同),
+# 永遠沒機會重新查證。不記就等於這一輪沒發生過——輪數不累加、快照維持上一次【真的審過】的內容。
+# 部分失敗仍有指令真的起來、查證只是打折,維持原行為(照常記)。telemetry 照記(OK_NOVERIFY),報表要看得到。
+if [ "$SHELL_ALL_FAILED" -ne 1 ]; then
+  persist_ledger
+fi
 emit_telemetry "$FINAL_STATUS"
 
 USAGE_SHOWN="$(grep -o '"usage":{[^}]*}' "$JSON_FILE" 2>/dev/null | tail -1)"

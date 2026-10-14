@@ -11,19 +11,74 @@ pass=0; fail=0
 ok() { local desc="$1"; shift
   if "$@"; then pass=$((pass+1)); else echo "FAIL [$desc]"; fail=$((fail+1)); fi; }
 
-# 暫存目錄: TMPDIR 若設成 Windows 路徑(例如 D:/Temp),mktemp 會回「D:/Temp/tmp.xxx」,含冒號。
-# 有 cygpath(Git Bash／MSYS)就轉成 /d/Temp/… 形式,沒有則照原樣(交給下面的冒號守門)。
-tmpd() { local d; d="$(mktemp -d)" || return 1
-  case "$d" in *:*) command -v cygpath >/dev/null 2>&1 && d="$(cygpath -u "$d")" ;; esac
-  printf '%s\n' "$d"; }
-T="$(tmpd)"
+# === TMP-PREAMBLE-BEGIN ===
+# 暫存目錄: TMPDIR 若設成 Windows 路徑(例如 D:/Temp),mktemp 會回「D:/Temp/tmp.xxx」,含冒號,
+# 放進 PATH 會被切斷(見 need_tmp)。有 cygpath(Git Bash／MSYS)就轉成 /d/Temp/… 形式。
+# 【轉換失敗不能讓路徑變成空字串】(2026-10-14 codex 收尾抓到): 舊版直接把 $(cygpath …) 賦值給路徑,
+# cygpath 失敗或印空時 tmpd 仍回傳成功、路徑為空,於是 "$T/bin/codex" 變成 /bin/codex,stub 被寫進
+# 系統目錄、覆寫既有程式。所以: 轉換成功【且非空】才取代原路徑;最終路徑必須是存在、且【空的】目錄
+# (剛建立的暫存目錄一定是空的;非空代表轉換拿到了別的東西,例如 /bin),否則回非 0。
+tmpd() { local d u; d="$(mktemp -d)" || return 1
+  case "$d" in *:*)
+    if command -v cygpath >/dev/null 2>&1; then
+      u="$(cygpath -u "$d" 2>/dev/null)" && [ -n "$u" ] && d="$u"
+    fi ;;
+  esac
+  [ -n "$d" ] && [ -d "$d" ] || return 1
+  [ -z "$(ls -A "$d" 2>/dev/null)" ] || return 1
+  printf '%s\n' "$d"
+}
+# 在任何寫入之前檢查 tmpd 的結果: 空字串／不是目錄／含冒號一律 FATAL 中止。
+# 含冒號: PATH 的分隔符是冒號,"$T/bin:$PATH" 會被切斷,stub 不在 PATH 上,command -v codex 就會找到
+# 【真的 codex】——測試會真的送出諮詢。
+need_tmp() { # $1=tmpd 的結果 $2=變數名稱
+  if [ -z "$1" ] || [ ! -d "$1" ]; then
+    echo "FATAL: 暫存目錄 $2 建立或轉換失敗(值 '$1'),中止——空路徑會讓 \"\$$2/bin/codex\" 變成 /bin/codex" >&2; exit 1
+  fi
+  case "$1" in *:*) echo "FATAL: 暫存目錄 $2='$1' 含冒號,PATH 會被切斷、可能叫到真的 codex" >&2; exit 1 ;; esac
+}
+T="$(tmpd)"; need_tmp "$T" T
+# === TMP-PREAMBLE-END ===
 trap 'rm -rf "$T"' EXIT
-# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號,"$T/bin:$PATH" 會被切斷,stub 不在 PATH 上,
-# command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。轉換後仍含冒號就先擋下。
-case "$T" in *:*) echo "FATAL: mktemp 目錄 '$T' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac
 mkdir -p "$T/bin" "$T/repo"
 ( cd "$T/repo" && git init -q . )
 printf '# Q\n\n選項 A／B\n\n## 安全與可逆性聲明\n可逆。\n' > "$T/q.md"
+
+# === TMPD-SELFCHECK-BEGIN ===
+# --- tmpd／need_tmp 自我檢查(2026-10-14 codex 收尾抓到) ---
+# 舊版 cygpath 失敗或印空時 tmpd 仍回傳成功且路徑為空 → "$T/bin/codex" 變成 /bin/codex。這裡用假 mktemp
+# (回一個含冒號、不存在的路徑)與各種壞掉的假 cygpath 驗證 tmpd 一律回非 0;探針目錄都在 $T 底下,
+# 全程不碰系統目錄。TP 底下的 mk 放假 mktemp,cy-* 各放一種假 cygpath。
+TP="$T/tmpd-probe"; mkdir -p "$TP/mk" "$TP/ok-dir" "$TP/busy-dir" "$TP/cy-empty" "$TP/cy-fail" "$TP/cy-gone" "$TP/cy-busy" "$TP/cy-ok"
+printf 'x' > "$TP/busy-dir/file"
+printf '#!/usr/bin/env bash\necho "D:/Temp/fake.dir"\n' > "$TP/mk/mktemp"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TP/cy-empty/cygpath"                     # 印空字串、exit 0
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TP/cy-fail/cygpath"                      # 失敗
+printf '#!/usr/bin/env bash\necho "%s"\n' "$TP/gone-dir" > "$TP/cy-gone/cygpath"    # 回一個不存在的路徑
+printf '#!/usr/bin/env bash\necho "%s"\n' "$TP/busy-dir" > "$TP/cy-busy/cygpath"    # 回一個存在但非空的目錄(不是新建的暫存目錄)
+printf '#!/usr/bin/env bash\necho "%s"\n' "$TP/ok-dir" > "$TP/cy-ok/cygpath"        # 回一個存在的空目錄(正常轉換)
+chmod +x "$TP"/mk/mktemp "$TP"/cy-*/cygpath
+tmpd_probe() { # $1=假 cygpath 的目錄名 → 印「rc=<tmpd 的離開碼> path=<它印出的路徑>」
+  ( export PATH="$TP/mk:$TP/$1:$PATH"; p=$(tmpd); echo "rc=$? path=<$p>" ); }
+ok "tmpd: cygpath 印空字串 → 回非 0、不印路徑"      test "$(tmpd_probe cy-empty)" = 'rc=1 path=<>'
+ok "tmpd: cygpath 失敗 → 回非 0、不印路徑"          test "$(tmpd_probe cy-fail)" = 'rc=1 path=<>'
+ok "tmpd: cygpath 回不存在的路徑 → 回非 0"          test "$(tmpd_probe cy-gone)" = 'rc=1 path=<>'
+ok "tmpd: cygpath 回非空的既有目錄 → 回非 0"        test "$(tmpd_probe cy-busy)" = 'rc=1 path=<>'
+ok "tmpd: 對照組 cygpath 正常轉換 → 成功並回該路徑" test "$(tmpd_probe cy-ok)" = "rc=0 path=<$TP/ok-dir>"
+need_tmp_rc() { ( need_tmp "$1" X ) >/dev/null 2>&1; echo $?; }
+ok "need_tmp: 空字串 → 中止"                        test "$(need_tmp_rc "")" = 1
+ok "need_tmp: 不存在的目錄 → 中止"                  test "$(need_tmp_rc "$TP/gone-dir")" = 1
+ok "need_tmp: 含冒號 → 中止"                        test "$(need_tmp_rc "D:/Temp/x")" = 1
+ok "need_tmp: 對照組 正常目錄 → 通過"               test "$(need_tmp_rc "$TP/ok-dir")" = 0
+# 每個 tmpd 呼叫點都在【同一行】帶 need_tmp(寫入之前就檢查)。pattern 用跳脫寫法,不會比對到這一行自己
+ok "每個 tmpd 呼叫點都帶 need_tmp"                  test "$(grep -E '="\$\(tmpd\)"' "$0" | grep -vc 'need_tmp')" -eq 0
+# 端到端: 把檔頭【實際的】tmpd／need_tmp／呼叫點(TMP-PREAMBLE 標記之間)抽出來,在假 mktemp＋壞掉的假 cygpath
+# 下執行,必須在印 REACHED(代表後面的寫入會開始)之前就 FATAL 中止。抽出的片段只有定義與賦值,不寫任何檔。
+for bad in cy-empty cy-fail cy-gone cy-busy; do
+  pre_out="$(PATH="$TP/mk:$TP/$bad:$PATH" bash -c "$(sed -n '/^# === TMP-PREAMBLE-BEGIN/,/^# === TMP-PREAMBLE-END/p' "$0"); echo REACHED" 2>&1)"; pre_rc=$?
+  ok "檔頭在 $bad 下於寫入前 FATAL 中止"            test "$pre_rc" -ne 0 -a "$(printf '%s' "$pre_out" | grep -c 'FATAL')" -ge 1 -a "$(printf '%s' "$pre_out" | grep -c 'REACHED')" -eq 0
+done
+# === TMPD-SELFCHECK-END ===
 
 # stub: 每次 exec 把參數附加到 calls.log(以 ---- 分隔);REJECT 指定的模型回「模型不可用」。
 cat > "$T/bin/codex" <<EOF
