@@ -29,6 +29,21 @@ for a in "\$@"; do [ "\$prev" = "-m" ] && model="\$a"; prev="\$a"; done
 { printf '%s\n' "\$@"; echo "----"; } >> "$T/calls.log"
 echo "\${LOCALAPPDATA-<unset>}" >> "$T/laa.log"
 cat >/dev/null
+o=""; prev=""
+for a in "\$@"; do [ "\$prev" = "-o" ] && o="\$a"; prev="\$a"; done
+# JSON 模式(EVENTS 指到一份 JSONL): 忠實模擬真 codex --json —— stdout 只有 JSONL 事件流,
+# 最終訊息寫進 -o 指定的檔。JSON_ERR 非空 → 以 error 事件(只在 stdout、stderr 空)失敗。
+if [ -n "\${EVENTS:-}" ]; then
+  if [ -n "\${JSON_ERR:-}" ]; then
+    printf '{"type":"error","message":"%s"}\n' "\$JSON_ERR"; exit 1
+  fi
+  if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
+    printf '{"type":"error","message":"model_not_found: %s"}\n' "\$model"; exit 1
+  fi
+  [ -n "\$o" ] && printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無\n' > "\$o"
+  cat "\$EVENTS"; exit 0
+fi
+# 純文字模式(舊行為): 裁定印在 stdout,不寫 -o 檔 —— 腳本須退回 stdout
 if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
   echo "model_not_found: \$model" >&2; exit 1
 fi
@@ -131,6 +146,107 @@ rm -f "$T/laa-spy.log"; run_env PATH="$T/binspy:$T/bin:$PATH"
 ok "覆寫不外溢: 探針有被跑到(否則下一條沒意義)"        test -s "$T/laa-spy.log"
 ok "覆寫不外溢: 腳本自己的 grep 全程看到原 LOCALAPPDATA" test "$(tr -d '\r' < "$T/laa-spy.log" | sort -u)" = "$FAKE_LAA"
 ok "覆寫不外溢: 同一輪 exec 子程序確實被覆寫"           laa_overridden 1
+
+# === LAUNCHFAIL-BEGIN ===
+# --- codex shell 啟動失敗 → 一律無共識 exit 3(2026-10-14) ---
+# 背景: shell 起不來時 codex 不會中止,拿問題檔繼續作答,格式完整、五行契約齊全、exit 0,甚至把依據標
+# 成已讀;而本腳本的離開碼決定能不能逕行,沒有查證的裁定不能當共識。偵測只認 `codex exec --json`
+# 事件流的結構(樣本取自 codex 0.162.1 的真實 stdout,欄位順序同真實樣本;五個條件與理由見
+# codex-review.sh 與 codex-review-args.test.sh 的同名區塊): 缺一不可,所以每個「不偵測」案例各自
+# 只違反其中一個條件,負控組(拿掉對應條件)才會只紅對應那一則。
+# 「不偵測」的斷言必須先確認腳本真的走到共識(印了「共識成立」): 否則任何其他原因的 exit 3／FAILED
+# 都會讓「沒被擋」的斷言恆真。
+LF_ERR='Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
+lf_item() { # $1=aggregated_output $2=exit_code $3=status [$4=item.type=command_execution] [$5=event type=item.completed]
+  printf '{"type":"%s","item":{"id":"item_1","type":"%s","command":"pwsh -Command Get-Content x","aggregated_output":"%s","exit_code":%s,"status":"%s"}}\n' \
+    "${5:-item.completed}" "${4:-command_execution}" "$1" "$2" "$3"
+}
+lf_events() { # stdin=item 行 → $T/ev.jsonl(帶頭尾事件)
+  { echo '{"type":"thread.started","thread_id":"t-1"}'; echo '{"type":"turn.started"}'; cat
+    echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}}'
+  } > "$T/ev.jsonl"
+}
+lf_rc=0
+lf_run() { # 環境變數(JSON_ERR／REJECT)由呼叫端用前綴帶入;離開碼存 lf_rc,輸出存 $T/out.txt
+  rm -f "$T/calls.log" "$T/laa.log"
+  ( cd "$T/repo" && EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" --question "$T/q.md" --prefer A --severity required >"$T/out.txt" 2>&1 )
+  lf_rc=$?
+}
+lf_agreed()  { [ "$lf_rc" -eq 0 ] && grep -q '共識成立' "$T/out.txt"; }
+lf_blocked() { [ "$lf_rc" -eq 3 ] && grep -q '無共識: codex 的 shell 啟動失敗' "$T/out.txt"; }
+lf_out_has() { grep -q -- "$1" "$T/out.txt"; }
+lf_out_lacks() { ! grep -qE -- "$1" "$T/out.txt"; }
+
+# 基準: 全部 shell 呼叫正常 → 共識成立。同時鎖住 JSON 模式的呼叫形狀(--json 與 -o 各一次)
+lf_item "PROBE-OK" 0 completed | lf_events; lf_run
+ok "基準: shell 正常 → 共識成立 rc=0"          lf_agreed
+ok "基準: 呼叫帶 --json"                       test "$(grep -cx -- '--json' "$T/calls.log")" -eq 1
+ok "基準: 呼叫帶 -o"                           test "$(grep -cx -- '-o' "$T/calls.log")" -eq 1
+# 事件流裡的 JSONL 不得被當成裁定印出來(最終訊息來自 -o 檔)
+ok "基準: stdout 不含 JSONL 事件"              lf_out_lacks '"type":"thread.started"'
+
+# (a) 真實形狀的失敗 item → 無共識 exit 3,理由行帶錯誤類型
+lf_item "$LF_ERR" -1 failed | lf_events; lf_run
+ok "(a) 啟動失敗 → exit 3 且理由是 shell 啟動失敗" lf_blocked
+ok "(a) 理由行帶錯誤類型"                       lf_out_has 'helper_unknown_error: setup refresh had errors'
+ok "(a) 不印共識成立"                           lf_out_lacks '共識成立'
+# (a2) 部分失敗也一律無共識(沒有查證的裁定不能當共識,哪怕還有指令起來了)
+{ lf_item "$LF_ERR" -1 failed; lf_item "PROBE-OK" 0 completed; } | lf_events; lf_run
+ok "(a2) 部分失敗 → 仍 exit 3"                  lf_blocked
+ok "(a2) 訊息如實寫出正常啟動數"                lf_out_has '啟動失敗 1 次(另有 1 次正常啟動)'
+# (a3) 第二種啟動錯誤字樣
+lf_item "CreateProcessAsUserW failed: 5" -1 failed | lf_events; lf_run
+ok "(a3) CreateProcess*W failed → exit 3"       lf_blocked
+ok "(a3) 理由行帶 OS 錯誤碼"                    lf_out_has 'CreateProcessAsUserW failed: 5'
+
+# (b) 成功的 item 輸出剛好以該字串開頭 → 不偵測
+lf_item "$LF_ERR" 0 completed | lf_events; lf_run
+ok "(b) completed／exit 0 印出該字串 → 照常共識" lf_agreed
+# (b') 只違反 status 條件
+lf_item "$LF_ERR" -1 completed | lf_events; lf_run
+ok "(b') status=completed → 不偵測"              lf_agreed
+# (c) agent_message 引用該字串 → 不偵測(codex 失敗後的回覆真的會這樣引用)
+{ echo '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"SHELL-FAILED\nexec_command failed: CreateProcess { message: \"Rejected(\\\"Failed to create unified exec process: helper_unknown_error\\\")\" }"}}'
+  echo '{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"{\"type\":\"command_execution\",\"aggregated_output\":\"Failed to create unified exec process\",\"exit_code\":-1,\"status\":\"failed\"}"}}'; } | lf_events; lf_run
+ok "(c) agent_message 引用該字串 → 不偵測"       lf_agreed
+# (c') 只違反 type 條件
+lf_item "$LF_ERR" -1 failed agent_message | lf_events; lf_run
+ok "(c') item 類型非 command_execution → 不偵測" lf_agreed
+# (d) 指令真的跑過、exit 1 失敗 → 不偵測
+lf_item "$LF_ERR" 1 failed | lf_events; lf_run
+ok "(d) exit_code=1 的失敗 → 不偵測"             lf_agreed
+# (e) 字串在輸出中段 → 不偵測
+lf_item "warning: earlier attempt said Failed to create unified exec process" -1 failed | lf_events; lf_run
+ok "(e) 字串在輸出中段 → 不偵測"                 lf_agreed
+# (g) 只違反 event type 條件(item.started)
+lf_item "$LF_ERR" -1 failed command_execution item.started | lf_events; lf_run
+ok "(g) item.started → 不偵測"                   lf_agreed
+
+# (f) 理由行不得含 cwd=／cmd=／命令列內容(可能帶 token,安全鐵律 #2)
+lf_item "$LF_ERR | cwd=C:\\\\Users\\\\markh\\\\secret-dir | cmd=pwsh -Command Get-Content token=abc123" -1 failed | lf_events; lf_run
+ok "(f) 含 cwd／cmd 的失敗 → exit 3"             lf_blocked
+ok "(f) 輸出不含 cwd=／cmd=／路徑／token"         lf_out_lacks 'cwd=|cmd=|secret-dir|abc123'
+# (f3) 「 | 」之後不是 cwd=／cmd= 而是別的內容 → 一樣整段丟掉
+lf_item "$LF_ERR | extra=secret-dir3" -1 failed | lf_events; lf_run
+ok "(f3) 「 | 」之後的任何內容 → exit 3"          lf_blocked
+ok "(f3) 輸出不含「 | 」之後的內容"               lf_out_lacks 'secret-dir3'
+# (f2) 沒有「 | 」分隔、直接黏著 cwd=／cmd= 的變體(縱深防禦)
+lf_item "Failed to create unified exec process: boom cwd=C:\\\\secret-dir2 cmd=tool --token=zzz9" -1 failed | lf_events; lf_run
+ok "(f2) 無分隔符的 cwd／cmd → exit 3"            lf_blocked
+ok "(f2) 輸出不含 cwd=／cmd=／路徑／token"         lf_out_lacks 'cwd=|cmd=|secret-dir2|zzz9'
+
+# --json 之後錯誤只出現在 stdout 的 error 事件(stderr 空),仍要走對各自的分支——
+# 先前純文字模式下這些訊息在 stderr,改 --json 後若不併入就會被誤判成別的失敗:
+# 額度被擋 → RATE_LIMITED exit 4(不是 FAILED exit 1)
+lf_item "PROBE-OK" 0 completed | lf_events
+JSON_ERR="You've hit your usage limit. Upgrade to Pro" lf_run
+ok "額度被擋只在 stdout error 事件 → exit 4"       test "$lf_rc" -eq 4
+ok "額度被擋只在 stdout error 事件 → RATE_LIMITED"  lf_out_has 'RATE_LIMITED'
+# 模型不可用 → 退回舊模型重問一次(先問主模型再問退路,最後共識成立)
+REJECT=gpt-6.1-sol lf_run
+ok "模型不可用只在 stdout error 事件 → 退回舊模型"  test "$(models)" = "gpt-6.1-sol gpt-6-luna"
+ok "模型不可用只在 stdout error 事件 → 退回後共識"  lf_agreed
+# === LAUNCHFAIL-END ===
 
 # 不得再出現已退出的 gpt-5.6(2026-10-08 使用者裁定最低 gpt-6)
 ok "映射不含 gpt-5.6" bash -c "! grep -qE 'MODEL=\"gpt-5\.6' '$SCRIPT'"

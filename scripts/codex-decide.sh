@@ -18,7 +18,7 @@
 #
 # 【離開碼是唯一可靠的判定管道】,呼叫端不得改用解析 stdout 字串來決定要不要逕行:
 #   0 = 共識成立,可依共識進行
-#   3 = 無共識(codex 選了別的,或信心不足) → 必須停下交使用者
+#   3 = 無共識(codex 選了別的,或信心不足,或它的 shell 啟動失敗而沒有查證) → 必須停下交使用者
 #   4 = 沒問成(RATE_LIMITED) → 必須停下交使用者。【不得因為問不到就自己走】,
 #       那會讓整條機制在額度用盡時靜默退化成「照自己的傾向做」——正是它要防的事。
 #   1 = FAILED(諮詢根本沒發生)   2 = 呼叫端合約錯誤
@@ -124,8 +124,8 @@ read -r -d '' PROMPT <<EOF
 提供的內容推得、沒有查證任何東西就寫「推論」。誠實標註——標錯比標保守糟得多。
 EOF
 
-OUT="$(mktemp)"; ERR="$(mktemp)"
-trap 'rm -f "$OUT" "$ERR" 2>/dev/null || true' EXIT
+OUT="$(mktemp)"; ERR="$(mktemp)"; JSONL="$(mktemp)"
+trap 'rm -f "$OUT" "$ERR" "$JSONL" 2>/dev/null || true' EXIT
 
 # features.memories=false: 理由同 codex-review.sh 的 NO_MEMORIES_FLAG(注入 7.3k Memory 區塊、
 # luna 會因此讀工作根以外的檔)。
@@ -166,24 +166,36 @@ codex_cmd() {
   else "$CODEX_BIN" "$@"; fi
 }
 run_codex() {
+  # --json: stdout 變成 JSONL 事件流(落在 $JSONL),最終訊息改由 -o 寫進 $OUT。事件流才有「shell 呼叫
+  # 根本沒啟動」的結構化訊號(見下方 shell_launch_failures);stderr 的字樣不保證每個版本都在。
   printf '%s\n\n---\n\n%s\n' "$PROMPT" "$(cat "$QUESTION")" \
     | codex_cmd exec "${ISOLATE_ARGS[@]}" -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
         -c features.memories=false \
-        --sandbox read-only $SKIP_GIT --cd "$REPO_ROOT" - >"$OUT" 2>"$ERR"
+        --sandbox read-only $SKIP_GIT --cd "$REPO_ROOT" --json -o "$OUT" - >"$JSONL" 2>"$ERR"
   RC=$?
+  # stdout 不是 JSONL(測試用的 stub 或舊行為把純文字印在 stdout)而 -o 檔又是空的 → 退回 stdout,
+  # 同 codex-review.sh 的判定。stdout 以 {"type": 起頭才算 JSONL: 那時 -o 檔空就是真的沒有輸出,
+  # 留給後面的零輸出 FAILED,不能把一坨 JSONL 當成裁定。
+  if [ ! -s "$OUT" ] && ! head -c 16 "$JSONL" 2>/dev/null | grep -q '^{"type":'; then cp "$JSONL" "$OUT" 2>/dev/null; fi
 }
 run_codex
 # 伺服器以「模型不可用」拒絕時用舊模型重問【一次】;其他錯誤照原路徑走 FAILED/RATE_LIMITED,
 # 不被退回機制吞掉——那會把「沒問成」偽裝成「用舊模型問過了」,而這裡的離開碼決定能不能逕行。
+# --json 之後錯誤可能只以 {"type":"error",…} 事件出現在 stdout,所以也要看 $JSONL。
 if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
-   && grep -qE "$MODEL_UNAVAILABLE_PAT" "$ERR" "$OUT" 2>/dev/null; then
+   && grep -qE "$MODEL_UNAVAILABLE_PAT" "$ERR" "$OUT" "$JSONL" 2>/dev/null; then
   echo "[codex-decide] 注意: 伺服器不接受 $MODEL,改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重問一次。" >&2
   MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1
-  : > "$OUT"; : > "$ERR"
+  : > "$OUT"; : > "$ERR"; : > "$JSONL"
   run_codex
 fi
 
 cat "$OUT"
+
+# 額度被擋的訊息在 --json 下可能只以 {"type":"error",…} 事件出現在 stdout,而下面的判定看 stderr 與
+# 裁定本體——不併入就會把額度被擋誤判成 FAILED(兩者處置方向不同: RATE_LIMITED exit 4、FAILED exit 1,
+# 都停下交使用者,但訊息與重試建議不同)。只併 error 事件行,不併整份 JSONL(避免模型回覆內容帶進判定)。
+grep -o '"type":"error"[^}]*}' "$JSONL" 2>/dev/null >> "$ERR" || true
 
 RATE_PAT="you'?ve (hit|reached) your usage limit|you have (hit|reached) your usage limit|reached your workspace credit limit|out of credits|quota exceeded|rate limit reached"
 if grep -qiE "$RATE_PAT" "$ERR" "$OUT" 2>/dev/null && ! grep -qE '^裁定[:：]' "$OUT" 2>/dev/null; then
@@ -194,6 +206,42 @@ if [ "$RC" -ne 0 ] || [ ! -s "$OUT" ]; then
   echo "[codex-decide] FAILED: codex 非正常結束(exit=$RC)或零輸出,諮詢根本沒發生。" >&2
   tail -n 20 "$ERR" >&2
   exit 1
+fi
+
+# --- codex 的 shell 起得來嗎(2026-10-14) ---
+# shell 呼叫根本沒啟動時 codex 【不會中止】,它拿送進去的問題檔繼續作答——格式完整、五行契約齊全、
+# exit 0,甚至會把「依據」標成已讀。這裡的裁定決定要不要逕行,「沒有查證」的裁定不能當共識,所以
+# 只要事件流裡出現過一次啟動失敗就一律無共識(exit 3)。這符合「工具失敗不算共識」,也比靠 codex 自律
+# 標註【推論】可靠: 它可能根本沒意識到讀檔失敗,或失敗後仍照樣標已讀。
+# 偵測方式與 codex-review.sh 同一套(那邊有完整的取樣來源、五個條件的理由與殘餘缺口):
+# 只認 `codex exec --json` 事件流裡的結構——item.completed ＋ command_execution ＋ status=failed ＋
+# exit_code=-1 ＋ aggregated_output【以】啟動錯誤開頭;不做全文比對(agent_message 會引用這些字串),
+# 不依賴欄位順序與 jq。只取錯誤類型到第一個「 | 」為止(其後是 cwd=／cmd=,命令列可能帶 token)。
+shell_cmd_events() { # $1=JSONL 檔 → 已完成的 command_execution 事件行
+  grep -E '"type"[[:space:]]*:[[:space:]]*"item\.completed"' "$1" 2>/dev/null \
+    | grep -E '"type"[[:space:]]*:[[:space:]]*"command_execution"'
+}
+shell_launch_failures() { # stdin=shell_cmd_events 的輸出 → 每個啟動失敗印一行錯誤類型
+  grep -E '"status"[[:space:]]*:[[:space:]]*"failed"' \
+    | grep -E '"exit_code"[[:space:]]*:[[:space:]]*-1[[:space:]]*[,}]' \
+    | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"]*' \
+    | sed -E 's/^"aggregated_output"[[:space:]]*:[[:space:]]*"//; s/ \| .*$//; s/[[:space:]]+(cwd|cmd)=.*$//' \
+    | tr -d '\r' | cut -c1-120
+}
+SHELL_CMD_EVENTS="$(shell_cmd_events "$JSONL")"
+LAUNCH_FAIL_TYPES="$(printf '%s\n' "$SHELL_CMD_EVENTS" | shell_launch_failures)"
+LAUNCH_FAIL_N="$(printf '%s\n' "$LAUNCH_FAIL_TYPES" | grep -c .)"
+SHELL_CMD_N="$(printf '%s\n' "$SHELL_CMD_EVENTS" | grep -c .)"
+case "$LAUNCH_FAIL_N" in ''|*[!0-9]*) LAUNCH_FAIL_N=0 ;; esac
+case "$SHELL_CMD_N" in ''|*[!0-9]*) SHELL_CMD_N=0 ;; esac
+if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
+  SHELL_RAN_N=$((SHELL_CMD_N - LAUNCH_FAIL_N)); [ "$SHELL_RAN_N" -ge 0 ] || SHELL_RAN_N=0
+  echo "[codex-decide] 無共識: codex 的 shell 啟動失敗 ${LAUNCH_FAIL_N} 次(另有 ${SHELL_RAN_N} 次正常啟動)——它沒有(完整)讀到相關檔案,這份裁定的「依據」不可信,停下交使用者。" >&2
+  echo "  錯誤類型(不含 cwd／命令列):" >&2
+  printf '%s\n' "$LAUNCH_FAIL_TYPES" | sort | uniq -c | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
+  echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\";" >&2
+  echo "  沙箱能跑但 exec 仍失敗時看 \$CODEX_HOME/.sandbox/setup_error.json 與當天 sandbox.<日期>.log 的 os error 32(詳見 codex-review.sh)。" >&2
+  exit 3
 fi
 
 field() { grep -m1 -E "^$1[:：]" "$OUT" | sed -E "s/^$1[:：][[:space:]]*//" | tr -d '\r' | xargs; }
