@@ -109,6 +109,18 @@ ok "非 Windows 有 LOCALAPPDATA: 原值不動"          test "$(tr -d '\r' < "$
 run_env -u OS -u LOCALAPPDATA PATH="$T/binlinux:$T/bin:$PATH"
 ok "非 Windows 無 LOCALAPPDATA: 子程序仍是 unset"  test "$(tr -d '\r' < "$T/laa.log")" = "<unset>"
 
+# cygpath 失敗或印出空字串 → 保留原路徑、覆寫仍生效(直接賦值 $(cygpath …) 會讓 NO_LOCALAPPDATA
+# 變空,codex_cmd 走不覆寫的分支,覆寫靜默失效)。假 cygpath 排在 PATH 最前面。
+mkdir -p "$T/bincyg-empty" "$T/bincyg-fail"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bincyg-empty/cygpath"; chmod +x "$T/bincyg-empty/cygpath"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bincyg-fail/cygpath";  chmod +x "$T/bincyg-fail/cygpath"
+run_env PATH="$T/bincyg-empty:$T/bin:$PATH"; rc=$?
+ok "cygpath 印空字串: 照常 rc=0"                    test "$rc" -eq 0
+ok "cygpath 印空字串: 覆寫仍生效(保留原路徑)"        laa_overridden 1
+run_env PATH="$T/bincyg-fail:$T/bin:$PATH"; rc=$?
+ok "cygpath 失敗(exit 1): 照常 rc=0"                test "$rc" -eq 0
+ok "cygpath 失敗(exit 1): 覆寫仍生效(保留原路徑)"    laa_overridden 1
+
 # 覆寫只掛在 codex 子程序上、不外溢到腳本自己的環境: 用假 grep 當探針——腳本在 codex 呼叫【之後】
 # 還會跑 grep(RATE_PAT 判定等),它記下自己看到的 LOCALAPPDATA 再轉交真 grep。若有人把覆寫改成
 # 腳本層級的 export LOCALAPPDATA=...,探針會看到被覆寫的值而變紅;同一輪 exec 子程序仍須被覆寫。

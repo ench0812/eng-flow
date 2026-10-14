@@ -1088,7 +1088,11 @@ case "${OS:-}|$(uname -s 2>/dev/null)" in
     # 路徑刻意【不建立】(NotFound 才會略過那一步),名稱帶 no-localappdata 以便在 log 裡辨認。
     NO_LOCALAPPDATA="${CODEX_HOME:-$HOME/.codex}/eng-flow-no-localappdata"
     # 原生 Windows 程式要 Windows 形式的路徑;Git Bash 才有 cygpath,沒有就原樣用。
-    command -v cygpath >/dev/null 2>&1 && NO_LOCALAPPDATA="$(cygpath -m "$NO_LOCALAPPDATA")" ;;
+    # cygpath 失敗或印出空字串時【保留原路徑】: 直接把 $(cygpath …) 的結果賦值會讓 NO_LOCALAPPDATA
+    # 變空,codex_cmd 於是走不覆寫的分支——覆寫靜默失效,症狀就是 shell 全失敗卻照印 完成(…)。
+    if command -v cygpath >/dev/null 2>&1; then
+      _cyg="$(cygpath -m "$NO_LOCALAPPDATA" 2>/dev/null)" && [ -n "$_cyg" ] && NO_LOCALAPPDATA="$_cyg"
+    fi ;;
 esac
 codex_cmd() {
   if [ -n "$NO_LOCALAPPDATA" ]; then LOCALAPPDATA="$NO_LOCALAPPDATA" "$CODEX_BIN" "$@"

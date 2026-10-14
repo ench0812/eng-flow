@@ -673,6 +673,17 @@ ok "非 Windows 有 LOCALAPPDATA: 原值不動" test "$(tr -d '\r' < "$LAA")" = 
 mk_doc7 v4d; : > "$LAA"
 run7 -u OS -u LOCALAPPDATA PATH="$STUB2/binlinux:$STUB2:$PATH" IGNORE=1 >/dev/null
 ok "非 Windows 無 LOCALAPPDATA: codex 子程序仍是 unset" test "$(tr -d '\r' < "$LAA")" = "<unset>"
+# cygpath 失敗或印出空字串 → 保留原路徑、覆寫仍生效(直接賦值 $(cygpath …) 會讓 NO_LOCALAPPDATA
+# 變空,codex_cmd 走不覆寫的分支,覆寫靜默失效)。假 cygpath 排在 PATH 最前面。
+mkdir -p "$STUB2/bincyg-empty" "$STUB2/bincyg-fail"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB2/bincyg-empty/cygpath"; chmod +x "$STUB2/bincyg-empty/cygpath"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$STUB2/bincyg-fail/cygpath";  chmod +x "$STUB2/bincyg-fail/cygpath"
+mk_doc7 v4e; : > "$LAA"
+run7 LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/bincyg-empty:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "cygpath 印空字串: 覆寫仍生效(保留原路徑)" laa_overridden 1
+mk_doc7 v4f; : > "$LAA"
+run7 LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/bincyg-fail:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "cygpath 失敗(exit 1): 覆寫仍生效(保留原路徑)" laa_overridden 1
 
 # --- prompt 政策版本(2026-08-31,codex 複查抓到) ---
 # 命題: resume 沿用舊 session 的對話歷史,而 resume 輪的 prompt 只說「規則同先前輪次」。

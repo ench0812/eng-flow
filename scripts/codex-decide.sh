@@ -156,7 +156,10 @@ NO_LOCALAPPDATA=""
 case "${OS:-}|$(uname -s 2>/dev/null)" in
   *Windows_NT*|*MINGW*|*MSYS*|*CYGWIN*)
     NO_LOCALAPPDATA="${CODEX_HOME:-$HOME/.codex}/eng-flow-no-localappdata"
-    command -v cygpath >/dev/null 2>&1 && NO_LOCALAPPDATA="$(cygpath -m "$NO_LOCALAPPDATA")" ;;
+    # cygpath 失敗或印出空字串時保留原路徑(否則 NO_LOCALAPPDATA 變空、覆寫靜默失效,理由同 codex-review.sh)
+    if command -v cygpath >/dev/null 2>&1; then
+      _cyg="$(cygpath -m "$NO_LOCALAPPDATA" 2>/dev/null)" && [ -n "$_cyg" ] && NO_LOCALAPPDATA="$_cyg"
+    fi ;;
 esac
 codex_cmd() {
   if [ -n "$NO_LOCALAPPDATA" ]; then LOCALAPPDATA="$NO_LOCALAPPDATA" "$CODEX_BIN" "$@"
