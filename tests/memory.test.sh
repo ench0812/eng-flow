@@ -295,6 +295,19 @@ want "[regression] 引用不存在 → claude_md_dangling" 1 "claude_md_dangling
 printf '一般散文提到 memory 這個詞不該被解析。\n' > "$H/CLAUDE.md"
 wantnot "散文中的 memory 不解析（不得誤報）" "claude_md_dangling" bash "$MEM" audit --home "$H" --today 2026-01-01
 
+echo "== AGENTS.md 跨庫引用 =="
+H="$SANDBOX/c10a"; mkdir -p "$H/memory"
+mkmem "$H/memory" exists1 <<< '存在。'
+printf '見 memory `exists1` 的說明。\n' > "$H/AGENTS.md"
+wantnot "AGENTS.md 引用存在的全域記憶 → 不報" "agents_md_dangling" bash "$MEM" audit --home "$H" --today 2026-01-01
+printf '見 memory `gone1` 的說明。\n' >> "$H/AGENTS.md"
+want "[regression] AGENTS.md 引用不存在 → agents_md_dangling 並印出 AGENTS.md 路徑" 1 "AGENTS.md: agents_md_dangling gone1" \
+     bash "$MEM" audit --home "$H" --today 2026-01-01
+printf '見 memory `exists1`。\n' > "$H/CLAUDE.md"
+want "AGENTS.md 壞引用不因 CLAUDE.md 乾淨而被蓋掉" 1 "agents_md_dangling gone1" \
+     bash "$MEM" audit --home "$H" --today 2026-01-01
+wantnot "CLAUDE.md 乾淨 → 不報 claude_md_dangling" "claude_md_dangling" bash "$MEM" audit --home "$H" --today 2026-01-01
+
 echo "== 候選型檢查不影響 exit code =="
 H="$SANDBOX/c11"; B="$H/memory"
 mkbig "$B" big 4096 6
@@ -1101,6 +1114,15 @@ wantnot "沒有引用時不得報 dangling" "claude_md_dangling"      bash "$MEM
 printf '見 memory `nosuchid` 的說明。
 ' >> "$H/CLAUDE.md"
 want "壞引用仍要報" 1 "claude_md_dangling nosuchid"      bash "$MEM" audit --home "$H" --today 2026-01-01
+# AGENTS.md 同樣：不是普通檔 → agents_md_unreadable；正常檔不誤報
+H="$SANDBOX/cm2"; B="$H/memory"
+mkmem "$B" cmb <<< '正文。'
+mkdir -p "$H/AGENTS.md"
+want "[regression] AGENTS.md 不是普通檔 → agents_md_unreadable" 1 "agents_md_unreadable"      bash "$MEM" audit --home "$H" --today 2026-01-01
+rmdir "$H/AGENTS.md"
+printf '# 一般設定檔，沒有記憶引用。
+' > "$H/AGENTS.md"
+wantnot "正常 AGENTS.md 不得誤報" "agents_md_unreadable"      bash "$MEM" audit --home "$H" --today 2026-01-01
 
 echo "== T8a codex 第二十六輪：標記必須獨佔整行 =="
 # `<!-- TOPICS:BEGIN --> 手寫的東西` 若算合法標記，extract_topics 取區塊時

@@ -759,7 +759,9 @@ EOF
       check_index "$bank" || rc=1     # 不可吞掉：吞了就會 WARN 滿天飛卻 exit 0
     done < <(list_banks)
 
-    # CLAUDE.md 的跨庫引用：只掃 <home>/CLAUDE.md，且只認「memory 後面接一個
+    # AGENTS.md 與 CLAUDE.md 的跨庫引用：只掃 <home>/AGENTS.md 與 <home>/CLAUDE.md
+    # （存在的才掃；代碼 CLAUDE.md 沿用 claude_md_*、AGENTS.md 用 agents_md_*），
+    # 且只認「memory 後面接一個
     # 反引號包住的 id」——散文裡的 memory 不解析，否則會誤報一片。
     # 兩種寫法都要接受（實測既有寫法是後者）：
     #   `memory foo`   → 整段包在反引號內
@@ -767,30 +769,34 @@ EOF
     # 讀不到與「沒有引用」在輸出上一模一樣，而 grep 的 exit 1（無匹配）與
     # exit 2（讀取錯誤）也被 `2>/dev/null` 一起吞掉。分開處理：只有真正確認
     # 「檔案在、讀得完、沒有壞引用」才算這一項乾淨。
-    CM="$HOME_DIR/CLAUDE.md"
-    if [ -e "$CM" ] && { [ ! -f "$CM" ] || [ ! -r "$CM" ]; }; then
-      emit WARN "$CM" claude_md_unreadable ""
-    elif [ -f "$CM" ]; then
-      CM1="$(mktemp)"; CM2="$(mktemp)"
-      grep -o '`memory [A-Za-z0-9._-]\+`' "$CM" > "$CM1" 2>/dev/null; g1=$?
-      grep -o 'memory `[A-Za-z0-9._-]\+`' "$CM" > "$CM2" 2>/dev/null; g2=$?
-      if [ "$g1" -ge 2 ] || [ "$g2" -ge 2 ]; then
-        emit WARN "$CM" claude_md_unreadable "grep_status=$g1/$g2"
+    scan_refs_file() {   # $1=檔案路徑 $2=代碼前綴（agents_md / claude_md）
+      local CM="$1" PFX="$2" CM1 CM2 g1 g2 ref
+      if [ -e "$CM" ] && { [ ! -f "$CM" ] || [ ! -r "$CM" ]; }; then
+        emit WARN "$CM" "${PFX}_unreadable" ""
+      elif [ -f "$CM" ]; then
+        CM1="$(mktemp)"; CM2="$(mktemp)"
+        grep -o '`memory [A-Za-z0-9._-]\+`' "$CM" > "$CM1" 2>/dev/null; g1=$?
+        grep -o 'memory `[A-Za-z0-9._-]\+`' "$CM" > "$CM2" 2>/dev/null; g2=$?
+        if [ "$g1" -ge 2 ] || [ "$g2" -ge 2 ]; then
+          emit WARN "$CM" "${PFX}_unreadable" "grep_status=$g1/$g2"
+        fi
+        { sed 's/^`memory //; s/`$//' "$CM1"
+          sed 's/^memory `//; s/`$//' "$CM2"
+        } | LC_ALL=C sort -u | while IFS= read -r ref; do
+              [ -n "$ref" ] || continue
+              if ! awk -F"$FS_US" -v g="$HOME_DIR/memory" -v r="$ref" \
+                     'BEGIN{f=1} $1==g && $2==r {f=0} END{exit f}' "$MODEL"; then
+                printf 'WARN %s: %s_dangling %s\n' "$CM" "$PFX" "$ref" >&2
+                printf 'CLAUDE_MD_DANGLING\n' >> "$LINKS_FLAG"
+              fi
+            done
+        rm -f "$CM1" "$CM2"
+        [ -f "$LINKS_FLAG" ] && rc=1
+        rm -f "$LINKS_FLAG"
       fi
-      { sed 's/^`memory //; s/`$//' "$CM1"
-        sed 's/^memory `//; s/`$//' "$CM2"
-      } | LC_ALL=C sort -u | while IFS= read -r ref; do
-            [ -n "$ref" ] || continue
-            if ! awk -F"$FS_US" -v g="$HOME_DIR/memory" -v r="$ref" \
-                   'BEGIN{f=1} $1==g && $2==r {f=0} END{exit f}' "$MODEL"; then
-              printf 'WARN %s: claude_md_dangling %s\n' "$HOME_DIR/CLAUDE.md" "$ref" >&2
-              printf 'CLAUDE_MD_DANGLING\n' >> "$LINKS_FLAG"
-            fi
-          done
-      rm -f "$CM1" "$CM2"
-      [ -f "$LINKS_FLAG" ] && rc=1
-      rm -f "$LINKS_FLAG"
-    fi
+    }
+    scan_refs_file "$HOME_DIR/AGENTS.md" agents_md
+    scan_refs_file "$HOME_DIR/CLAUDE.md" claude_md
 
     # 圖與相似度檢查交給 awk（單次掃描，避免逐則開子行程）。
     # 結果先落暫存檔再讀：用管線接 while 會讓迴圈跑在子 shell，rc 傳不回來，

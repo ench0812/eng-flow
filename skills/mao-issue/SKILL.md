@@ -53,7 +53,7 @@ bash <plugin>/scripts/codex-review.sh --severity required --doc <scratchpad>/iss
 
 **把處置寫回 issue**，不要只留在對話裡——下一個讀這張 issue 的人（可能是幾週後的你、也可能是 subagent）看到的是 GitHub 上那份，不是這次的 session。採納的修正直接改 body 或補一則留言；`gh issue comment --body-file`（Windows 的 heredoc 對多 byte UTF-8 會截斷，中文一律走檔案）。
 
-**續輪判斷沿用既有的收斂問句機制**（見 CLAUDE.md「Codex 交叉複查」段）：**停是預設**。只有在「本輪採納了 codex 沒看過的 Critical/Required 修改」或「問句實質、在範圍內、且未處置過」時才續。
+**續輪判斷沿用既有的收斂問句機制**（見全域 AGENTS.md（舊環境為 CLAUDE.md）「Codex 交叉複查」段）：**停是預設**。只有在「本輪採納了 codex 沒看過的 Critical/Required 修改」或「問句實質、在範圍內、且未處置過」時才續。
 
 多輪時把處置紀錄寫成 `## Cross-Check Log` ＋ `### Round N` 段落放在 dump 檔尾端——腳本的 `trim_crosscheck_log` 認這兩個標題，只送最後一輪。**沒有這個結構的話每輪都重送全文**，payload 會一路長大。
 

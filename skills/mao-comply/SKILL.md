@@ -8,7 +8,7 @@ description: ISO 27001 合規查核與部署。需確認程式/變更是否符�
 Verify a change against ISO/IEC 27001:2022 dev controls, then deploy machine gates.
 For full control detail + per-control dev actions see `~/.claude/docs/iso27001-dev.md`.
 
-## Red Lines (never cross) — items 1-3 are also always-on in `CLAUDE.md`
+## Red Lines (never cross) — items 1-3 are also always-on in `AGENTS.md` (`CLAUDE.md` in older setups)
 1. No hard-coded secrets in code/config/Dockerfile/CI — secrets manager / env [A.8.24/A.8.28]
 2. No secrets/PII in logs [A.8.15/A.8.11]
 3. TLS 1.2+ in transit; AES-256 at rest; ban MD5/SHA-1/DES/3DES/RC4 [A.8.24]
