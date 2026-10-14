@@ -836,6 +836,10 @@ ok "(f5) 結尾 \\r\\n 字面不殘留"                    test "$(lf_types "$O"
 # (f6) 跳脫引號 \" 不得在尾端殘留反斜線
 lf_item 'Failed to create unified exec process: bad \"quote\"' -1 failed | lf_events; O="$(lf_run)"
 ok "(f6) \\\" 尾端不殘留反斜線"                     test "$(lf_types "$O")" = '    1 Failed to create unified exec process: bad'
+# (f7) 沒有反斜線、也沒有 cwd=/cmd=,但錯誤文字裡帶 key=value:值不得印出(停在 = 之前)
+lf_item 'Failed to create unified exec process: spawn pwsh -c Get-Secret --token=SEKRET55' -1 failed | lf_events; O="$(lf_run)"
+ok "(f7) 仍被偵測"                                lf_marked "$O"
+ok "(f7) key=value 的值不印出"                    test "$(printf '%s' "$O" | grep -c 'SEKRET55')" -eq 0
 
 # (h) 整合: 只有 stderr 有字樣、事件流沒有結構化失敗 → 既有警示塊照舊,完成行不加警示
 lf_item "PROBE-OK" 0 completed | lf_events

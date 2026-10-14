@@ -223,7 +223,8 @@ fi
 # 只認 `codex exec --json` 事件流裡的結構——item.completed ＋ command_execution ＋ status=failed ＋
 # exit_code=-1 ＋ aggregated_output【以】啟動錯誤開頭;不做全文比對(agent_message 會引用這些字串),
 # 不依賴欄位順序與 jq。只取錯誤類型到第一個「 | 」為止(其後是 cwd=／cmd=,命令列可能帶 token),
-# 且遇到任何反斜線就停(`[^"\\]*`): 否則會跨過 JSON 逸出序列(\n 之後接命令列與 token)整段印出。
+# 且遇到任何反斜線就停(`[^"\\=]*`): 否則會跨過 JSON 逸出序列(\n 之後接命令列與 token)整段印出;
+# 遇到 `=` 也停——已知錯誤類型都不含 `=`,而 `--token=…`、`password=…` 這類值就此切掉。
 shell_cmd_events() { # $1=JSONL 檔 → 已完成的 command_execution 事件行
   grep -E '"type"[[:space:]]*:[[:space:]]*"item\.completed"' "$1" 2>/dev/null \
     | grep -E '"type"[[:space:]]*:[[:space:]]*"command_execution"'
@@ -231,7 +232,7 @@ shell_cmd_events() { # $1=JSONL 檔 → 已完成的 command_execution 事件行
 shell_launch_failures() { # stdin=shell_cmd_events 的輸出 → 每個啟動失敗印一行錯誤類型
   grep -E '"status"[[:space:]]*:[[:space:]]*"failed"' \
     | grep -E '"exit_code"[[:space:]]*:[[:space:]]*-1[[:space:]]*[,}]' \
-    | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"\\]*' \
+    | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"\\=]*' \
     | sed -E 's/^"aggregated_output"[[:space:]]*:[[:space:]]*"//; s/ \| .*$//; s/[[:space:]]+(cwd|cmd)=.*$//' \
     | tr -d '\r' | cut -c1-120
 }

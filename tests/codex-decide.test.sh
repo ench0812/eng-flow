@@ -283,6 +283,9 @@ ok "(f5) 結尾 \\r\\n 字面不殘留"                    test "$(lf_types)" = 
 # (f6) 跳脫引號 \" 不得在尾端殘留反斜線
 lf_item 'Failed to create unified exec process: bad \"quote\"' -1 failed | lf_events; lf_run
 ok "(f6) \\\" 尾端不殘留反斜線"                     test "$(lf_types)" = '    1 Failed to create unified exec process: bad'
+# (f7) 沒有反斜線、也沒有 cwd=/cmd=,但錯誤文字裡帶 key=value:值不得印出(停在 = 之前)
+lf_item 'Failed to create unified exec process: spawn pwsh -c Get-Secret --token=SEKRET55' -1 failed | lf_events; lf_run
+ok "(f7) key=value 的值不印出"                    lf_out_lacks 'SEKRET55'
 
 # --json 之後錯誤只出現在 stdout 的 error 事件(stderr 空),仍要走對各自的分支——
 # 先前純文字模式下這些訊息在 stderr,改 --json 後若不併入就會被誤判成別的失敗:
