@@ -11,15 +11,25 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$ROOT/scripts/codex-review.sh"
 DOC="$ROOT/README.md"   # 任一存在的檔案即可
 pass=0; fail=0
-FIX="$(mktemp -d)"
+# 暫存目錄: TMPDIR 若設成 Windows 路徑(例如 D:/Temp),mktemp 會回「D:/Temp/tmp.xxx」,含冒號,
+# 放進 PATH 會被切斷(見下面 no_colon)。有 cygpath(Git Bash／MSYS)就轉成 /d/Temp/… 形式,沒有則照原樣。
+tmpd() { local d; d="$(mktemp -d)" || return 1
+  case "$d" in *:*) command -v cygpath >/dev/null 2>&1 && d="$(cygpath -u "$d")" ;; esac
+  printf '%s\n' "$d"; }
+FIX="$(tmpd)"
 # Gate 隔離: 不可依賴「PATH 上找不到 codex」——腳本的 fallback 清單裡有 /usr/local/bin/codex,
 # 那是 Linux/macOS 的常見安裝位置,一旦命中這些 case 會拿 fixture 真的送出諮詢(花錢、打 API,
 # 而且要等到斷言拿不到 SKIP 才會叫)。改成確定性地在 Gate 2 擋下: login status 回非零。
-GATE="$(mktemp -d)"
+GATE="$(tmpd)"
 printf '#!/usr/bin/env bash
 exit 1
 ' > "$GATE/codex"; chmod +x "$GATE/codex"
 trap 'rm -rf "$FIX" "$GATE"' EXIT
+# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號(例如 TMPDIR 設成 D:/Temp),"$DIR:$PATH" 會被切斷,
+# stub 不在 PATH 上,command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。每個會放進 PATH 的
+# 暫存目錄建立後都用 no_colon 擋下(2026-10-14,A 層審查者就因此誤叫了真 codex 15 次)。
+no_colon() { case "$1" in *:*) echo "FATAL: mktemp 目錄 '$1' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac; }
+no_colon "$FIX"; no_colon "$GATE"
 
 # 【所有斷言 helper 都必須定義在這裡,任何測試呼叫之前】(2026-09-07 踩過):
 # ok()/has()/hasnt() 原本定義在檔案中段(舊 306 行)。在它之前呼叫 `ok` 的話,bash 只會對
@@ -145,7 +155,7 @@ check_rl "正常完成"                     no  0 "" "無重大遺漏"
 # --- rate limit 端到端(stub codex) ---
 # 這裡的 stub 只驗「腳本收到 rate limit 訊息後怎麼分流」,不驗 codex flag 是否正確
 # ——後者 stub 永遠測不出來(歷史教訓),仍由人工 E2E 覆蓋。
-STUB="$(mktemp -d)"
+STUB="$(tmpd)"; no_colon "$STUB"
 STUB_DOC="$STUB/spec.md"; printf '# Fixture\n\ncontent\n' > "$STUB_DOC"
 mk_stub() { # $1 = exec 分支要跑的 shell 片段
   { echo '#!/usr/bin/env bash'
@@ -390,7 +400,7 @@ ok "delta: 列出未變更檔名"     has "a.py" "$DLT"
 ok "delta: 兩輪相同則無區塊"   hasnt "^diff --git" "$(diff_delta_per_file "$CG/old.diff" "$CG/old.diff")"
 
 # --- 成本治理: 端到端(stub codex) ---
-STUB2="$(mktemp -d)"
+STUB2="$(tmpd)"; no_colon "$STUB2"
 mk_stub2() { { echo '#!/usr/bin/env bash'; echo 'case "$1" in'; echo '  login) exit 0 ;;'
                echo "  exec)  $1 ;;"; echo 'esac'; echo 'exit 0'; } > "$STUB2/codex"; chmod +x "$STUB2/codex"; }
 mk_stub2 'echo "無重大補充"; echo "收斂問句:無"; exit 0'
@@ -694,10 +704,8 @@ ok "cygpath 失敗(exit 1): 覆寫仍生效(保留原路徑)" laa_overridden 1
 # 輸出【以】啟動錯誤開頭)缺一不可,所以每個「不偵測」案例各自只違反其中一個條件,
 # 負控組(拿掉對應條件)才會只紅對應那一則。
 # review 本體固定帶一行【已讀】發現,免得內容式的零查證偵測(全標【推論】)干擾 telemetry 狀態欄。
-LF="$(mktemp -d)"
-# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號(例如 TMPDIR 設成 D:/Temp),"$LF:$PATH" 會被切斷,
-# stub 不在 PATH 上,command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。先擋下。
-case "$LF" in *:*) echo "FATAL: mktemp 目錄 '$LF' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac
+LF="$(tmpd)"
+no_colon "$LF"   # 理由見檔頭 no_colon: "$LF:$PATH" 被冒號切斷會叫到真的 codex
 cat > "$LF/codex" <<'LFSTUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -986,7 +994,7 @@ LOW_NEW="$(map LOW_MODEL)";  LOW_OLD="$(map LOW_LEGACY_MODEL)"
 PLAN_NEW="$(map PLAN_MODEL)"; PLAN_OLD="$(map PLAN_LEGACY_MODEL)"
 ok "退路: 映射表讀得到(否則以下斷言全部沒意義)" test -n "$REQ_NEW" -a -n "$REQ_OLD" -a -n "$CRIT_NEW" -a -n "$CRIT_OLD" -a -n "$LOW_NEW" -a -n "$LOW_OLD" -a -n "$PLAN_NEW" -a -n "$PLAN_OLD"
 
-FB="$(mktemp -d)"
+FB="$(tmpd)"; no_colon "$FB"
 cat > "$FB/codex" <<'STUBEOF'
 #!/usr/bin/env bash
 case "$1" in

@@ -11,10 +11,15 @@ pass=0; fail=0
 ok() { local desc="$1"; shift
   if "$@"; then pass=$((pass+1)); else echo "FAIL [$desc]"; fail=$((fail+1)); fi; }
 
-T="$(mktemp -d)"
+# 暫存目錄: TMPDIR 若設成 Windows 路徑(例如 D:/Temp),mktemp 會回「D:/Temp/tmp.xxx」,含冒號。
+# 有 cygpath(Git Bash／MSYS)就轉成 /d/Temp/… 形式,沒有則照原樣(交給下面的冒號守門)。
+tmpd() { local d; d="$(mktemp -d)" || return 1
+  case "$d" in *:*) command -v cygpath >/dev/null 2>&1 && d="$(cygpath -u "$d")" ;; esac
+  printf '%s\n' "$d"; }
+T="$(tmpd)"
 trap 'rm -rf "$T"' EXIT
-# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號(例如 TMPDIR 設成 D:/Temp),"$T/bin:$PATH" 會被切斷,
-# stub 不在 PATH 上,command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。先擋下。
+# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號,"$T/bin:$PATH" 會被切斷,stub 不在 PATH 上,
+# command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。轉換後仍含冒號就先擋下。
 case "$T" in *:*) echo "FATAL: mktemp 目錄 '$T' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac
 mkdir -p "$T/bin" "$T/repo"
 ( cd "$T/repo" && git init -q . )
