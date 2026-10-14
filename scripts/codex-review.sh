@@ -1265,6 +1265,10 @@ TOOL_FAIL_LINES="$(grep -vE '^(@@|\+\+\+|---|diff --git|index [0-9a-f]+\.\.|[+-]
 # 同樣用 grep 取;jq 缺席時偵測會整個關掉,那是靜默的)。
 # 只取錯誤類型到第一個「 | 」為止: 啟動錯誤之後 codex 可能附上 cwd=…／cmd=…(整條命令列,
 # 可能含 token),印出去就踩安全鐵律 #2;另外再切掉任何殘留的 cwd=／cmd=,縱深防禦。
+# 【遇到任何反斜線就停】(`[^"\\]*`,2026-10-14 A 層審查抓到): 擷取若用 `[^"]*` 會跨過 JSON 逸出序列——
+#   "…process: boom\nrunning: pwsh -c Get-Secret --token=SEKRET99" 實測整段印出,cut -c1-120 擋不住。
+# 真實的錯誤類型是單行純文字,不含反斜線;停在第一個反斜線同時消除 \n／\r\n 與 \" 的字面殘留。
+# 反斜線之前仍可能有自由文字——靠「 | 」與 cwd=／cmd= 的切除、長度上限擋,不是白名單。
 shell_cmd_events() { # $1=JSONL 檔 → 已完成的 command_execution 事件行
   grep -E '"type"[[:space:]]*:[[:space:]]*"item\.completed"' "$1" 2>/dev/null \
     | grep -E '"type"[[:space:]]*:[[:space:]]*"command_execution"'
@@ -1272,7 +1276,7 @@ shell_cmd_events() { # $1=JSONL 檔 → 已完成的 command_execution 事件行
 shell_launch_failures() { # stdin=shell_cmd_events 的輸出 → 每個啟動失敗印一行錯誤類型
   grep -E '"status"[[:space:]]*:[[:space:]]*"failed"' \
     | grep -E '"exit_code"[[:space:]]*:[[:space:]]*-1[[:space:]]*[,}]' \
-    | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"]*' \
+    | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"\\]*' \
     | sed -E 's/^"aggregated_output"[[:space:]]*:[[:space:]]*"//; s/ \| .*$//; s/[[:space:]]+(cwd|cmd)=.*$//' \
     | tr -d '\r' | cut -c1-120
 }

@@ -13,6 +13,9 @@ ok() { local desc="$1"; shift
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
+# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號(例如 TMPDIR 設成 D:/Temp),"$T/bin:$PATH" 會被切斷,
+# stub 不在 PATH 上,command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。先擋下。
+case "$T" in *:*) echo "FATAL: mktemp 目錄 '$T' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac
 mkdir -p "$T/bin" "$T/repo"
 ( cd "$T/repo" && git init -q . )
 printf '# Q\n\n選項 A／B\n\n## 安全與可逆性聲明\n可逆。\n' > "$T/q.md"
@@ -35,13 +38,16 @@ for a in "\$@"; do [ "\$prev" = "-o" ] && o="\$a"; prev="\$a"; done
 # 最終訊息寫進 -o 指定的檔。JSON_ERR 非空 → 以 error 事件(只在 stdout、stderr 空)失敗。
 if [ -n "\${EVENTS:-}" ]; then
   if [ -n "\${JSON_ERR:-}" ]; then
-    printf '{"type":"error","message":"%s"}\n' "\$JSON_ERR"; exit 1
+    # TURN_FAILED=1 → 只有 turn.failed 事件帶訊息(沒有獨立的 error 事件)
+    if [ -n "\${TURN_FAILED:-}" ]; then printf '{"type":"turn.failed","error":{"message":"%s"}}\n' "\$JSON_ERR"
+    else printf '{"type":"error","message":"%s"}\n' "\$JSON_ERR"; fi
+    exit 1
   fi
   if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
     printf '{"type":"error","message":"model_not_found: %s"}\n' "\$model"; exit 1
   fi
-  # 真 codex 的 -o 檔最後沒有結尾換行(NO_EOL=1 時照做)
-  if [ -n "\$o" ]; then
+  # 真 codex 的 -o 檔最後沒有結尾換行(NO_EOL=1 時照做);NO_O=1 → 完全不寫 -o 檔(exit 0 但沒有最終訊息)
+  if [ -n "\$o" ] && [ -z "\${NO_O:-}" ]; then
     if [ -n "\${NO_EOL:-}" ]; then printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無' > "\$o"
     else printf '裁定:A\n信心:高\n依據:已讀\n理由:x\n異議:無\n' > "\$o"; fi
   fi
@@ -181,6 +187,10 @@ lf_blocked() { [ "$lf_rc" -eq 3 ] && grep -q '無共識: codex 的 shell 啟動�
 lf_out_has() { grep -q -- "$1" "$T/out.txt"; }
 lf_out_lacks() { ! grep -qE -- "$1" "$T/out.txt"; }
 
+ok "PATH 最前面的 codex 是 stub(不會叫到真的 codex)" test "$(PATH="$T/bin:$PATH" command -v codex)" = "$T/bin/codex"
+# 警示塊的錯誤類型行(scripts 以 uniq -c 印成「4 個空白 + 次數 + 類型」)
+lf_types() { grep -E '^    [0-9]+ (Failed to create unified exec process|CreateProcess)' "$T/out.txt"; }
+
 # 基準: 全部 shell 呼叫正常 → 共識成立。同時鎖住 JSON 模式的呼叫形狀(--json 與 -o 各一次)
 lf_item "PROBE-OK" 0 completed | lf_events; lf_run
 ok "基準: shell 正常 → 共識成立 rc=0"          lf_agreed
@@ -243,6 +253,19 @@ ok "(f3) 輸出不含「 | 」之後的內容"               lf_out_lacks 'secre
 lf_item "Failed to create unified exec process: boom cwd=C:\\\\secret-dir2 cmd=tool --token=zzz9" -1 failed | lf_events; lf_run
 ok "(f2) 無分隔符的 cwd／cmd → exit 3"            lf_blocked
 ok "(f2) 輸出不含 cwd=／cmd=／路徑／token"         lf_out_lacks 'cwd=|cmd=|secret-dir2|zzz9'
+
+# (f4) JSON 逸出序列(2026-10-14 A 層審查抓到): 擷取若用 [^"]* 會跨過 \n 把後面的命令列與 token 整段印出。
+# 錯誤類型只能停在第一個反斜線之前。fixture 內的 \n／\r\n／\" 都是 JSON 的字面逸出(兩個字元)。
+lf_item 'Failed to create unified exec process: boom\nrunning: pwsh -c Get-Secret --token=SEKRET99' -1 failed | lf_events; lf_run
+ok "(f4) \\n 後接命令列與 token → exit 3"         lf_blocked
+ok "(f4) 輸出不含 \\n 之後的命令列與 token"        lf_out_lacks 'SEKRET99|Get-Secret|running:'
+ok "(f4) 錯誤類型停在反斜線之前"                   test "$(lf_types)" = '    1 Failed to create unified exec process: boom'
+# (f5) 結尾的 \r\n 字面不得殘留
+lf_item 'Failed to create unified exec process: helper_unknown_error: setup refresh had errors\r\n' -1 failed | lf_events; lf_run
+ok "(f5) 結尾 \\r\\n 字面不殘留"                    test "$(lf_types)" = '    1 Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
+# (f6) 跳脫引號 \" 不得在尾端殘留反斜線
+lf_item 'Failed to create unified exec process: bad \"quote\"' -1 failed | lf_events; lf_run
+ok "(f6) \\\" 尾端不殘留反斜線"                     test "$(lf_types)" = '    1 Failed to create unified exec process: bad'
 
 # --json 之後錯誤只出現在 stdout 的 error 事件(stderr 空),仍要走對各自的分支——
 # 先前純文字模式下這些訊息在 stderr,改 --json 後若不併入就會被誤判成別的失敗:

@@ -695,6 +695,9 @@ ok "cygpath 失敗(exit 1): 覆寫仍生效(保留原路徑)" laa_overridden 1
 # 負控組(拿掉對應條件)才會只紅對應那一則。
 # review 本體固定帶一行【已讀】發現,免得內容式的零查證偵測(全標【推論】)干擾 telemetry 狀態欄。
 LF="$(mktemp -d)"
+# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號(例如 TMPDIR 設成 D:/Temp),"$LF:$PATH" 會被切斷,
+# stub 不在 PATH 上,command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。先擋下。
+case "$LF" in *:*) echo "FATAL: mktemp 目錄 '$LF' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac
 cat > "$LF/codex" <<'LFSTUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -710,6 +713,7 @@ esac
 exit 0
 LFSTUB
 chmod +x "$LF/codex"
+ok "PATH 最前面的 codex 是 stub(不會叫到真的 codex)" test "$(PATH="$LF:$PATH" command -v codex)" = "$LF/codex"
 printf '# Fixture\n\ncontent\n' > "$LF/spec.md"
 LF_ERR='Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
 lf_item() { # $1=aggregated_output $2=exit_code $3=status [$4=item.type=command_execution] [$5=event type=item.completed]
@@ -797,6 +801,20 @@ ok "(f3) 「 | 」之後的任何內容 → 警示不含"      test "$(printf '%
 lf_item "Failed to create unified exec process: boom cwd=C:\\\\secret-dir2 cmd=tool --token=zzz9" -1 failed | lf_events; O="$(lf_run)"
 ok "(f2) 無分隔符的 cwd／cmd → 仍被偵測"      lf_marked "$O"
 ok "(f2) 警示不含 cwd／cmd／token 內容"       test "$(printf '%s' "$O" | grep -cE 'cwd=|cmd=|secret-dir2|zzz9')" -eq 0
+
+# (f4) JSON 逸出序列(2026-10-14 A 層審查抓到): 擷取若用 [^"]* 會跨過 \n 把後面的命令列與 token 整段印出。
+# 錯誤類型只能停在第一個反斜線之前。fixture 內的 \n／\r\n／\" 都是 JSON 的字面逸出(兩個字元)。
+lf_types() { printf '%s\n' "$1" | grep -E '^    [0-9]+ (Failed to create unified exec process|CreateProcess)'; }  # 警示塊的錯誤類型行
+lf_item 'Failed to create unified exec process: boom\nrunning: pwsh -c Get-Secret --token=SEKRET99' -1 failed | lf_events; O="$(lf_run)"
+ok "(f4) \\n 後接命令列與 token → 仍被偵測"        lf_marked "$O"
+ok "(f4) 警示不含 \\n 之後的命令列與 token"        test "$(printf '%s' "$O" | grep -cE 'SEKRET99|Get-Secret|running:')" -eq 0
+ok "(f4) 錯誤類型停在反斜線之前"                   test "$(lf_types "$O")" = '    1 Failed to create unified exec process: boom'
+# (f5) 結尾的 \r\n 字面不得殘留
+lf_item 'Failed to create unified exec process: helper_unknown_error: setup refresh had errors\r\n' -1 failed | lf_events; O="$(lf_run)"
+ok "(f5) 結尾 \\r\\n 字面不殘留"                    test "$(lf_types "$O")" = '    1 Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
+# (f6) 跳脫引號 \" 不得在尾端殘留反斜線
+lf_item 'Failed to create unified exec process: bad \"quote\"' -1 failed | lf_events; O="$(lf_run)"
+ok "(f6) \\\" 尾端不殘留反斜線"                     test "$(lf_types "$O")" = '    1 Failed to create unified exec process: bad'
 
 # (h) 整合: 只有 stderr 有字樣、事件流沒有結構化失敗 → 既有警示塊照舊,完成行不加警示
 lf_item "PROBE-OK" 0 completed | lf_events
