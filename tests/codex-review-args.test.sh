@@ -685,6 +685,130 @@ mk_doc7 v4f; : > "$LAA"
 run7 LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/bincyg-fail:$STUB2:$PATH" IGNORE=1 >/dev/null
 ok "cygpath 失敗(exit 1): 覆寫仍生效(保留原路徑)" laa_overridden 1
 
+# === LAUNCHFAIL-BEGIN ===
+# --- codex shell 啟動失敗的結構化偵測(2026-10-14) ---
+# 背景: codex 的 shell 全部起不來時它不會中止,拿送進去的內容繼續作答,輸出格式完整、exit 0,
+# 腳本過去照印 完成(…)。stderr 的字樣掃描只是旁證,真正的訊號在 `codex exec --json` stdout 的
+# 事件: 失敗的 command_execution item(樣本取自 codex 0.162.1 的真實 stdout,欄位順序同真實樣本)。
+# 偵測只認【結構】——五個條件(item.completed／type=command_execution／status=failed／exit_code=-1／
+# 輸出【以】啟動錯誤開頭)缺一不可,所以每個「不偵測」案例各自只違反其中一個條件,
+# 負控組(拿掉對應條件)才會只紅對應那一則。
+# review 本體固定帶一行【已讀】發現,免得內容式的零查證偵測(全標【推論】)干擾 telemetry 狀態欄。
+LF="$(mktemp -d)"
+cat > "$LF/codex" <<'LFSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  login) exit 0 ;;
+  exec)
+    o=""; prev=""
+    for a in "$@"; do [ "$prev" = "-o" ] && o="$a"; prev="$a"; done
+    [ -n "$o" ] && printf '%s\n' "- Required【已讀】 foo.go:1 確認有問題" "收斂問句:無" > "$o"
+    cat "$LF_EVENTS"
+    [ -n "${LF_STDERR:-}" ] && cat "$LF_STDERR" >&2
+    exit 0 ;;
+esac
+exit 0
+LFSTUB
+chmod +x "$LF/codex"
+printf '# Fixture\n\ncontent\n' > "$LF/spec.md"
+LF_ERR='Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
+lf_item() { # $1=aggregated_output $2=exit_code $3=status [$4=item.type=command_execution] [$5=event type=item.completed]
+  printf '{"type":"%s","item":{"id":"item_1","type":"%s","command":"pwsh -Command Get-Content x","aggregated_output":"%s","exit_code":%s,"status":"%s"}}\n' \
+    "${5:-item.completed}" "${4:-command_execution}" "$1" "$2" "$3"
+}
+lf_events() { # stdin=item 行 → $LF/ev.jsonl(帶頭尾事件);回傳檔路徑
+  { echo '{"type":"thread.started","thread_id":"t-1"}'; echo '{"type":"turn.started"}'; cat
+    echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}}'
+  } > "$LF/ev.jsonl"
+}
+lf_run() { # 合併 stdout+stderr;每次獨立 ledger,免得被「內容與上一輪相同」的去重攔掉
+  # (不能用計數器: lf_run 在 $(...) 子 shell 裡跑,計數不會回傳父 shell,所有案例會共用同一個 ledger)
+  local st; st="$(mktemp -d "$LF/st.XXXXXX")"
+  PATH="$LF:$PATH" LF_EVENTS="$LF/ev.jsonl" CODEX_REVIEW_STATE="$st" CODEX_REVIEW_LOG="$LF/usage.tsv" \
+    bash "$SCRIPT" --doc "$LF/spec.md" --kind spec --severity required 2>&1
+}
+lf_done() { printf '%s\n' "$1" | grep '^\[codex-review\] 完成('; }   # 完成那一行
+lf_st16() { awk -F'\t' 'END{print $16}' "$LF/usage.tsv"; }
+lf_marked() { lf_done "$1" | grep -q '警示=codex shell 啟動失敗'; }  # 完成行帶警示
+lf_header() { printf '%s\n' "$1" | grep -q '警示: codex 的 shell 工具至少失敗過一次'; }  # 獨立警示塊在場
+# 「不偵測」案例的斷言【必須先確認腳本真的跑完】(有完成行): 否則去重 SKIP、FAILED 之類的輸出
+# 本來就沒有警示,會讓「不偵測」斷言恆真(測試宣稱的覆蓋比實際驗到的大)。
+lf_ran_unmarked() { [ -n "$(lf_done "$1")" ] && ! lf_marked "$1"; }
+lf_clean() { lf_ran_unmarked "$1" && ! lf_header "$1"; }   # 跑完,且完成行與警示塊都沒有啟動失敗警示
+
+# (a) 真實形狀的失敗 item → 被偵測,且完成那一行同行就標出「全為推論」
+lf_item "$LF_ERR" -1 failed | lf_events; O="$(lf_run)"
+ok "(a) 啟動失敗 → 完成行同行標警示"      lf_marked "$O"
+ok "(a) 完成行寫出次數與「全為推論」"     test "$(lf_done "$O" | grep -c '啟動失敗 1 次、沒有任何一次正常啟動,本輪結論全為推論')" -eq 1
+ok "(a) 獨立警示塊在場"                   lf_header "$O"
+ok "(a) 警示塊帶錯誤類型"                 has 'helper_unknown_error: setup refresh had errors' "$O"
+ok "(a) 完成行仍以「完成(」起頭且不是 FAILED" test "$(lf_done "$O" | wc -l)" -eq 1 -a "$(printf '%s' "$O" | grep -c 'FAILED:')" -eq 0
+ok "(a) 全部失敗 → telemetry=OK_NOVERIFY"  test "$(lf_st16)" = "OK_NOVERIFY"
+# (a2) 部分失敗(兩次失敗、一次正常) → 如實分開講,不謊稱全為推論,telemetry 不降級
+{ lf_item "$LF_ERR" -1 failed; lf_item "PROBE-OK" 0 completed; lf_item "$LF_ERR" -1 failed; } | lf_events; O="$(lf_run)"
+ok "(a2) 部分失敗 → 完成行標次數與正常啟動數" test "$(lf_done "$O" | grep -c '啟動失敗 2 次(另有 1 次正常啟動),部分結論為推論')" -eq 1
+ok "(a2) 部分失敗 → 不說「全為推論」"        test "$(lf_done "$O" | grep -c '全為推論')" -eq 0
+ok "(a2) 部分失敗 → telemetry 維持 OK"       test "$(lf_st16)" = "OK"
+# (a3) 第二種啟動錯誤字樣
+lf_item "CreateProcessAsUserW failed: 5" -1 failed | lf_events; O="$(lf_run)"
+ok "(a3) CreateProcess*W failed 也被偵測"     lf_marked "$O"
+ok "(a3) 錯誤類型含 OS 錯誤碼"                has 'CreateProcessAsUserW failed: 5' "$O"
+
+# (b) 成功的 item(completed、exit 0)輸出剛好以該字串開頭 → 不偵測
+lf_item "$LF_ERR" 0 completed | lf_events; O="$(lf_run)"
+ok "(b) 成功 item 印出該字串 → 完成行無警示" lf_clean "$O"
+ok "(b) 成功 item 印出該字串 → telemetry=OK" test "$(lf_st16)" = "OK"
+# (b') 只違反 status 條件(completed 但 exit_code -1) → 不偵測
+lf_item "$LF_ERR" -1 completed | lf_events; O="$(lf_run)"
+ok "(b') status=completed → 不偵測"          lf_clean "$O"
+
+# (c) agent_message 的文字引用該字串(codex 失敗後的回覆真的會這樣) → 不偵測
+{ echo '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"SHELL-FAILED\nexec_command failed: CreateProcess { message: \"Rejected(\\\"Failed to create unified exec process: helper_unknown_error\\\")\" }"}}'
+  echo '{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"{\"type\":\"command_execution\",\"aggregated_output\":\"Failed to create unified exec process\",\"exit_code\":-1,\"status\":\"failed\"}"}}'; } | lf_events
+O="$(lf_run)"
+ok "(c) agent_message 引用該字串 → 不偵測"    lf_clean "$O"
+# (c') 只違反 type 條件(其餘欄位都像失敗的指令,但 item 類型是 agent_message) → 不偵測
+lf_item "$LF_ERR" -1 failed agent_message | lf_events; O="$(lf_run)"
+ok "(c') item 類型非 command_execution → 不偵測" lf_clean "$O"
+
+# (d) 指令真的跑過、exit 1 失敗(輸出剛好以該字串開頭) → 不偵測
+lf_item "$LF_ERR" 1 failed | lf_events; O="$(lf_run)"
+ok "(d) exit_code=1 的失敗 → 不偵測"          lf_clean "$O"
+
+# (e) 錯誤字串出現在輸出中段(前面還有別的輸出) → 不偵測
+lf_item "warning: earlier attempt said Failed to create unified exec process" -1 failed | lf_events; O="$(lf_run)"
+ok "(e) 字串在輸出中段 → 不偵測"              lf_clean "$O"
+
+# (g) 只違反 event type 條件(item.started 帶失敗欄位) → 不偵測
+lf_item "$LF_ERR" -1 failed command_execution item.started | lf_events; O="$(lf_run)"
+ok "(g) item.started → 不偵測"                lf_clean "$O"
+
+# (f) 警示不得含 cwd=／cmd=(命令列可能帶 token,安全鐵律 #2)。codex 在啟動錯誤之後以「 | 」附上它們
+lf_item "$LF_ERR | cwd=C:\\\\Users\\\\markh\\\\secret-dir | cmd=pwsh -Command Get-Content token=abc123" -1 failed | lf_events; O="$(lf_run)"
+ok "(f) 含 cwd／cmd 的失敗 → 仍被偵測"        lf_marked "$O"
+ok "(f) 警示不含 cwd="                        test "$(printf '%s' "$O" | grep -c 'cwd=')" -eq 0
+ok "(f) 警示不含 cmd="                        test "$(printf '%s' "$O" | grep -c 'cmd=')" -eq 0
+ok "(f) 警示不含路徑與 token 內容"            test "$(printf '%s' "$O" | grep -cE 'secret-dir|abc123')" -eq 0
+# (f2) 沒有「 | 」分隔、直接黏著 cwd=／cmd= 的變體(縱深防禦)
+lf_item "Failed to create unified exec process: boom cwd=C:\\\\secret-dir2 cmd=tool --token=zzz9" -1 failed | lf_events; O="$(lf_run)"
+ok "(f2) 無分隔符的 cwd／cmd → 仍被偵測"      lf_marked "$O"
+ok "(f2) 警示不含 cwd／cmd／token 內容"       test "$(printf '%s' "$O" | grep -cE 'cwd=|cmd=|secret-dir2|zzz9')" -eq 0
+
+# (h) 整合: 只有 stderr 有字樣、事件流沒有結構化失敗 → 既有警示塊照舊,完成行不加警示
+lf_item "PROBE-OK" 0 completed | lf_events
+printf 'ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "Rejected(\\"Failed to create unified exec process")" }\n' > "$LF/stderr.txt"
+O="$(LF_STDERR="$LF/stderr.txt" lf_run)"
+ok "(h) 只有 stderr 字樣 → 警示塊照舊在場"    lf_header "$O"
+ok "(h) 只有 stderr 字樣 → 完成行不加結構化警示" lf_ran_unmarked "$O"
+# (i) 整合: 兩個來源同時有 → 只有一個警示塊(不並存兩套),完成行帶警示
+lf_item "$LF_ERR" -1 failed | lf_events
+O="$(LF_STDERR="$LF/stderr.txt" lf_run)"
+ok "(i) 兩個來源同時有 → 警示塊只出現一次"    test "$(printf '%s\n' "$O" | grep -c '警示: codex 的 shell 工具至少失敗過一次')" -eq 1
+ok "(i) 兩個來源同時有 → 兩段證據都列出"      test "$(printf '%s\n' "$O" | grep -cE '結構化偵測|stderr 的失敗類型')" -eq 2
+ok "(i) 兩個來源同時有 → 完成行帶警示"        lf_marked "$O"
+rm -rf "$LF"
+# === LAUNCHFAIL-END ===
+
 # --- prompt 政策版本(2026-08-31,codex 複查抓到) ---
 # 命題: resume 沿用舊 session 的對話歷史,而 resume 輪的 prompt 只說「規則同先前輪次」。
 # 若那個 session 建立於舊版 access_note,新加的讀取範圍限制在該輪【等於不存在】,且外表

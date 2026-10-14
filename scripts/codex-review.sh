@@ -1244,17 +1244,74 @@ TOOL_FAIL_PAT='exec_command failed for|CreateProcess[A-Za-z]* failed|Failed to c
 # 跨版本用;靠「當前版本剛好不回顯」等於把正確性寄託在一個沒人保證的實作細節上。
 TOOL_FAIL_LINES="$(grep -vE '^(@@|\+\+\+|---|diff --git|index [0-9a-f]+\.\.|[+-])' "$ERR_FILE" 2>/dev/null \
                    | grep -E "$TOOL_FAIL_PAT" 2>/dev/null)"
-if [ -n "$TOOL_FAIL_LINES" ]; then
+
+# 【結構化偵測】(2026-10-14 新增,取代原本「已知的偵測缺口」的暫緩): 看 `codex exec --json` 的
+# stdout(JSON_FILE)裡的事件,不看 stderr、也不做全文比對。樣本取自 codex 0.162.1 的三次真實呼叫
+# (stdout.jsonl 原樣,啟動失敗的那一行):
+#   {"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"…",
+#    "aggregated_output":"Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+#    "exit_code":-1,"status":"failed"}}
+# 【為什麼不能全文比對 JSON_FILE】: review 本體(item.completed 的 agent_message)也在同一份 JSONL
+# 裡,而回覆完全可能引用這些字串——codex 失敗後的回覆自己就會(同一批樣本:
+# "SHELL-FAILED\nexec_command failed: CreateProcess {…Failed to create unified exec process…}")。
+# 所以只認一個【結構】,五個條件缺一不可:
+#   item.completed          item.started 的 exit_code 是 null、status 是 in_progress
+#   type=command_execution  agent_message 等其他 item 不算
+#   status=failed           指令跑完是 completed;輸出剛好印出那句話也不算
+#   exit_code=-1            指令真的跑過、失敗時是 1、2…;-1 是 codex 自己填的「根本沒起來」
+#   輸出【以】啟動錯誤開頭  錯誤字串出現在輸出中段、或前面還有別的輸出,都不算
+# 不依賴欄位順序,也不解析 JSON 字串逸出: 字串內的引號一律寫成 \",所以【未逸出】的 "key":"value"
+# 序列只可能是真正的 JSON 鍵——這是用 grep 而不用 jq 的前提(本腳本其他地方也不依賴 jq,usage 物件
+# 同樣用 grep 取;jq 缺席時偵測會整個關掉,那是靜默的)。
+# 只取錯誤類型到第一個「 | 」為止: 啟動錯誤之後 codex 可能附上 cwd=…／cmd=…(整條命令列,
+# 可能含 token),印出去就踩安全鐵律 #2;另外再切掉任何殘留的 cwd=／cmd=,縱深防禦。
+shell_cmd_events() { # $1=JSONL 檔 → 已完成的 command_execution 事件行
+  grep -E '"type"[[:space:]]*:[[:space:]]*"item\.completed"' "$1" 2>/dev/null \
+    | grep -E '"type"[[:space:]]*:[[:space:]]*"command_execution"'
+}
+shell_launch_failures() { # stdin=shell_cmd_events 的輸出 → 每個啟動失敗印一行錯誤類型
+  grep -E '"status"[[:space:]]*:[[:space:]]*"failed"' \
+    | grep -E '"exit_code"[[:space:]]*:[[:space:]]*-1[[:space:]]*[,}]' \
+    | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"]*' \
+    | sed -E 's/^"aggregated_output"[[:space:]]*:[[:space:]]*"//; s/ \| .*$//; s/[[:space:]]+(cwd|cmd)=.*$//; s/\\+$//' \
+    | tr -d '\r' | cut -c1-120
+}
+SHELL_CMD_EVENTS="$(shell_cmd_events "$JSON_FILE")"
+LAUNCH_FAIL_TYPES="$(printf '%s\n' "$SHELL_CMD_EVENTS" | shell_launch_failures)"
+LAUNCH_FAIL_N="$(printf '%s\n' "$LAUNCH_FAIL_TYPES" | grep -c .)"
+SHELL_CMD_N="$(printf '%s\n' "$SHELL_CMD_EVENTS" | grep -c .)"
+case "$LAUNCH_FAIL_N" in ''|*[!0-9]*) LAUNCH_FAIL_N=0 ;; esac
+case "$SHELL_CMD_N" in ''|*[!0-9]*) SHELL_CMD_N=0 ;; esac
+SHELL_RAN_N=$((SHELL_CMD_N - LAUNCH_FAIL_N)); [ "$SHELL_RAN_N" -ge 0 ] || SHELL_RAN_N=0
+SHELL_NOTE=""; SHELL_ALL_FAILED=0
+if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
+  if [ "$SHELL_RAN_N" -eq 0 ]; then
+    # 一次都沒起來 = 這一輪沒有任何查證,結論只能是從送進去的內容推得的假說。
+    SHELL_ALL_FAILED=1
+    SHELL_NOTE=", 警示=codex shell 啟動失敗 ${LAUNCH_FAIL_N} 次、沒有任何一次正常啟動,本輪結論全為推論"
+  else
+    SHELL_NOTE=", 警示=codex shell 啟動失敗 ${LAUNCH_FAIL_N} 次(另有 ${SHELL_RAN_N} 次正常啟動),部分結論為推論"
+  fi
+fi
+
+if [ -n "$TOOL_FAIL_LINES" ] || [ "$LAUNCH_FAIL_N" -gt 0 ]; then
   echo "[codex-review] 警示: codex 的 shell 工具至少失敗過一次——它可能【沒有真的讀到 repo】,本輪意見的查證深度要打折。" >&2
-  # 【不印原始行】: 那些訊息帶著失敗指令的完整命令列(形如 error=exec_command failed for
-  # `<整條指令>`),而指令參數可能含 token/密碼——印出去就是把憑證寫進 console 與呼叫端的
-  # 記錄,踩安全鐵律 #2。只印錯誤類型與 OS 錯誤碼: 那是診斷真正需要的部分(5=ACL、
-  # 267=ERROR_DIRECTORY),且不含任何使用者資料。
-  echo "  失敗類型與次數(刻意不印原始指令,避免把含憑證的命令列寫進 log):" >&2
-  printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE "$TOOL_FAIL_PAT" | sort | uniq -c \
-    | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
-  CODES="$(printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE 'failed: [0-9]+' | sort -u | tr '\n' ' ')"
-  [ -n "$CODES" ] && echo "    OS 錯誤碼: $CODES" >&2
+  if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
+    echo "  結構化偵測(codex --json 事件流): shell 呼叫啟動失敗 ${LAUNCH_FAIL_N} 次、正常啟動 ${SHELL_RAN_N} 次。錯誤類型(不含 cwd／命令列):" >&2
+    printf '%s\n' "$LAUNCH_FAIL_TYPES" | sort | uniq -c | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
+    [ "$SHELL_ALL_FAILED" -eq 1 ] && echo "  【沒有任何一次 shell 呼叫真的起來】: 本輪所有結論都是推論,不得視為查證過的第二意見。" >&2
+  fi
+  if [ -n "$TOOL_FAIL_LINES" ]; then
+    # 【不印原始行】: 那些訊息帶著失敗指令的完整命令列(形如 error=exec_command failed for
+    # `<整條指令>`),而指令參數可能含 token/密碼——印出去就是把憑證寫進 console 與呼叫端的
+    # 記錄,踩安全鐵律 #2。只印錯誤類型與 OS 錯誤碼: 那是診斷真正需要的部分(5=ACL、
+    # 267=ERROR_DIRECTORY),且不含任何使用者資料。
+    echo "  stderr 的失敗類型與次數(刻意不印原始指令,避免把含憑證的命令列寫進 log):" >&2
+    printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE "$TOOL_FAIL_PAT" | sort | uniq -c \
+      | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
+    CODES="$(printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE 'failed: [0-9]+' | sort -u | tr '\n' ' ')"
+    [ -n "$CODES" ] && echo "    OS 錯誤碼: $CODES" >&2
+  fi
   echo "  處置: 標【推論】的項目照常看待;標【已讀】的項目要自己回頭核對,它可能根本沒讀成。" >&2
   echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\"" >&2
   echo "  沙箱能跑但 exec 仍失敗時: 看 \$CODEX_HOME/.sandbox/setup_error.json 與當天 sandbox.<日期>.log 的 os error 32——" >&2
@@ -1262,13 +1319,13 @@ if [ -n "$TOOL_FAIL_LINES" ]; then
   echo "    2026-10-14 實例: 桌面版常駐的 codex-computer-use-swift.exe 鎖住 runtimes 樹內的 VCRUNTIME140_1.dll," >&2
   echo "    本腳本已對 codex 子程序覆寫 LOCALAPPDATA 避開——若仍出現,先確認 codex_cmd 還有被呼叫)。" >&2
 fi
-# 【已知的偵測缺口,刻意留著】: 上面只掃 stderr。codex 也會把失敗以對話內容回饋給模型
-# ——2026-08-28 的 rollout 樣本裡形如 {"type":"input_text","text":"Script error:\nexec_command
-# failed for `…`"} ——這條路徑在 --json 的 stdout(JSON_FILE)裡,stderr 不一定同時有。
-# 沒有一併掃 JSON_FILE 的理由: review 本體(agent_message)也在同一份 JSONL 裡,而它完全可能
-# 引用這些字串——本次改動的複查回覆自己就引用了,盲掃必然誤報,而誤報幾次之後這行警示就會
-# 被當雜訊略過,比沒有還糟。要正確做需要 `codex exec --json` stdout 的實際失敗事件樣本
-# (不是 orca session 的 rollout 格式,兩者不保證相同),取得樣本前不動。
+# 【結構化偵測的殘餘缺口】(原本的「只掃 stderr、等失敗樣本」已於 2026-10-14 取得樣本並補上):
+#   1. 指令【有起來】但因別的原因讀不到(路徑錯、權限、檔案不存在)不算啟動失敗——那一類仍由
+#      下面的【已讀】/【推論】計數負責。
+#   2. 事件格式若改名(command_execution、aggregated_output、exit_code 任一個),偵測會【靜默】
+#      失效而不是報錯。樣本是 codex 0.162.1,測試鎖的就是這個形狀;升大版後要重看一份真實 stdout。
+#   3. 計的是「啟動失敗過幾次」,不是「最終沒讀成幾次」: 同一指令第一次失敗、重試成功也會計入,
+#      所以警示措辭是「失敗過」,全數失敗與部分失敗分開講(SHELL_RAN_N)。
 
 # --- 這一輪到底有沒有查證過(2026-09-07 新增;與上面的工具失敗偵測【互補,不重疊】) ---
 # 上面那段掃的是 stderr 裡的工具【崩潰】訊息(exec_command failed / CreateProcess failed)。
@@ -1334,6 +1391,10 @@ if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then
   fi
 fi
 
+# shell 全部啟動失敗 = 零查證的【結構化】證據: 與上面內容式判定(全標【推論】)落在同一個 telemetry
+# 狀態,報表看得出來這一輪沒有任何查證。部分失敗不降級(仍有指令真的起來)。
+[ "$SHELL_ALL_FAILED" -eq 1 ] && FINAL_STATUS=OK_NOVERIFY
+
 # 複查確實發生 → 推進 ledger、留 payload 快照給下一輪算 delta,並記一筆用量。
 persist_ledger
 emit_telemetry "$FINAL_STATUS"
@@ -1345,5 +1406,7 @@ if [ -n "$USAGE_SHOWN" ]; then
   echo "[codex-review] 用量: input ${_in:-?}(cached ${_cin:-?}) / output ${_out:-?} | $(awk -v a="${_cin:-0}" -v b="${_in:-0}" 'BEGIN{ if (b>0) printf "cache hit %.1f%%", a*100/b; else printf "cache hit n/a" }') | 明細見 $CODEX_REVIEW_LOG" >&2
 fi
 LEGACY_NOTE=""; [ "$USED_LEGACY" -eq 1 ] && LEGACY_NOTE=", 已退回舊模型"
-echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT$LEGACY_NOTE, $SESSION_MODE round=$ROUND_NO, codex exit=$RC)。唯讀諮詢,腳本未改 repo 內任何檔。" >&2
+# SHELL_NOTE 放在括號內(行首仍是「完成(」,呼叫端依該標記判斷「真的問到了」的做法不受影響),
+# 但 shell 啟動失敗時同一行就帶「警示=…本輪結論全為推論」,不會只看這一行就以為是正常的查證。
+echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT$LEGACY_NOTE, $SESSION_MODE round=$ROUND_NO, codex exit=$RC$SHELL_NOTE)。唯讀諮詢,腳本未改 repo 內任何檔。" >&2
 exit 0
