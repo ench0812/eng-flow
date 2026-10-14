@@ -146,9 +146,25 @@ USER_WIN_SANDBOX="$(awk '
   }' "$CODEX_CFG" 2>/dev/null)"
 ISOLATE_ARGS=(--ignore-user-config)
 [ -n "$USER_WIN_SANDBOX" ] && ISOLATE_ARGS+=(-c "windows.sandbox=\"$USER_WIN_SANDBOX\"")
+# 只給 codex 子程序一個【不存在】的 LOCALAPPDATA: 理由同 codex-review.sh 的 NO_LOCALAPPDATA
+# (0.162.1 的 sandbox setup refresh 會走訪 %LOCALAPPDATA%\OpenAI\Codex\runtimes 整棵樹,桌面版常駐的
+# codex-computer-use-swift.exe 鎖住其中的 VCRUNTIME140_1.dll → os error 32 → shell 全失敗,
+# --ignore-user-config 管不到)。覆寫只掛在 codex 子程序上,非 Windows 時什麼都不做。
+# 判斷 Windows 看 OS／uname,【不看 LOCALAPPDATA 有沒有值】(沒設時上游會退回
+# %USERPROFILE%\AppData\Local,又走回同一棵樹),細節與已知殘餘見 codex-review.sh。
+NO_LOCALAPPDATA=""
+case "${OS:-}|$(uname -s 2>/dev/null)" in
+  *Windows_NT*|*MINGW*|*MSYS*|*CYGWIN*)
+    NO_LOCALAPPDATA="${CODEX_HOME:-$HOME/.codex}/eng-flow-no-localappdata"
+    command -v cygpath >/dev/null 2>&1 && NO_LOCALAPPDATA="$(cygpath -m "$NO_LOCALAPPDATA")" ;;
+esac
+codex_cmd() {
+  if [ -n "$NO_LOCALAPPDATA" ]; then LOCALAPPDATA="$NO_LOCALAPPDATA" "$CODEX_BIN" "$@"
+  else "$CODEX_BIN" "$@"; fi
+}
 run_codex() {
   printf '%s\n\n---\n\n%s\n' "$PROMPT" "$(cat "$QUESTION")" \
-    | "$CODEX_BIN" exec "${ISOLATE_ARGS[@]}" -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
+    | codex_cmd exec "${ISOLATE_ARGS[@]}" -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
         -c features.memories=false \
         --sandbox read-only $SKIP_GIT --cd "$REPO_ROOT" - >"$OUT" 2>"$ERR"
   RC=$?

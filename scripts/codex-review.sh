@@ -1065,15 +1065,45 @@ USER_WIN_SANDBOX="$(awk '
 ISOLATE_ARGS=(--ignore-user-config)
 [ -n "$USER_WIN_SANDBOX" ] && ISOLATE_ARGS+=(-c "windows.sandbox=\"$USER_WIN_SANDBOX\"")
 
+# 只給 codex 子程序一個【不存在】的 LOCALAPPDATA(2026-10-14,--ignore-user-config 管不到這條):
+# codex-cli 0.162.1 每次 shell 前都先跑 sandbox setup refresh,而 refresh 會無條件走訪
+# %LOCALAPPDATA%\OpenAI\Codex\runtimes 整棵樹重設 ACL,任何一個檔打不開整次 refresh 就算失敗。
+# Codex 桌面版常駐的 codex-computer-use-swift.exe 正握著該樹內的 VCRUNTIME140_1.dll →
+# os error 32 → "setup refresh had errors" → codex 的每一次 shell 呼叫都失敗(讀不到任何檔),
+# 輸出格式卻完整、本腳本照印 完成(…)。本腳本的複查用不到桌面版的任何 runtime,所以讓子程序
+# 看到的 LOCALAPPDATA 底下沒有那棵樹(路徑刻意【不建立】,走 NotFound 分支略過那一步)。
+# 只略過 ACL 授權的走訪,沙箱沒有放寬。覆寫只掛在 codex 子程序上(見 codex_cmd),腳本自己與
+# 其他子程序的環境不變;非 Windows 時什麼都不做。
+# 【判斷 Windows 不能看 LOCALAPPDATA 有沒有值】: 上游 local_app_data_root()(windows-sandbox-rs
+# setup_runtime_bin.rs)在 LOCALAPPDATA 沒設時會退回 %USERPROFILE%\AppData\Local,又走回出問題的樹。
+# 所以 Windows 上一律覆寫(不管原本有沒有設),改看 OS=Windows_NT(Git Bash 繼承自 Windows)或
+# uname 是 MINGW／MSYS／CYGWIN。WSL／Linux／macOS 兩者皆非,不動。
+# 實測對照(只差這個變數): 無覆寫 → sandbox.<日期>.log 出現 os error 32、codex 回 SHELL-FAILED;
+# 有覆寫 → shell 正常,讀到探針檔內容。
+# 已知殘餘: refresh 另外還會走訪 %USERPROFILE%\.cache\codex-runtimes(上游 runtime_paths 的第二條),
+# 那棵樹不受 LOCALAPPDATA 影響;目前沒有程序鎖它,哪天被鎖會是同一個症狀、需要另外處理。
+NO_LOCALAPPDATA=""
+case "${OS:-}|$(uname -s 2>/dev/null)" in
+  *Windows_NT*|*MINGW*|*MSYS*|*CYGWIN*)
+    # 路徑刻意【不建立】(NotFound 才會略過那一步),名稱帶 no-localappdata 以便在 log 裡辨認。
+    NO_LOCALAPPDATA="${CODEX_HOME:-$HOME/.codex}/eng-flow-no-localappdata"
+    # 原生 Windows 程式要 Windows 形式的路徑;Git Bash 才有 cygpath,沒有就原樣用。
+    command -v cygpath >/dev/null 2>&1 && NO_LOCALAPPDATA="$(cygpath -m "$NO_LOCALAPPDATA")" ;;
+esac
+codex_cmd() {
+  if [ -n "$NO_LOCALAPPDATA" ]; then LOCALAPPDATA="$NO_LOCALAPPDATA" "$CODEX_BIN" "$@"
+  else "$CODEX_BIN" "$@"; fi
+}
+
 run_codex() {
 { { if [ "$SESSION_MODE" = "resume" ]; then
       printf '%s\n\n%s\n' "$RESUME_PROMPT" "$DELTA" \
-        | "$CODEX_BIN" exec resume "$RESUME_ID" - --json -o "$LAST_FILE" "${ISOLATE_ARGS[@]}" \
+        | codex_cmd exec resume "$RESUME_ID" - --json -o "$LAST_FILE" "${ISOLATE_ARGS[@]}" \
             -c sandbox_mode="read-only" $SKIP_GIT_FLAG -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT"
     else
       printf '%s\n' "$SEND_PAYLOAD" \
-        | "$CODEX_BIN" exec --sandbox read-only --json -o "$LAST_FILE" $EPHEMERAL_FLAG $SKIP_GIT_FLAG \
+        | codex_cmd exec --sandbox read-only --json -o "$LAST_FILE" $EPHEMERAL_FLAG $SKIP_GIT_FLAG \
             "${ISOLATE_ARGS[@]}" --cd "$REPO_ROOT" -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT"
     fi
@@ -1224,7 +1254,9 @@ if [ -n "$TOOL_FAIL_LINES" ]; then
   echo "  處置: 標【推論】的項目照常看待;標【已讀】的項目要自己回頭核對,它可能根本沒讀成。" >&2
   echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\"" >&2
   echo "  沙箱能跑但 exec 仍失敗時: 看 \$CODEX_HOME/.sandbox/setup_error.json 與當天 sandbox.<日期>.log 的 os error 32——" >&2
-  echo "    那是某個程序正握著 setup 要改 ACL 的檔(2026-10-13 實例: 桌面版注入的 MCP 拉起的 node_repl.exe)。" >&2
+  echo "    那是某個程序正握著 setup 要改 ACL 的檔(2026-10-13 實例: 桌面版注入的 MCP 拉起的 node_repl.exe;" >&2
+  echo "    2026-10-14 實例: 桌面版常駐的 codex-computer-use-swift.exe 鎖住 runtimes 樹內的 VCRUNTIME140_1.dll," >&2
+  echo "    本腳本已對 codex 子程序覆寫 LOCALAPPDATA 避開——若仍出現,先確認 codex_cmd 還有被呼叫)。" >&2
 fi
 # 【已知的偵測缺口,刻意留著】: 上面只掃 stderr。codex 也會把失敗以對話內容回饋給模型
 # ——2026-08-28 的 rollout 樣本裡形如 {"type":"input_text","text":"Script error:\nexec_command

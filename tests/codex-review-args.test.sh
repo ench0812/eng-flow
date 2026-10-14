@@ -550,6 +550,7 @@ ok "resume 關閉時去重仍生效"         has "SKIP: 送出內容與上一輪
 # cache_hit_pct 計算、thread_id 擷取、以及整條 resume 路徑一行都沒被執行過——
 # 既有的三條遙測斷言(TSV 存在/有表頭/OK 列數)在 jnum 全壞、欄位全 0 時照樣會綠。
 ARGV="$STUB2/argv.txt"
+LAA="$STUB2/laa.txt"   # stub 在 exec 當下看到的 LOCALAPPDATA(沒設則 <unset>),一次呼叫一行
 mk_stub_json() { # $1=thread_id $2=input $3=cached $4=output $5=reasoning
   # 忠實模擬真 codex 的 --json 行為: stdout 只有 JSONL,review 本體寫進 -o 指定的檔。
   # (先前版本把 review 印在 stdout,會被腳本正確判成「-o 落空」而 FAILED —— 那個判定是對的。)
@@ -560,6 +561,7 @@ case "\$1" in
   exec)
     printf '%s
 ' "\$@" >> "$ARGV"
+    echo "\${LOCALAPPDATA-<unset>}" >> "$LAA"
     o=""; prev=""
     for a in "\$@"; do [ "\$prev" = "-o" ] && o="\$a"; prev="\$a"; done
     [ -n "\$o" ] && printf '%s
@@ -575,8 +577,29 @@ STUBEOF
 
 TID="11111111-2222-3333-4444-555555555555"
 LG7="$STUB2/lg7"; TSV7="$STUB2/u7.tsv"; D7="$STUB2/s7.md"
-run7() { PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG7" CODEX_REVIEW_LOG="$TSV7" \
+run7() { PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG7" CODEX_REVIEW_LOG="$TSV7" OS=Windows_NT \
          env "$@" bash "$SCRIPT" --doc "$D7" --kind spec --severity required 2>&1; }
+
+# LOCALAPPDATA 覆寫(2026-10-14): codex 0.162.1 的 sandbox setup refresh 會走訪
+# %LOCALAPPDATA%\OpenAI\Codex\runtimes,桌面版常駐的 helper 鎖住其中的 dll → os error 32 →
+# shell 全失敗而腳本照印 完成(…)。Windows 上 codex 子程序必須拿到一個【不存在】的 LOCALAPPDATA,
+# 【原本有沒有設都一樣】(沒設時上游退回 %USERPROFILE%\AppData\Local,又走回同一棵樹);非 Windows 不覆寫。
+# 判斷看 OS／uname,所以 run7 預設帶 OS=Windows_NT(任何主機都走 Windows 分支;env 的後續參數
+# 可用 -u OS 取消),非 Windows 分支用假 uname。run7 用 env 傳參,不依賴本機環境。
+FAKE_LAA="C:/fake/Local/Windows"
+mkdir -p "$STUB2/binlinux"
+printf '#!/usr/bin/env bash\necho Linux\n' > "$STUB2/binlinux/uname"; chmod +x "$STUB2/binlinux/uname"
+laa_overridden() { # $1=預期的 exec 呼叫次數: 每次的值都不是原值、以 eng-flow-no-localappdata 結尾、路徑不存在
+  local n=0 v
+  [ -f "$LAA" ] || return 1
+  while IFS= read -r v; do
+    v="${v%$'\r'}"; n=$((n+1))
+    [ "$v" != "$FAKE_LAA" ] && [ "$v" != "<unset>" ] || return 1
+    case "$v" in *eng-flow-no-localappdata) ;; *) return 1 ;; esac
+    [ ! -e "$v" ] || return 1
+  done < "$LAA"
+  [ "$n" -eq "$1" ]
+}
 
 # 文件要有實際體積,delta 才會真的比全文小 —— 兩行的文件其 unified diff 比原文還長,
 # 會(正確地)觸發「增量不比全文小 → 退 fresh」的守門,那樣就測不到 resume 了。
@@ -602,13 +625,14 @@ ok "ledger 記下 session_id"     has "session_id=$TID" "$(cat "$LG7"/*.state)"
 # resume: 內容有變 + 開關開啟 + TTL 內 → 必須走 resume,且必須明確壓 read-only sandbox。
 # 那個旗標是針對 config.toml 可能有 [windows] sandbox = "elevated" 的 fail-closed 處置
 # (codex exec resume 沒有 -s/--sandbox),先前只靠人工 E2E 記憶保護,有人拿掉不會有任何反應。
-mk_doc7 v2; : > "$ARGV"
-O_R="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"
+mk_doc7 v2; : > "$ARGV"; : > "$LAA"
+O_R="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999 LOCALAPPDATA="$FAKE_LAA")"
 ok "resume: 走 resume 分支"          has "resume(11111111)" "$O_R"
 ok "resume: 用 exec resume 子指令"   has "^resume$" "$(cat "$ARGV")"
 ok "resume: 必帶 read-only sandbox"  has "^sandbox_mode=read-only$" "$(cat "$ARGV")"
 ok "resume: 必帶 memories off"       has "^features.memories=false$" "$(cat "$ARGV")"
 ok "resume: 必帶 --ignore-user-config" has "^--ignore-user-config$" "$(cat "$ARGV")"
+ok "resume: codex 子程序拿到不存在的 LOCALAPPDATA" laa_overridden 1
 ok "resume: 送 delta 不送全文"       test "$(printf '%s' "$O_R" | sed -n 's/.*delta \([0-9][0-9]*\)\/\([0-9][0-9]*\) 字元.*/\1 \2/p' | awk '{print ($1<$2)?"y":"n"}')" = "y"
 
 # 去重與 resume 解耦的【真】命題: resume 開著時,相同內容仍要被擋
@@ -621,11 +645,34 @@ ok "去重 SKIP 記下遙測"              has "SKIP_DEDUP" "$(cat "$TSV7")"
 ok "FORCE=1 可略過去重攔截"          has "完成(" "$(run7 CODEX_REVIEW_FORCE=1)"
 
 # TTL 之外必須退回 fresh 並說明原因(resume 在窗口外比 fresh 更貴)
-mk_doc7 v4; : > "$ARGV"
-O_E="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=0)"
+mk_doc7 v4; : > "$ARGV"; : > "$LAA"
+O_E="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=0 LOCALAPPDATA="$FAKE_LAA")"
 ok "resume: 超出窗口 → 明講並退 fresh" has "超出快取窗口" "$O_E"
 ok "resume: 退 fresh 後照常完成"       has "fresh round=" "$O_E"
 ok "resume: 退 fresh 不帶 resume 子指令" hasnt "^resume$" "$(cat "$ARGV")"
+ok "fresh: codex 子程序拿到不存在的 LOCALAPPDATA" laa_overridden 1
+# 覆寫只掛在 codex 子程序上、不外溢到腳本自己的環境: 用假 grep 當探針——腳本在 codex 呼叫【之後】
+# 還會跑很多次 grep,它記下自己看到的 LOCALAPPDATA 再轉交真 grep。若有人把覆寫改成腳本層級的
+# export LOCALAPPDATA=...,探針會看到被覆寫的值而變紅;同一輪 exec 子程序仍須被覆寫。
+REAL_GREP="$(command -v grep)"
+mkdir -p "$STUB2/binspy"
+printf '#!/usr/bin/env bash\necho "${LOCALAPPDATA-<unset>}" >> "%s/laa-spy.log"\nexec "%s" "$@"\n' "$STUB2" "$REAL_GREP" > "$STUB2/binspy/grep"; chmod +x "$STUB2/binspy/grep"
+mk_doc7 v4s; : > "$LAA"; rm -f "$STUB2/laa-spy.log"
+run7 LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/binspy:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "覆寫不外溢: 探針有被跑到(否則下一條沒意義)"        test -s "$STUB2/laa-spy.log"
+ok "覆寫不外溢: 腳本自己的 grep 全程看到原 LOCALAPPDATA" test "$(tr -d '\r' < "$STUB2/laa-spy.log" | sort -u)" = "$FAKE_LAA"
+ok "覆寫不外溢: 同一輪 exec 子程序確實被覆寫"           laa_overridden 1
+# Windows 但 LOCALAPPDATA 沒設 → 仍要覆寫(判斷 Windows 不能看 LOCALAPPDATA 有沒有值)
+mk_doc7 v4b; : > "$LAA"
+run7 -u LOCALAPPDATA IGNORE=1 >/dev/null
+ok "Windows 無 LOCALAPPDATA: codex 子程序仍被覆寫" laa_overridden 1
+# 非 Windows(OS 沒有、uname=Linux)→ 不覆寫: 有值就原樣、沒值就仍是 unset,不憑空造一個
+mk_doc7 v4c; : > "$LAA"
+run7 -u OS LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/binlinux:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "非 Windows 有 LOCALAPPDATA: 原值不動" test "$(tr -d '\r' < "$LAA")" = "$FAKE_LAA"
+mk_doc7 v4d; : > "$LAA"
+run7 -u OS -u LOCALAPPDATA PATH="$STUB2/binlinux:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "非 Windows 無 LOCALAPPDATA: codex 子程序仍是 unset" test "$(tr -d '\r' < "$LAA")" = "<unset>"
 
 # --- prompt 政策版本(2026-08-31,codex 複查抓到) ---
 # 命題: resume 沿用舊 session 的對話歷史,而 resume 輪的 prompt 只說「規則同先前輪次」。
