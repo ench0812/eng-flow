@@ -11,15 +11,25 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$ROOT/scripts/codex-review.sh"
 DOC="$ROOT/README.md"   # 任一存在的檔案即可
 pass=0; fail=0
-FIX="$(mktemp -d)"
+# 暫存目錄: TMPDIR 若設成 Windows 路徑(例如 D:/Temp),mktemp 會回「D:/Temp/tmp.xxx」,含冒號,
+# 放進 PATH 會被切斷(見下面 no_colon)。有 cygpath(Git Bash／MSYS)就轉成 /d/Temp/… 形式,沒有則照原樣。
+tmpd() { local d; d="$(mktemp -d)" || return 1
+  case "$d" in *:*) command -v cygpath >/dev/null 2>&1 && d="$(cygpath -u "$d")" ;; esac
+  printf '%s\n' "$d"; }
+FIX="$(tmpd)"
 # Gate 隔離: 不可依賴「PATH 上找不到 codex」——腳本的 fallback 清單裡有 /usr/local/bin/codex,
 # 那是 Linux/macOS 的常見安裝位置,一旦命中這些 case 會拿 fixture 真的送出諮詢(花錢、打 API,
 # 而且要等到斷言拿不到 SKIP 才會叫)。改成確定性地在 Gate 2 擋下: login status 回非零。
-GATE="$(mktemp -d)"
+GATE="$(tmpd)"
 printf '#!/usr/bin/env bash
 exit 1
 ' > "$GATE/codex"; chmod +x "$GATE/codex"
 trap 'rm -rf "$FIX" "$GATE"' EXIT
+# PATH 的分隔符是冒號: 暫存目錄路徑若含冒號(例如 TMPDIR 設成 D:/Temp),"$DIR:$PATH" 會被切斷,
+# stub 不在 PATH 上,command -v codex 就會找到【真的 codex】——測試會真的送出諮詢。每個會放進 PATH 的
+# 暫存目錄建立後都用 no_colon 擋下(2026-10-14,A 層審查者就因此誤叫了真 codex 15 次)。
+no_colon() { case "$1" in *:*) echo "FATAL: mktemp 目錄 '$1' 含冒號,PATH 會被切斷、可能叫到真的 codex"; exit 1 ;; esac; }
+no_colon "$FIX"; no_colon "$GATE"
 
 # 【所有斷言 helper 都必須定義在這裡,任何測試呼叫之前】(2026-09-07 踩過):
 # ok()/has()/hasnt() 原本定義在檔案中段(舊 306 行)。在它之前呼叫 `ok` 的話,bash 只會對
@@ -145,7 +155,7 @@ check_rl "正常完成"                     no  0 "" "無重大遺漏"
 # --- rate limit 端到端(stub codex) ---
 # 這裡的 stub 只驗「腳本收到 rate limit 訊息後怎麼分流」,不驗 codex flag 是否正確
 # ——後者 stub 永遠測不出來(歷史教訓),仍由人工 E2E 覆蓋。
-STUB="$(mktemp -d)"
+STUB="$(tmpd)"; no_colon "$STUB"
 STUB_DOC="$STUB/spec.md"; printf '# Fixture\n\ncontent\n' > "$STUB_DOC"
 mk_stub() { # $1 = exec 分支要跑的 shell 片段
   { echo '#!/usr/bin/env bash'
@@ -390,7 +400,7 @@ ok "delta: 列出未變更檔名"     has "a.py" "$DLT"
 ok "delta: 兩輪相同則無區塊"   hasnt "^diff --git" "$(diff_delta_per_file "$CG/old.diff" "$CG/old.diff")"
 
 # --- 成本治理: 端到端(stub codex) ---
-STUB2="$(mktemp -d)"
+STUB2="$(tmpd)"; no_colon "$STUB2"
 mk_stub2() { { echo '#!/usr/bin/env bash'; echo 'case "$1" in'; echo '  login) exit 0 ;;'
                echo "  exec)  $1 ;;"; echo 'esac'; echo 'exit 0'; } > "$STUB2/codex"; chmod +x "$STUB2/codex"; }
 mk_stub2 'echo "無重大補充"; echo "收斂問句:無"; exit 0'
@@ -550,6 +560,7 @@ ok "resume 關閉時去重仍生效"         has "SKIP: 送出內容與上一輪
 # cache_hit_pct 計算、thread_id 擷取、以及整條 resume 路徑一行都沒被執行過——
 # 既有的三條遙測斷言(TSV 存在/有表頭/OK 列數)在 jnum 全壞、欄位全 0 時照樣會綠。
 ARGV="$STUB2/argv.txt"
+LAA="$STUB2/laa.txt"   # stub 在 exec 當下看到的 LOCALAPPDATA(沒設則 <unset>),一次呼叫一行
 mk_stub_json() { # $1=thread_id $2=input $3=cached $4=output $5=reasoning
   # 忠實模擬真 codex 的 --json 行為: stdout 只有 JSONL,review 本體寫進 -o 指定的檔。
   # (先前版本把 review 印在 stdout,會被腳本正確判成「-o 落空」而 FAILED —— 那個判定是對的。)
@@ -560,6 +571,7 @@ case "\$1" in
   exec)
     printf '%s
 ' "\$@" >> "$ARGV"
+    echo "\${LOCALAPPDATA-<unset>}" >> "$LAA"
     o=""; prev=""
     for a in "\$@"; do [ "\$prev" = "-o" ] && o="\$a"; prev="\$a"; done
     [ -n "\$o" ] && printf '%s
@@ -575,8 +587,29 @@ STUBEOF
 
 TID="11111111-2222-3333-4444-555555555555"
 LG7="$STUB2/lg7"; TSV7="$STUB2/u7.tsv"; D7="$STUB2/s7.md"
-run7() { PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG7" CODEX_REVIEW_LOG="$TSV7" \
+run7() { PATH="$STUB2:$PATH" CODEX_REVIEW_STATE="$LG7" CODEX_REVIEW_LOG="$TSV7" OS=Windows_NT \
          env "$@" bash "$SCRIPT" --doc "$D7" --kind spec --severity required 2>&1; }
+
+# LOCALAPPDATA 覆寫(2026-10-14): codex 0.162.1 的 sandbox setup refresh 會走訪
+# %LOCALAPPDATA%\OpenAI\Codex\runtimes,桌面版常駐的 helper 鎖住其中的 dll → os error 32 →
+# shell 全失敗而腳本照印 完成(…)。Windows 上 codex 子程序必須拿到一個【不存在】的 LOCALAPPDATA,
+# 【原本有沒有設都一樣】(沒設時上游退回 %USERPROFILE%\AppData\Local,又走回同一棵樹);非 Windows 不覆寫。
+# 判斷看 OS／uname,所以 run7 預設帶 OS=Windows_NT(任何主機都走 Windows 分支;env 的後續參數
+# 可用 -u OS 取消),非 Windows 分支用假 uname。run7 用 env 傳參,不依賴本機環境。
+FAKE_LAA="C:/fake/Local/Windows"
+mkdir -p "$STUB2/binlinux"
+printf '#!/usr/bin/env bash\necho Linux\n' > "$STUB2/binlinux/uname"; chmod +x "$STUB2/binlinux/uname"
+laa_overridden() { # $1=預期的 exec 呼叫次數: 每次的值都不是原值、以 eng-flow-no-localappdata 結尾、路徑不存在
+  local n=0 v
+  [ -f "$LAA" ] || return 1
+  while IFS= read -r v; do
+    v="${v%$'\r'}"; n=$((n+1))
+    [ "$v" != "$FAKE_LAA" ] && [ "$v" != "<unset>" ] || return 1
+    case "$v" in *eng-flow-no-localappdata) ;; *) return 1 ;; esac
+    [ ! -e "$v" ] || return 1
+  done < "$LAA"
+  [ "$n" -eq "$1" ]
+}
 
 # 文件要有實際體積,delta 才會真的比全文小 —— 兩行的文件其 unified diff 比原文還長,
 # 會(正確地)觸發「增量不比全文小 → 退 fresh」的守門,那樣就測不到 resume 了。
@@ -602,13 +635,14 @@ ok "ledger 記下 session_id"     has "session_id=$TID" "$(cat "$LG7"/*.state)"
 # resume: 內容有變 + 開關開啟 + TTL 內 → 必須走 resume,且必須明確壓 read-only sandbox。
 # 那個旗標是針對 config.toml 可能有 [windows] sandbox = "elevated" 的 fail-closed 處置
 # (codex exec resume 沒有 -s/--sandbox),先前只靠人工 E2E 記憶保護,有人拿掉不會有任何反應。
-mk_doc7 v2; : > "$ARGV"
-O_R="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999)"
+mk_doc7 v2; : > "$ARGV"; : > "$LAA"
+O_R="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=9999 LOCALAPPDATA="$FAKE_LAA")"
 ok "resume: 走 resume 分支"          has "resume(11111111)" "$O_R"
 ok "resume: 用 exec resume 子指令"   has "^resume$" "$(cat "$ARGV")"
 ok "resume: 必帶 read-only sandbox"  has "^sandbox_mode=read-only$" "$(cat "$ARGV")"
 ok "resume: 必帶 memories off"       has "^features.memories=false$" "$(cat "$ARGV")"
 ok "resume: 必帶 --ignore-user-config" has "^--ignore-user-config$" "$(cat "$ARGV")"
+ok "resume: codex 子程序拿到不存在的 LOCALAPPDATA" laa_overridden 1
 ok "resume: 送 delta 不送全文"       test "$(printf '%s' "$O_R" | sed -n 's/.*delta \([0-9][0-9]*\)\/\([0-9][0-9]*\) 字元.*/\1 \2/p' | awk '{print ($1<$2)?"y":"n"}')" = "y"
 
 # 去重與 resume 解耦的【真】命題: resume 開著時,相同內容仍要被擋
@@ -621,11 +655,262 @@ ok "去重 SKIP 記下遙測"              has "SKIP_DEDUP" "$(cat "$TSV7")"
 ok "FORCE=1 可略過去重攔截"          has "完成(" "$(run7 CODEX_REVIEW_FORCE=1)"
 
 # TTL 之外必須退回 fresh 並說明原因(resume 在窗口外比 fresh 更貴)
-mk_doc7 v4; : > "$ARGV"
-O_E="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=0)"
+mk_doc7 v4; : > "$ARGV"; : > "$LAA"
+O_E="$(run7 CODEX_REVIEW_RESUME=1 CODEX_RESUME_TTL=0 LOCALAPPDATA="$FAKE_LAA")"
 ok "resume: 超出窗口 → 明講並退 fresh" has "超出快取窗口" "$O_E"
 ok "resume: 退 fresh 後照常完成"       has "fresh round=" "$O_E"
 ok "resume: 退 fresh 不帶 resume 子指令" hasnt "^resume$" "$(cat "$ARGV")"
+ok "fresh: codex 子程序拿到不存在的 LOCALAPPDATA" laa_overridden 1
+# 覆寫只掛在 codex 子程序上、不外溢到腳本自己的環境: 用假 grep 當探針——腳本在 codex 呼叫【之後】
+# 還會跑很多次 grep,它記下自己看到的 LOCALAPPDATA 再轉交真 grep。若有人把覆寫改成腳本層級的
+# export LOCALAPPDATA=...,探針會看到被覆寫的值而變紅;同一輪 exec 子程序仍須被覆寫。
+REAL_GREP="$(command -v grep)"
+mkdir -p "$STUB2/binspy"
+printf '#!/usr/bin/env bash\necho "${LOCALAPPDATA-<unset>}" >> "%s/laa-spy.log"\nexec "%s" "$@"\n' "$STUB2" "$REAL_GREP" > "$STUB2/binspy/grep"; chmod +x "$STUB2/binspy/grep"
+mk_doc7 v4s; : > "$LAA"; rm -f "$STUB2/laa-spy.log"
+run7 LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/binspy:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "覆寫不外溢: 探針有被跑到(否則下一條沒意義)"        test -s "$STUB2/laa-spy.log"
+ok "覆寫不外溢: 腳本自己的 grep 全程看到原 LOCALAPPDATA" test "$(tr -d '\r' < "$STUB2/laa-spy.log" | sort -u)" = "$FAKE_LAA"
+ok "覆寫不外溢: 同一輪 exec 子程序確實被覆寫"           laa_overridden 1
+# Windows 但 LOCALAPPDATA 沒設 → 仍要覆寫(判斷 Windows 不能看 LOCALAPPDATA 有沒有值)
+mk_doc7 v4b; : > "$LAA"
+run7 -u LOCALAPPDATA IGNORE=1 >/dev/null
+ok "Windows 無 LOCALAPPDATA: codex 子程序仍被覆寫" laa_overridden 1
+# 非 Windows(OS 沒有、uname=Linux)→ 不覆寫: 有值就原樣、沒值就仍是 unset,不憑空造一個
+mk_doc7 v4c; : > "$LAA"
+run7 -u OS LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/binlinux:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "非 Windows 有 LOCALAPPDATA: 原值不動" test "$(tr -d '\r' < "$LAA")" = "$FAKE_LAA"
+mk_doc7 v4d; : > "$LAA"
+run7 -u OS -u LOCALAPPDATA PATH="$STUB2/binlinux:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "非 Windows 無 LOCALAPPDATA: codex 子程序仍是 unset" test "$(tr -d '\r' < "$LAA")" = "<unset>"
+# cygpath 失敗或印出空字串 → 保留原路徑、覆寫仍生效(直接賦值 $(cygpath …) 會讓 NO_LOCALAPPDATA
+# 變空,codex_cmd 走不覆寫的分支,覆寫靜默失效)。假 cygpath 排在 PATH 最前面。
+mkdir -p "$STUB2/bincyg-empty" "$STUB2/bincyg-fail"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB2/bincyg-empty/cygpath"; chmod +x "$STUB2/bincyg-empty/cygpath"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$STUB2/bincyg-fail/cygpath";  chmod +x "$STUB2/bincyg-fail/cygpath"
+mk_doc7 v4e; : > "$LAA"
+run7 LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/bincyg-empty:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "cygpath 印空字串: 覆寫仍生效(保留原路徑)" laa_overridden 1
+mk_doc7 v4f; : > "$LAA"
+run7 LOCALAPPDATA="$FAKE_LAA" PATH="$STUB2/bincyg-fail:$STUB2:$PATH" IGNORE=1 >/dev/null
+ok "cygpath 失敗(exit 1): 覆寫仍生效(保留原路徑)" laa_overridden 1
+
+# === LAUNCHFAIL-BEGIN ===
+# --- codex shell 啟動失敗的結構化偵測(2026-10-14) ---
+# 背景: codex 的 shell 全部起不來時它不會中止,拿送進去的內容繼續作答,輸出格式完整、exit 0,
+# 腳本過去照印 完成(…)。stderr 的字樣掃描只是旁證,真正的訊號在 `codex exec --json` stdout 的
+# 事件: 失敗的 command_execution item(樣本取自 codex 0.162.1 的真實 stdout,欄位順序同真實樣本)。
+# 偵測只認【結構】——五個條件(item.completed／type=command_execution／status=failed／exit_code=-1／
+# 輸出【以】啟動錯誤開頭)缺一不可,所以每個「不偵測」案例各自只違反其中一個條件,
+# 負控組(拿掉對應條件)才會只紅對應那一則。
+# review 本體固定帶一行【已讀】發現,免得內容式的零查證偵測(全標【推論】)干擾 telemetry 狀態欄。
+LF="$(tmpd)"
+no_colon "$LF"   # 理由見檔頭 no_colon: "$LF:$PATH" 被冒號切斷會叫到真的 codex
+cat > "$LF/codex" <<'LFSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  login) exit 0 ;;
+  exec)
+    o=""; prev=""
+    for a in "$@"; do [ "$prev" = "-o" ] && o="$a"; prev="$a"; done
+    # 失敗模式(LF_FAIL 是一行失敗事件): 不寫 -o 檔,stdout 只有事件流 + 該失敗事件,stderr 空,exit 1
+    # ——忠實模擬 --json 下「額度被擋／失敗只出現在 stdout 事件」的形態
+    if [ -n "${LF_FAIL:-}" ]; then cat "$LF_EVENTS"; printf '%s\n' "$LF_FAIL"; exit 1; fi
+    [ -n "$o" ] && printf '%s\n' "${LF_REVIEW_LINE:-- Required【已讀】 foo.go:1 確認有問題}" "收斂問句:無" > "$o"
+    cat "$LF_EVENTS"
+    [ -n "${LF_STDERR:-}" ] && cat "$LF_STDERR" >&2
+    exit 0 ;;
+esac
+exit 0
+LFSTUB
+chmod +x "$LF/codex"
+ok "PATH 最前面的 codex 是 stub(不會叫到真的 codex)" test "$(PATH="$LF:$PATH" command -v codex)" = "$LF/codex"
+printf '# Fixture\n\ncontent\n' > "$LF/spec.md"
+LF_ERR='Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
+lf_item() { # $1=aggregated_output $2=exit_code $3=status [$4=item.type=command_execution] [$5=event type=item.completed]
+  printf '{"type":"%s","item":{"id":"item_1","type":"%s","command":"pwsh -Command Get-Content x","aggregated_output":"%s","exit_code":%s,"status":"%s"}}\n' \
+    "${5:-item.completed}" "${4:-command_execution}" "$1" "$2" "$3"
+}
+lf_events() { # stdin=item 行 → $LF/ev.jsonl(帶頭尾事件);回傳檔路徑
+  { echo '{"type":"thread.started","thread_id":"t-1"}'; echo '{"type":"turn.started"}'; cat
+    echo '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}}'
+  } > "$LF/ev.jsonl"
+}
+lf_run() { # 合併 stdout+stderr;每次獨立 ledger,免得被「內容與上一輪相同」的去重攔掉
+  # (不能用計數器: lf_run 在 $(...) 子 shell 裡跑,計數不會回傳父 shell,所有案例會共用同一個 ledger)
+  local st; st="$(mktemp -d "$LF/st.XXXXXX")"
+  PATH="$LF:$PATH" LF_EVENTS="$LF/ev.jsonl" CODEX_REVIEW_STATE="$st" CODEX_REVIEW_LOG="$LF/usage.tsv" \
+    bash "$SCRIPT" --doc "$LF/spec.md" --kind spec --severity required 2>&1
+  echo $? > "$LF/rc"   # 子 shell 回不了離開碼: 寫檔,呼叫端用 $(cat "$LF/rc") 讀
+}
+lf_run_diff() { # 同 lf_run,但走 diff 模式(--base main)。LF_REPO 是一個有未提交變更的小 repo
+  local st; st="$(mktemp -d "$LF/st.XXXXXX")"
+  ( cd "$LF/repo" && PATH="$LF:$PATH" LF_EVENTS="$LF/ev.jsonl" CODEX_REVIEW_STATE="$st" CODEX_REVIEW_LOG="$LF/usage.tsv" \
+      bash "$SCRIPT" --severity required --base main 2>&1 )
+}
+mkdir -p "$LF/repo"
+( cd "$LF/repo" && git init -q . && git config user.email t@t.t && git config user.name t \
+  && printf 'base\n' > f.txt && git add -A && git commit -qm i && git branch -M main && printf 'changed\n' > f.txt ) >/dev/null 2>&1
+lf_zero() { printf '%s\n' "$1" | grep -c '警示: 本輪【零查證】'; }   # 零查證契約句出現幾次
+lf_done() { printf '%s\n' "$1" | grep '^\[codex-review\] 完成('; }   # 完成那一行
+lf_st16() { awk -F'\t' 'END{print $16}' "$LF/usage.tsv"; }
+lf_marked() { lf_done "$1" | grep -q '警示=codex shell 啟動失敗'; }  # 完成行帶警示
+lf_header() { printf '%s\n' "$1" | grep -q '警示: codex 的 shell 工具至少失敗過一次'; }  # 獨立警示塊在場
+# 「不偵測」案例的斷言【必須先確認腳本真的跑完】(有完成行): 否則去重 SKIP、FAILED 之類的輸出
+# 本來就沒有警示,會讓「不偵測」斷言恆真(測試宣稱的覆蓋比實際驗到的大)。
+lf_ran_unmarked() { [ -n "$(lf_done "$1")" ] && ! lf_marked "$1"; }
+lf_clean() { lf_ran_unmarked "$1" && ! lf_header "$1"; }   # 跑完,且完成行與警示塊都沒有啟動失敗警示
+
+# (a) 真實形狀的失敗 item → 被偵測,且完成那一行同行就標出「全為推論」
+lf_item "$LF_ERR" -1 failed | lf_events; O="$(lf_run)"
+ok "(a) 啟動失敗 → 完成行同行標警示"      lf_marked "$O"
+ok "(a) 完成行寫出次數與「全為推論」"     test "$(lf_done "$O" | grep -c '啟動失敗 1 次、沒有任何一次正常啟動,本輪結論全為推論')" -eq 1
+ok "(a) 獨立警示塊在場"                   lf_header "$O"
+ok "(a) 警示塊帶錯誤類型"                 has 'helper_unknown_error: setup refresh had errors' "$O"
+ok "(a) 完成行仍以「完成(」起頭且不是 FAILED" test "$(lf_done "$O" | wc -l)" -eq 1 -a "$(printf '%s' "$O" | grep -c 'FAILED:')" -eq 0
+ok "(a) 全部失敗 → telemetry=OK_NOVERIFY"  test "$(lf_st16)" = "OK_NOVERIFY"
+# (a2) 部分失敗(兩次失敗、一次正常) → 如實分開講,不謊稱全為推論,telemetry 不降級
+{ lf_item "$LF_ERR" -1 failed; lf_item "PROBE-OK" 0 completed; lf_item "$LF_ERR" -1 failed; } | lf_events; O="$(lf_run)"
+ok "(a2) 部分失敗 → 完成行標次數與正常啟動數" test "$(lf_done "$O" | grep -c '啟動失敗 2 次(另有 1 次正常啟動),部分結論為推論')" -eq 1
+ok "(a2) 部分失敗 → 不說「全為推論」"        test "$(lf_done "$O" | grep -c '全為推論')" -eq 0
+ok "(a2) 部分失敗 → telemetry 維持 OK"       test "$(lf_st16)" = "OK"
+# (a3) 第二種啟動錯誤字樣
+lf_item "CreateProcessAsUserW failed: 5" -1 failed | lf_events; O="$(lf_run)"
+ok "(a3) CreateProcess*W failed 也被偵測"     lf_marked "$O"
+ok "(a3) 錯誤類型含 OS 錯誤碼"                has 'CreateProcessAsUserW failed: 5' "$O"
+
+# (b) 成功的 item(completed、exit 0)輸出剛好以該字串開頭 → 不偵測
+lf_item "$LF_ERR" 0 completed | lf_events; O="$(lf_run)"
+ok "(b) 成功 item 印出該字串 → 完成行無警示" lf_clean "$O"
+ok "(b) 成功 item 印出該字串 → telemetry=OK" test "$(lf_st16)" = "OK"
+# (b') 只違反 status 條件(completed 但 exit_code -1) → 不偵測
+lf_item "$LF_ERR" -1 completed | lf_events; O="$(lf_run)"
+ok "(b') status=completed → 不偵測"          lf_clean "$O"
+
+# (c) agent_message 的文字引用該字串(codex 失敗後的回覆真的會這樣) → 不偵測
+{ echo '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"SHELL-FAILED\nexec_command failed: CreateProcess { message: \"Rejected(\\\"Failed to create unified exec process: helper_unknown_error\\\")\" }"}}'
+  echo '{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"{\"type\":\"command_execution\",\"aggregated_output\":\"Failed to create unified exec process\",\"exit_code\":-1,\"status\":\"failed\"}"}}'; } | lf_events
+O="$(lf_run)"
+ok "(c) agent_message 引用該字串 → 不偵測"    lf_clean "$O"
+# (c') 只違反 type 條件(其餘欄位都像失敗的指令,但 item 類型是 agent_message) → 不偵測
+lf_item "$LF_ERR" -1 failed agent_message | lf_events; O="$(lf_run)"
+ok "(c') item 類型非 command_execution → 不偵測" lf_clean "$O"
+
+# (d) 指令真的跑過、exit 1 失敗(輸出剛好以該字串開頭) → 不偵測
+lf_item "$LF_ERR" 1 failed | lf_events; O="$(lf_run)"
+ok "(d) exit_code=1 的失敗 → 不偵測"          lf_clean "$O"
+
+# (e) 錯誤字串出現在輸出中段(前面還有別的輸出) → 不偵測
+lf_item "warning: earlier attempt said Failed to create unified exec process" -1 failed | lf_events; O="$(lf_run)"
+ok "(e) 字串在輸出中段 → 不偵測"              lf_clean "$O"
+
+# (g) 只違反 event type 條件(item.started 帶失敗欄位) → 不偵測
+lf_item "$LF_ERR" -1 failed command_execution item.started | lf_events; O="$(lf_run)"
+ok "(g) item.started → 不偵測"                lf_clean "$O"
+
+# (f) 警示不得含 cwd=／cmd=(命令列可能帶 token,安全鐵律 #2)。codex 在啟動錯誤之後以「 | 」附上它們
+lf_item "$LF_ERR | cwd=C:\\\\Users\\\\markh\\\\secret-dir | cmd=pwsh -Command Get-Content token=abc123" -1 failed | lf_events; O="$(lf_run)"
+ok "(f) 含 cwd／cmd 的失敗 → 仍被偵測"        lf_marked "$O"
+ok "(f) 警示不含 cwd="                        test "$(printf '%s' "$O" | grep -c 'cwd=')" -eq 0
+ok "(f) 警示不含 cmd="                        test "$(printf '%s' "$O" | grep -c 'cmd=')" -eq 0
+ok "(f) 警示不含路徑與 token 內容"            test "$(printf '%s' "$O" | grep -cE 'secret-dir|abc123')" -eq 0
+# (f3) 「 | 」之後不是 cwd=／cmd= 而是別的內容 → 一樣整段丟掉(只取錯誤類型,不是只擋已知欄位名)
+lf_item "$LF_ERR | extra=secret-dir3" -1 failed | lf_events; O="$(lf_run)"
+ok "(f3) 「 | 」之後的任何內容 → 仍被偵測"     lf_marked "$O"
+ok "(f3) 「 | 」之後的任何內容 → 警示不含"      test "$(printf '%s' "$O" | grep -c 'secret-dir3')" -eq 0
+# (f2) 沒有「 | 」分隔、直接黏著 cwd=／cmd= 的變體(縱深防禦)
+lf_item "Failed to create unified exec process: boom cwd=C:\\\\secret-dir2 cmd=tool --token=zzz9" -1 failed | lf_events; O="$(lf_run)"
+ok "(f2) 無分隔符的 cwd／cmd → 仍被偵測"      lf_marked "$O"
+ok "(f2) 警示不含 cwd／cmd／token 內容"       test "$(printf '%s' "$O" | grep -cE 'cwd=|cmd=|secret-dir2|zzz9')" -eq 0
+
+# (f4) JSON 逸出序列(2026-10-14 A 層審查抓到): 擷取若用 [^"]* 會跨過 \n 把後面的命令列與 token 整段印出。
+# 錯誤類型只能停在第一個反斜線之前。fixture 內的 \n／\r\n／\" 都是 JSON 的字面逸出(兩個字元)。
+lf_types() { printf '%s\n' "$1" | grep -E '^    [0-9]+ (Failed to create unified exec process|CreateProcess)'; }  # 警示塊的錯誤類型行
+lf_item 'Failed to create unified exec process: boom\nrunning: pwsh -c Get-Secret --token=SEKRET99' -1 failed | lf_events; O="$(lf_run)"
+ok "(f4) \\n 後接命令列與 token → 仍被偵測"        lf_marked "$O"
+ok "(f4) 警示不含 \\n 之後的命令列與 token"        test "$(printf '%s' "$O" | grep -cE 'SEKRET99|Get-Secret|running:')" -eq 0
+ok "(f4) 錯誤類型停在反斜線之前"                   test "$(lf_types "$O")" = '    1 Failed to create unified exec process: boom'
+# (f5) 結尾的 \r\n 字面不得殘留
+lf_item 'Failed to create unified exec process: helper_unknown_error: setup refresh had errors\r\n' -1 failed | lf_events; O="$(lf_run)"
+ok "(f5) 結尾 \\r\\n 字面不殘留"                    test "$(lf_types "$O")" = '    1 Failed to create unified exec process: helper_unknown_error: setup refresh had errors'
+# (f6) 跳脫引號 \" 不得在尾端殘留反斜線
+lf_item 'Failed to create unified exec process: bad \"quote\"' -1 failed | lf_events; O="$(lf_run)"
+ok "(f6) \\\" 尾端不殘留反斜線"                     test "$(lf_types "$O")" = '    1 Failed to create unified exec process: bad'
+# (f7) 沒有反斜線、也沒有 cwd=/cmd=,但錯誤文字裡帶 key=value:值不得印出(停在 = 之前)
+lf_item 'Failed to create unified exec process: spawn pwsh -c Get-Secret --token=SEKRET55' -1 failed | lf_events; O="$(lf_run)"
+ok "(f7) 仍被偵測"                                lf_marked "$O"
+ok "(f7) key=value 的值不印出"                    test "$(printf '%s' "$O" | grep -c 'SEKRET55')" -eq 0
+
+# (h) 整合: 只有 stderr 有字樣、事件流沒有結構化失敗 → 既有警示塊照舊,完成行不加警示
+lf_item "PROBE-OK" 0 completed | lf_events
+printf 'ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: "Rejected(\\"Failed to create unified exec process")" }\n' > "$LF/stderr.txt"
+O="$(LF_STDERR="$LF/stderr.txt" lf_run)"
+ok "(h) 只有 stderr 字樣 → 警示塊照舊在場"    lf_header "$O"
+ok "(h) 只有 stderr 字樣 → 完成行不加結構化警示" lf_ran_unmarked "$O"
+# (i) 整合: 兩個來源同時有 → 只有一個警示塊(不並存兩套),完成行帶警示
+lf_item "$LF_ERR" -1 failed | lf_events
+O="$(LF_STDERR="$LF/stderr.txt" lf_run)"
+ok "(i) 兩個來源同時有 → 警示塊只出現一次"    test "$(printf '%s\n' "$O" | grep -c '警示: codex 的 shell 工具至少失敗過一次')" -eq 1
+ok "(i) 兩個來源同時有 → 兩段證據都列出"      test "$(printf '%s\n' "$O" | grep -cE '結構化偵測|stderr 的失敗類型')" -eq 2
+ok "(i) 兩個來源同時有 → 完成行帶警示"        lf_marked "$O"
+
+# (z) 零查證契約(2026-10-14 A 層審查): skills/mao-review/SKILL.md 教呼叫端看到
+# `警示: 本輪【零查證】` 就不得稱複查完成。shell 全部起不來時【呼叫端只認這一句】,不另發明第二種說法。
+# 部分失敗時措辭維持現狀(不印這一句): 仍有指令真的起來。
+# (z1) doc 模式、shell 全失敗 → 印一次(doc 模式的內容式判定只印較軟的「注意」,不會代勞)
+lf_item "$LF_ERR" -1 failed | lf_events; O="$(lf_run)"
+ok "(z1) doc 模式 shell 全失敗 → 印零查證契約句一次" test "$(lf_zero "$O")" -eq 1
+ok "(z1) 契約句帶處置(不得稱已完成複查)"          has '不可據此對使用者稱「已完成 codex 複查」' "$O"
+# (z2) diff 模式、shell 全失敗、review 本體標了【已讀】(內容式判定不會觸發) → 印一次
+lf_item "$LF_ERR" -1 failed | lf_events; O="$(lf_run_diff)"
+ok "(z2) diff 模式內容式未觸發 → 結構化補印一次"  test "$(lf_zero "$O")" -eq 1
+ok "(z2) diff 模式確實走到完成"                   lf_marked "$O"
+# (z3) diff 模式、shell 全失敗、review 本體全標【推論】(內容式判定也觸發) → 仍只印一次(不重複)
+lf_item "$LF_ERR" -1 failed | lf_events
+O="$(LF_REVIEW_LINE='- Required【推論】 foo.go:1 可能有問題' lf_run_diff)"
+ok "(z3) 兩個判定都觸發 → 契約句只印一次"          test "$(lf_zero "$O")" -eq 1
+ok "(z3) 兩個判定都觸發仍走到完成"                 lf_marked "$O"
+# (z4) 部分失敗 → 不印(措辭維持現狀),但完成行仍標警示
+{ lf_item "$LF_ERR" -1 failed; lf_item "PROBE-OK" 0 completed; } | lf_events; O="$(lf_run_diff)"
+ok "(z4) 部分失敗 → 不印零查證契約句"             test "$(lf_zero "$O")" -eq 0
+ok "(z4) 部分失敗 → 完成行仍標警示"               lf_marked "$O"
+# (z5) 沒有失敗 → 不印
+lf_item "PROBE-OK" 0 completed | lf_events; O="$(lf_run_diff)"
+ok "(z5) 無失敗 → 不印零查證契約句"               test "$(lf_zero "$O")" -eq 0
+ok "(z5) 無失敗 → 正常完成"                       lf_clean "$O"
+
+# (q) --json 下失敗只出現在 stdout 的事件(stderr 空、-o 檔空)(2026-10-14 A 層審查):
+# 先前 -o 落空＋stdout 是 JSONL 一律直接 FAILED,額度被擋永遠被分成 FAILED(exit 1)而不是
+# RATE_LIMITED(exit 0);而 turn.failed 事件(error.message)也沒有併入判定。
+lf_item "PROBE-OK" 0 completed | lf_events
+# (q1) 只有 turn.failed 帶額度訊息 → RATE_LIMITED,exit 0
+O="$(LF_FAIL='{"type":"turn.failed","error":{"message":"You'\''ve hit your usage limit. Upgrade to Pro"}}' lf_run)"
+ok "(q1) 只有 turn.failed 帶額度訊息 → RATE_LIMITED"  has 'RATE_LIMITED:' "$O"
+ok "(q1) RATE_LIMITED 離開碼 0"                        test "$(cat "$LF/rc")" = 0
+ok "(q1) 不得是 FAILED"                                hasnt 'FAILED:' "$O"
+# (q2) 獨立的 error 事件帶額度訊息 → 同上(這條路徑先前被 FAILED 分支預先攔掉,是死碼)
+O="$(LF_FAIL='{"type":"error","message":"You'\''ve hit your usage limit. Upgrade to Pro"}' lf_run)"
+ok "(q2) error 事件帶額度訊息 → RATE_LIMITED"          has 'RATE_LIMITED:' "$O"
+ok "(q2) RATE_LIMITED 離開碼 0"                        test "$(cat "$LF/rc")" = 0
+# (q3) 一般失敗(不是額度) → 仍是 FAILED exit 1
+O="$(LF_FAIL='{"type":"error","message":"boom"}' lf_run)"
+ok "(q3) 一般 error 事件 → FAILED"                     has 'FAILED: codex 有輸出但 -o 檔是空的' "$O"
+ok "(q3) FAILED 離開碼 1"                              test "$(cat "$LF/rc")" = 1
+ok "(q3) 不得是 RATE_LIMITED"                          hasnt 'RATE_LIMITED:' "$O"
+ok "(q3) FAILED 的 stderr 末段帶 error 事件"           has 'boom' "$O"
+# (q4) 只併 error／turn.failed 事件行,不併整份 JSONL: agent_message 引用額度字樣 + 一般失敗 → 仍是 FAILED
+{ lf_item "PROBE-OK" 0 completed
+  echo '{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"You'\''ve hit your usage limit. Upgrade to Pro"}}'; } | lf_events
+O="$(LF_FAIL='{"type":"turn.failed","error":{"message":"boom"}}' lf_run)"
+ok "(q4) agent_message 引用額度字樣 → 不被當成額度被擋"  has 'FAILED: codex 有輸出但 -o 檔是空的' "$O"
+ok "(q4) 不得是 RATE_LIMITED"                          hasnt 'RATE_LIMITED:' "$O"
+# (q5) 輸入過長不是額度問題 → FAILED(不得被新的放行路徑吞成 RATE_LIMITED)
+lf_item "PROBE-OK" 0 completed | lf_events
+O="$(LF_FAIL='{"type":"error","message":"Input exceeds the maximum length of 1048576 characters."}' lf_run)"
+ok "(q5) 輸入過長 → FAILED"                            has 'FAILED: codex 有輸出但 -o 檔是空的' "$O"
+ok "(q5) 輸入過長不得是 RATE_LIMITED"                  hasnt 'RATE_LIMITED:' "$O"
+rm -rf "$LF"
+# === LAUNCHFAIL-END ===
 
 # --- prompt 政策版本(2026-08-31,codex 複查抓到) ---
 # 命題: resume 沿用舊 session 的對話歷史,而 resume 輪的 prompt 只說「規則同先前輪次」。
@@ -713,7 +998,7 @@ LOW_NEW="$(map LOW_MODEL)";  LOW_OLD="$(map LOW_LEGACY_MODEL)"
 PLAN_NEW="$(map PLAN_MODEL)"; PLAN_OLD="$(map PLAN_LEGACY_MODEL)"
 ok "退路: 映射表讀得到(否則以下斷言全部沒意義)" test -n "$REQ_NEW" -a -n "$REQ_OLD" -a -n "$CRIT_NEW" -a -n "$CRIT_OLD" -a -n "$LOW_NEW" -a -n "$LOW_OLD" -a -n "$PLAN_NEW" -a -n "$PLAN_OLD"
 
-FB="$(mktemp -d)"
+FB="$(tmpd)"; no_colon "$FB"
 cat > "$FB/codex" <<'STUBEOF'
 #!/usr/bin/env bash
 case "$1" in

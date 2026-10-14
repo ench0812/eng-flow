@@ -27,6 +27,19 @@ code only: `0` consensus (proceed without interrupting), `3` no consensus, `4` R
 must never fall through to the preferred option — that would silently degrade the whole mechanism
 into "do what I already wanted" the day the quota runs out.
 
+A launch failure of codex's own shell is also `3`, **even with `--allow-inference`** (added 2026-10-14).
+The script reads the `--json` event stream; one `command_execution` item with `status=failed`,
+`exit_code=-1` and an output that *starts with* `Failed to create unified exec process` or
+`CreateProcess…failed` is enough — whole-text matching is deliberately not used, since an
+`agent_message` may quote those strings. In that case codex never read the question's files, yet the
+reply can still be perfectly formatted, carry all five contract lines and even claim 已讀, so the
+verdict is unverified inference no matter how it is labelled; `--allow-inference` only excuses a
+decision that has no code to read, not a read that failed. **The price:** the count includes
+failures that codex later retried successfully, so an intermittent launch failure still yields `3`
+and interrupts the user although the final reply may have been fine. Clear the cause (see the
+diagnostic notes in `scripts/codex-review.sh`) and re-run; do not relax the check to avoid the
+interruption.
+
 The reply must carry all five contract lines (裁定 / 信心 / 依據 / 理由 / 異議) with 信心 in
 高|中|低 and 依據 in 已讀|推論. A missing or out-of-range field is no consensus, never a default:
 a truncated reply carrying only `裁定:` would otherwise leave the confidence and objection checks

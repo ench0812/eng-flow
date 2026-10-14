@@ -1065,15 +1065,49 @@ USER_WIN_SANDBOX="$(awk '
 ISOLATE_ARGS=(--ignore-user-config)
 [ -n "$USER_WIN_SANDBOX" ] && ISOLATE_ARGS+=(-c "windows.sandbox=\"$USER_WIN_SANDBOX\"")
 
+# 只給 codex 子程序一個【不存在】的 LOCALAPPDATA(2026-10-14,--ignore-user-config 管不到這條):
+# codex-cli 0.162.1 每次 shell 前都先跑 sandbox setup refresh,而 refresh 會無條件走訪
+# %LOCALAPPDATA%\OpenAI\Codex\runtimes 整棵樹重設 ACL,任何一個檔打不開整次 refresh 就算失敗。
+# Codex 桌面版常駐的 codex-computer-use-swift.exe 正握著該樹內的 VCRUNTIME140_1.dll →
+# os error 32 → "setup refresh had errors" → codex 的每一次 shell 呼叫都失敗(讀不到任何檔),
+# 輸出格式卻完整、本腳本照印 完成(…)。本腳本的複查用不到桌面版的任何 runtime,所以讓子程序
+# 看到的 LOCALAPPDATA 底下沒有那棵樹(路徑刻意【不建立】,走 NotFound 分支略過那一步)。
+# 只略過 ACL 授權的走訪,沙箱沒有放寬。覆寫只掛在 codex 子程序上(見 codex_cmd),腳本自己與
+# 其他子程序的環境不變;非 Windows 時什麼都不做。
+# 【判斷 Windows 不能看 LOCALAPPDATA 有沒有值】: 上游 local_app_data_root()(windows-sandbox-rs
+# setup_runtime_bin.rs)在 LOCALAPPDATA 沒設時會退回 %USERPROFILE%\AppData\Local,又走回出問題的樹。
+# 所以 Windows 上一律覆寫(不管原本有沒有設),改看 OS=Windows_NT(Git Bash 繼承自 Windows)或
+# uname 是 MINGW／MSYS／CYGWIN。WSL／Linux／macOS 兩者皆非,不動。
+# 實測對照(只差這個變數): 無覆寫 → sandbox.<日期>.log 出現 os error 32、codex 回 SHELL-FAILED;
+# 有覆寫 → shell 正常,讀到探針檔內容。
+# 已知殘餘: refresh 另外還會走訪 %USERPROFILE%\.cache\codex-runtimes(上游 runtime_paths 的第二條),
+# 那棵樹不受 LOCALAPPDATA 影響;目前沒有程序鎖它,哪天被鎖會是同一個症狀、需要另外處理。
+NO_LOCALAPPDATA=""
+case "${OS:-}|$(uname -s 2>/dev/null)" in
+  *Windows_NT*|*MINGW*|*MSYS*|*CYGWIN*)
+    # 路徑刻意【不建立】(NotFound 才會略過那一步),名稱帶 no-localappdata 以便在 log 裡辨認。
+    NO_LOCALAPPDATA="${CODEX_HOME:-$HOME/.codex}/eng-flow-no-localappdata"
+    # 原生 Windows 程式要 Windows 形式的路徑;Git Bash 才有 cygpath,沒有就原樣用。
+    # cygpath 失敗或印出空字串時【保留原路徑】: 直接把 $(cygpath …) 的結果賦值會讓 NO_LOCALAPPDATA
+    # 變空,codex_cmd 於是走不覆寫的分支——覆寫靜默失效,症狀就是 shell 全失敗卻照印 完成(…)。
+    if command -v cygpath >/dev/null 2>&1; then
+      _cyg="$(cygpath -m "$NO_LOCALAPPDATA" 2>/dev/null)" && [ -n "$_cyg" ] && NO_LOCALAPPDATA="$_cyg"
+    fi ;;
+esac
+codex_cmd() {
+  if [ -n "$NO_LOCALAPPDATA" ]; then LOCALAPPDATA="$NO_LOCALAPPDATA" "$CODEX_BIN" "$@"
+  else "$CODEX_BIN" "$@"; fi
+}
+
 run_codex() {
 { { if [ "$SESSION_MODE" = "resume" ]; then
       printf '%s\n\n%s\n' "$RESUME_PROMPT" "$DELTA" \
-        | "$CODEX_BIN" exec resume "$RESUME_ID" - --json -o "$LAST_FILE" "${ISOLATE_ARGS[@]}" \
+        | codex_cmd exec resume "$RESUME_ID" - --json -o "$LAST_FILE" "${ISOLATE_ARGS[@]}" \
             -c sandbox_mode="read-only" $SKIP_GIT_FLAG -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT"
     else
       printf '%s\n' "$SEND_PAYLOAD" \
-        | "$CODEX_BIN" exec --sandbox read-only --json -o "$LAST_FILE" $EPHEMERAL_FLAG $SKIP_GIT_FLAG \
+        | codex_cmd exec --sandbox read-only --json -o "$LAST_FILE" $EPHEMERAL_FLAG $SKIP_GIT_FLAG \
             "${ISOLATE_ARGS[@]}" --cd "$REPO_ROOT" -c "$NO_MEMORIES_FLAG" \
             -c model="$MODEL" -c model_reasoning_effort="$EFFORT" "$REVIEW_PROMPT"
     fi
@@ -1117,15 +1151,29 @@ fi
 # fallback 存在是為了讓測試用的 stub(印純文字、不寫 -o 檔)照舊可用。但它不能把
 # 「真 codex 印了 JSONL、-o 卻落空」也一起吞掉——那會讓呼叫端拿到一坨 JSON 當第二意見,
 # 外加一句「完成」,正是本腳本 header 說「假成功比直接報錯危險」要防的那一類。
+# --json 之後 codex 的錯誤(含額度被擋)可能只以 stdout 的 {"type":"error",...} 或
+# {"type":"turn.failed","error":{"message":...}} 事件出現(stderr 是空的),而 rate-limit 判定看的是
+# stderr 與 review 本體 —— 不補這一步,額度被擋會被誤判成 FAILED,而兩者處置方向相反
+# (RATE_LIMITED 不重試直接繼續;FAILED 不得放行)。只併入這兩種事件行,不併整份 JSONL,避免把模型
+# 回覆內容帶進判定造成誤判。
+# 【必須在下面的 OUT_FILE 分流之前】(2026-10-14): 先前這段在分流之後,而 -o 落空＋stdout 是 JSONL 的分支
+# 一律直接 FAILED,於是 JSONL 模式下額度被擋(stdout 只有事件、-o 空)永遠被分成 FAILED,這段併入形同死碼。
+grep -oE '"type":"(error|turn\.failed)"[^}]*}' "$JSON_FILE" 2>/dev/null >> "$ERR_FILE" || true
+
 if [ -s "$LAST_FILE" ]; then
   OUT_FILE="$LAST_FILE"
 elif head -c 16 "$JSON_FILE" 2>/dev/null | grep -q '^{"type":'; then
-  echo "[codex-review] FAILED: codex 有輸出但 -o 檔是空的,取不到 review 本體(exit=$RC)。" >&2
-  echo "  這不是「無重大遺漏」,是複查沒有拿到結果——呼叫端不得視為已複查。" >&2
-  echo "  codex stderr(末 20 行):" >&2
-  tail -n 20 "$ERR_FILE" >&2
-  emit_telemetry FAILED
-  exit 1
+  if is_rate_limited "$RC" "$ERR_FILE" "$LAST_FILE"; then
+    # 額度被擋: -o 空、stdout 只有事件流。OUT_FILE 指向(空的)-o 檔,交給下面的 RATE_LIMITED 分支處置。
+    OUT_FILE="$LAST_FILE"
+  else
+    echo "[codex-review] FAILED: codex 有輸出但 -o 檔是空的,取不到 review 本體(exit=$RC)。" >&2
+    echo "  這不是「無重大遺漏」,是複查沒有拿到結果——呼叫端不得視為已複查。" >&2
+    echo "  codex stderr(末 20 行):" >&2
+    tail -n 20 "$ERR_FILE" >&2
+    emit_telemetry FAILED
+    exit 1
+  fi
 else
   OUT_FILE="$JSON_FILE"
 fi
@@ -1133,12 +1181,6 @@ cat "$OUT_FILE"
 # -o 寫出的最後一則訊息沒有結尾換行,不補的話後續 stderr 狀態行會黏在 review 的最後一行上
 # (症狀: `收斂問句:...[codex-review] 用量: ...`)。$( ) 會吃掉結尾換行,所以「非空」即代表缺換行。
 [ -s "$OUT_FILE" ] && [ -n "$(tail -c1 "$OUT_FILE")" ] && echo
-
-# --json 之後 codex 的錯誤(含額度被擋)可能只以 {"type":"error",...} 事件出現在 stdout,
-# 而 rate-limit 判定看的是 stderr 與 review 本體 —— 不補這一步,額度被擋會被誤判成
-# FAILED,而兩者處置方向相反(RATE_LIMITED 不重試直接繼續;FAILED 不得放行)。
-# 只併入 error 事件行,不併整份 JSONL,避免把模型回覆內容帶進判定造成誤判。
-grep -o '"type":"error"[^}]*}' "$JSON_FILE" 2>/dev/null >> "$ERR_FILE" || true
 
 if is_rate_limited "$RC" "$ERR_FILE" "$OUT_FILE"; then
   echo "[codex-review] RATE_LIMITED: codex 回報用量/額度上限,本次諮詢沒有取得結果(codex exit=$RC)。" >&2
@@ -1210,32 +1252,95 @@ TOOL_FAIL_PAT='exec_command failed for|CreateProcess[A-Za-z]* failed|Failed to c
 # 跨版本用;靠「當前版本剛好不回顯」等於把正確性寄託在一個沒人保證的實作細節上。
 TOOL_FAIL_LINES="$(grep -vE '^(@@|\+\+\+|---|diff --git|index [0-9a-f]+\.\.|[+-])' "$ERR_FILE" 2>/dev/null \
                    | grep -E "$TOOL_FAIL_PAT" 2>/dev/null)"
-if [ -n "$TOOL_FAIL_LINES" ]; then
+
+# 【結構化偵測】(2026-10-14 新增,取代原本「已知的偵測缺口」的暫緩): 看 `codex exec --json` 的
+# stdout(JSON_FILE)裡的事件,不看 stderr、也不做全文比對。樣本取自 codex 0.162.1 的三次真實呼叫
+# (stdout.jsonl 原樣,啟動失敗的那一行):
+#   {"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"…",
+#    "aggregated_output":"Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+#    "exit_code":-1,"status":"failed"}}
+# 【為什麼不能全文比對 JSON_FILE】: review 本體(item.completed 的 agent_message)也在同一份 JSONL
+# 裡,而回覆完全可能引用這些字串——codex 失敗後的回覆自己就會(同一批樣本:
+# "SHELL-FAILED\nexec_command failed: CreateProcess {…Failed to create unified exec process…}")。
+# 所以只認一個【結構】,五個條件缺一不可:
+#   item.completed          item.started 的 exit_code 是 null、status 是 in_progress
+#   type=command_execution  agent_message 等其他 item 不算
+#   status=failed           指令跑完是 completed;輸出剛好印出那句話也不算
+#   exit_code=-1            指令真的跑過、失敗時是 1、2…;-1 是 codex 自己填的「根本沒起來」
+#   輸出【以】啟動錯誤開頭  錯誤字串出現在輸出中段、或前面還有別的輸出,都不算
+# 不依賴欄位順序,也不解析 JSON 字串逸出: 字串內的引號一律寫成 \",所以【未逸出】的 "key":"value"
+# 序列只可能是真正的 JSON 鍵——這是用 grep 而不用 jq 的前提(本腳本其他地方也不依賴 jq,usage 物件
+# 同樣用 grep 取;jq 缺席時偵測會整個關掉,那是靜默的)。
+# 只取錯誤類型到第一個「 | 」為止: 啟動錯誤之後 codex 可能附上 cwd=…／cmd=…(整條命令列,
+# 可能含 token),印出去就踩安全鐵律 #2;另外再切掉任何殘留的 cwd=／cmd=,縱深防禦。
+# 【遇到任何反斜線或 `=` 就停】(`[^"\\=]*`,2026-10-14 A 層審查抓到;`=` 讓 `--token=…` 這類值不被印出): 擷取若用 `[^"]*` 會跨過 JSON 逸出序列——
+#   "…process: boom\nrunning: pwsh -c Get-Secret --token=SEKRET99" 實測整段印出,cut -c1-120 擋不住。
+# 真實的錯誤類型是單行純文字,不含反斜線;停在第一個反斜線同時消除 \n／\r\n 與 \" 的字面殘留。
+# 反斜線之前仍可能有自由文字——靠「 | 」與 cwd=／cmd= 的切除、長度上限擋,不是白名單。
+shell_cmd_events() { # $1=JSONL 檔 → 已完成的 command_execution 事件行
+  grep -E '"type"[[:space:]]*:[[:space:]]*"item\.completed"' "$1" 2>/dev/null \
+    | grep -E '"type"[[:space:]]*:[[:space:]]*"command_execution"'
+}
+shell_launch_failures() { # stdin=shell_cmd_events 的輸出 → 每個啟動失敗印一行錯誤類型
+  grep -E '"status"[[:space:]]*:[[:space:]]*"failed"' \
+    | grep -E '"exit_code"[[:space:]]*:[[:space:]]*-1[[:space:]]*[,}]' \
+    | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"\\=]*' \
+    | sed -E 's/^"aggregated_output"[[:space:]]*:[[:space:]]*"//; s/ \| .*$//; s/[[:space:]]+(cwd|cmd)=.*$//' \
+    | tr -d '\r' | cut -c1-120
+}
+SHELL_CMD_EVENTS="$(shell_cmd_events "$JSON_FILE")"
+LAUNCH_FAIL_TYPES="$(printf '%s\n' "$SHELL_CMD_EVENTS" | shell_launch_failures)"
+LAUNCH_FAIL_N="$(printf '%s\n' "$LAUNCH_FAIL_TYPES" | grep -c .)"
+SHELL_CMD_N="$(printf '%s\n' "$SHELL_CMD_EVENTS" | grep -c .)"
+case "$LAUNCH_FAIL_N" in ''|*[!0-9]*) LAUNCH_FAIL_N=0 ;; esac
+case "$SHELL_CMD_N" in ''|*[!0-9]*) SHELL_CMD_N=0 ;; esac
+SHELL_RAN_N=$((SHELL_CMD_N - LAUNCH_FAIL_N)); [ "$SHELL_RAN_N" -ge 0 ] || SHELL_RAN_N=0
+SHELL_NOTE=""; SHELL_ALL_FAILED=0
+if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
+  if [ "$SHELL_RAN_N" -eq 0 ]; then
+    # 一次都沒起來 = 這一輪沒有任何查證,結論只能是從送進去的內容推得的假說。
+    SHELL_ALL_FAILED=1
+    SHELL_NOTE=", 警示=codex shell 啟動失敗 ${LAUNCH_FAIL_N} 次、沒有任何一次正常啟動,本輪結論全為推論"
+  else
+    SHELL_NOTE=", 警示=codex shell 啟動失敗 ${LAUNCH_FAIL_N} 次(另有 ${SHELL_RAN_N} 次正常啟動),部分結論為推論"
+  fi
+fi
+
+if [ -n "$TOOL_FAIL_LINES" ] || [ "$LAUNCH_FAIL_N" -gt 0 ]; then
   echo "[codex-review] 警示: codex 的 shell 工具至少失敗過一次——它可能【沒有真的讀到 repo】,本輪意見的查證深度要打折。" >&2
-  # 【不印原始行】: 那些訊息帶著失敗指令的完整命令列(形如 error=exec_command failed for
-  # `<整條指令>`),而指令參數可能含 token/密碼——印出去就是把憑證寫進 console 與呼叫端的
-  # 記錄,踩安全鐵律 #2。只印錯誤類型與 OS 錯誤碼: 那是診斷真正需要的部分(5=ACL、
-  # 267=ERROR_DIRECTORY),且不含任何使用者資料。
-  echo "  失敗類型與次數(刻意不印原始指令,避免把含憑證的命令列寫進 log):" >&2
-  printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE "$TOOL_FAIL_PAT" | sort | uniq -c \
-    | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
-  CODES="$(printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE 'failed: [0-9]+' | sort -u | tr '\n' ' ')"
-  [ -n "$CODES" ] && echo "    OS 錯誤碼: $CODES" >&2
+  if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
+    echo "  結構化偵測(codex --json 事件流): shell 呼叫啟動失敗 ${LAUNCH_FAIL_N} 次、正常啟動 ${SHELL_RAN_N} 次。錯誤類型(不含 cwd／命令列):" >&2
+    printf '%s\n' "$LAUNCH_FAIL_TYPES" | sort | uniq -c | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
+  fi
+  if [ -n "$TOOL_FAIL_LINES" ]; then
+    # 【不印原始行】: 那些訊息帶著失敗指令的完整命令列(形如 error=exec_command failed for
+    # `<整條指令>`),而指令參數可能含 token/密碼——印出去就是把憑證寫進 console 與呼叫端的
+    # 記錄,踩安全鐵律 #2。只印錯誤類型與 OS 錯誤碼: 那是診斷真正需要的部分(5=ACL、
+    # 267=ERROR_DIRECTORY),且不含任何使用者資料。
+    echo "  stderr 的失敗類型與次數(刻意不印原始指令,避免把含憑證的命令列寫進 log):" >&2
+    printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE "$TOOL_FAIL_PAT" | sort | uniq -c \
+      | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
+    CODES="$(printf '%s\n' "$TOOL_FAIL_LINES" | grep -oE 'failed: [0-9]+' | sort -u | tr '\n' ' ')"
+    [ -n "$CODES" ] && echo "    OS 錯誤碼: $CODES" >&2
+  fi
   echo "  處置: 標【推論】的項目照常看待;標【已讀】的項目要自己回頭核對,它可能根本沒讀成。" >&2
   echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\"" >&2
   echo "  沙箱能跑但 exec 仍失敗時: 看 \$CODEX_HOME/.sandbox/setup_error.json 與當天 sandbox.<日期>.log 的 os error 32——" >&2
-  echo "    那是某個程序正握著 setup 要改 ACL 的檔(2026-10-13 實例: 桌面版注入的 MCP 拉起的 node_repl.exe)。" >&2
+  echo "    那是某個程序正握著 setup 要改 ACL 的檔(2026-10-13 實例: 桌面版注入的 MCP 拉起的 node_repl.exe;" >&2
+  echo "    2026-10-14 實例: 桌面版常駐的 codex-computer-use-swift.exe 鎖住 runtimes 樹內的 VCRUNTIME140_1.dll," >&2
+  echo "    本腳本已對 codex 子程序覆寫 LOCALAPPDATA 避開——若仍出現,先確認 codex_cmd 還有被呼叫)。" >&2
 fi
-# 【已知的偵測缺口,刻意留著】: 上面只掃 stderr。codex 也會把失敗以對話內容回饋給模型
-# ——2026-08-28 的 rollout 樣本裡形如 {"type":"input_text","text":"Script error:\nexec_command
-# failed for `…`"} ——這條路徑在 --json 的 stdout(JSON_FILE)裡,stderr 不一定同時有。
-# 沒有一併掃 JSON_FILE 的理由: review 本體(agent_message)也在同一份 JSONL 裡,而它完全可能
-# 引用這些字串——本次改動的複查回覆自己就引用了,盲掃必然誤報,而誤報幾次之後這行警示就會
-# 被當雜訊略過,比沒有還糟。要正確做需要 `codex exec --json` stdout 的實際失敗事件樣本
-# (不是 orca session 的 rollout 格式,兩者不保證相同),取得樣本前不動。
+# 【結構化偵測的殘餘缺口】(原本的「只掃 stderr、等失敗樣本」已於 2026-10-14 取得樣本並補上):
+#   1. 指令【有起來】但因別的原因讀不到(路徑錯、權限、檔案不存在)不算啟動失敗——那一類仍由
+#      下面的【已讀】/【推論】計數負責。
+#   2. 事件格式若改名(command_execution、aggregated_output、exit_code 任一個),偵測會【靜默】
+#      失效而不是報錯。樣本是 codex 0.162.1,測試鎖的就是這個形狀;升大版後要重看一份真實 stdout。
+#   3. 計的是「啟動失敗過幾次」,不是「最終沒讀成幾次」: 同一指令第一次失敗、重試成功也會計入,
+#      所以警示措辭是「失敗過」,全數失敗與部分失敗分開講(SHELL_RAN_N)。
 
 # --- 這一輪到底有沒有查證過(2026-09-07 新增;與上面的工具失敗偵測【互補,不重疊】) ---
-# 上面那段掃的是 stderr 裡的工具【崩潰】訊息(exec_command failed / CreateProcess failed)。
+# 上面那段掃的是工具【崩潰】——stderr 裡的字樣(exec_command failed / CreateProcess failed)與
+# --json 事件流裡啟動失敗的 command_execution item(結構化偵測)。
 # 實測遇到的更隱蔽形態是工具【沒有】崩潰,是 codex 自己【放棄】: 它用相對路徑讀檔失敗
 # (cwd 不是工作根,見 PROMPT_POLICY_VERSION=3 的註解),撞兩次就在回覆裡宣稱「工作根的讀取
 # 權限被沙箱拒絕」,然後全篇改用推論作答。那一次 stderr 沒有任何 exec_command failed、
@@ -1244,7 +1349,7 @@ fi
 # 判定改看【產出本身】: prompt 要求每項都標【已讀】或【推論】,所以「一個【已讀】都沒有、
 # 卻有【推論】」就是不依賴任何 stderr pattern 的客觀零查證訊號。
 # 兩者都沒有(codex 根本沒照協議標註)時【不觸發】——無法判斷就不報,寧可漏報也不要誤報,
-# 誤報幾次之後這行警示會被當雜訊略過,比沒有還糟(理由同下面那段「已知的偵測缺口」)。
+# 誤報幾次之後這行警示會被當雜訊略過,比沒有還糟(理由同上面結構化偵測為什麼不做全文比對)。
 # 刻意【不】升成 FAILED: 純推論的發現仍可能是真的(該次實測就抓到兩個真缺陷),丟掉過當;
 # 要的是讓呼叫端知道「這一份不得當成已查證」——它是假說集,不是結論集。
 # 【必須錨在「發現行」上,不可裸數字樣】(2026-09-07 複查抓到,實測會漏報):
@@ -1264,6 +1369,7 @@ fi
 # 【兩邊必須對稱】: 只改一邊會破壞「兩者都沒有就不觸發」那條刻意的寧漏勿誤設計。
 FINDING_LINE='(Critical|Required|Optional|Nit|FYI)[^【]{0,80}'
 FINAL_STATUS=OK
+ZERO_VERIFY_WARNED=0   # 下面 diff 模式的「警示: 本輪【零查證】」印過就設 1,shell 全失敗的補印據此去重
 # 【不可在這裡接 `.*`】(2026-09-07 codex 第二輪抓到): 接了之後 `[^【]{0,80}` 那段距離限制
 # 完全失效——`.*` 能跨過任意內容包含另一個標註。實測漏報:
 #   「- Required【推論】 foo.go:1 尚未讀檔,因此不能標為【已讀】」
@@ -1275,9 +1381,10 @@ case "$VERIFIED_N" in ''|*[!0-9]*) VERIFIED_N=0 ;; esac
 case "$INFERRED_N" in ''|*[!0-9]*) INFERRED_N=0 ;; esac
 if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then
   FINAL_STATUS=OK_NOVERIFY
-  # 【已知邊界,刻意不補】: 「讀不到檔案 + 回無重大遺漏」不會觸發——沒有任何發現時兩個計數
-  # 都是 0,落在「寧漏勿誤」那一側。要抓它得改看 JSON 事件流的工具往返數,但那個訊號在 stub
-  # 測試下恆為 0(stub 不產生 JSONL),會讓既有測試全面誤報。方向是漏報不是誤報,先留著。
+  # 【已知邊界,刻意不補】: 「讀不到檔案 + 回無重大遺漏」不會觸發這個內容式判定——沒有任何發現時
+  # 兩個計數都是 0,落在「寧漏勿誤」那一側。其中【shell 根本沒啟動】的成因已由上面的結構化偵測
+  # 接手(事件流的 command_execution 啟動失敗,與回覆寫了什麼無關,SHELL_ALL_FAILED);剩下沒補的是
+  # shell 有起來、但讀不到檔(路徑錯、權限)又回「無重大遺漏」。方向是漏報不是誤報,先留著。
   # 兩種模式的失效意義不同,措辭要分開——diff 模式的零查證幾乎一定是故障,doc 模式不是。
   if [ "$MODE_NAME" = "doc" ]; then
     echo "[codex-review] 注意: 本輪回覆的 $INFERRED_N 行發現全標【推論】,沒有任何一行標【已讀】。" >&2
@@ -1288,6 +1395,7 @@ if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then
     echo "  codex 很可能一個檔案都沒讀成,所有意見都只從送進去的片段推得。" >&2
     echo "  處置: 不得視為已查證的第二意見。把每一項當成【待驗證的假說】,自己回頭核對後再決定處置;" >&2
     echo "        也不可據此對使用者稱「已完成 codex 複查」。" >&2
+    ZERO_VERIFY_WARNED=1
   fi
   # 最常見的成因是路徑寫法,不是真的沒有權限——這一句是要打斷「存取被拒 ⇒ 我沒有讀取權」的
   # 錯誤歸因,那個歸因會讓人跑去查沙箱設定,而真正該做的是確認 access_note 的絕對路徑指引。
@@ -1295,6 +1403,21 @@ if [ "$VERIFIED_N" -eq 0 ] && [ "$INFERRED_N" -gt 0 ]; then
     echo "  註: 回覆裡出現「沙箱拒絕/沒有讀取權」這類宣稱。實測這幾乎都是【相對路徑】造成的" >&2
     echo "      (codex 的 shell cwd 不是工作根),不是沙箱真的禁止讀取。先確認 access_note 的" >&2
     echo "      絕對路徑指引有送到(PROMPT_POLICY_VERSION >= 3),再去懷疑沙箱設定。" >&2
+  fi
+fi
+
+# shell 全部啟動失敗 = 零查證的【結構化】證據: 與上面內容式判定(全標【推論】)落在同一個 telemetry
+# 狀態,報表看得出來這一輪沒有任何查證。部分失敗不降級(仍有指令真的起來)。
+# 【呼叫端只認一份契約】: skills/mao-review/SKILL.md 教呼叫端看到 `警示: 本輪【零查證】` 就不得稱複查完成,
+# 所以這裡也印同一句,不另發明第二種說法。diff 模式的內容式判定已印過就不重複(ZERO_VERIFY_WARNED);
+# doc 模式內容式只印較軟的「注意」(對還沒落地的設計提意見本來就常常沒有原始碼可讀),但 shell 全部
+# 起不來在 doc 模式也是故障,不能套用那個寬容,所以這裡一定補印。
+if [ "$SHELL_ALL_FAILED" -eq 1 ]; then
+  FINAL_STATUS=OK_NOVERIFY
+  if [ "$ZERO_VERIFY_WARNED" -ne 1 ]; then
+    echo "[codex-review] 警示: 本輪【零查證】——codex 的 shell 全部啟動失敗(${LAUNCH_FAIL_N} 次、沒有任何一次正常啟動),所有結論都只從送進去的內容推得。" >&2
+    echo "  處置: 不得視為已查證的第二意見。把每一項當成【待驗證的假說】,自己回頭核對後再決定處置;" >&2
+    echo "        也不可據此對使用者稱「已完成 codex 複查」。" >&2
   fi
 fi
 
@@ -1309,5 +1432,7 @@ if [ -n "$USAGE_SHOWN" ]; then
   echo "[codex-review] 用量: input ${_in:-?}(cached ${_cin:-?}) / output ${_out:-?} | $(awk -v a="${_cin:-0}" -v b="${_in:-0}" 'BEGIN{ if (b>0) printf "cache hit %.1f%%", a*100/b; else printf "cache hit n/a" }') | 明細見 $CODEX_REVIEW_LOG" >&2
 fi
 LEGACY_NOTE=""; [ "$USED_LEGACY" -eq 1 ] && LEGACY_NOTE=", 已退回舊模型"
-echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT$LEGACY_NOTE, $SESSION_MODE round=$ROUND_NO, codex exit=$RC)。唯讀諮詢,腳本未改 repo 內任何檔。" >&2
+# SHELL_NOTE 放在括號內(行首仍是「完成(」,呼叫端依該標記判斷「真的問到了」的做法不受影響),
+# 但 shell 啟動失敗時同一行就帶「警示=…本輪結論全為推論」,不會只看這一行就以為是正常的查證。
+echo "[codex-review] 完成(嚴重度=$SEV_SHOWN, 模型=$MODEL/$EFFORT$LEGACY_NOTE, $SESSION_MODE round=$ROUND_NO, codex exit=$RC$SHELL_NOTE)。唯讀諮詢,腳本未改 repo 內任何檔。" >&2
 exit 0
