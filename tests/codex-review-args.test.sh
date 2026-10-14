@@ -789,6 +789,10 @@ ok "(f) 含 cwd／cmd 的失敗 → 仍被偵測"        lf_marked "$O"
 ok "(f) 警示不含 cwd="                        test "$(printf '%s' "$O" | grep -c 'cwd=')" -eq 0
 ok "(f) 警示不含 cmd="                        test "$(printf '%s' "$O" | grep -c 'cmd=')" -eq 0
 ok "(f) 警示不含路徑與 token 內容"            test "$(printf '%s' "$O" | grep -cE 'secret-dir|abc123')" -eq 0
+# (f3) 「 | 」之後不是 cwd=／cmd= 而是別的內容 → 一樣整段丟掉(只取錯誤類型,不是只擋已知欄位名)
+lf_item "$LF_ERR | extra=secret-dir3" -1 failed | lf_events; O="$(lf_run)"
+ok "(f3) 「 | 」之後的任何內容 → 仍被偵測"     lf_marked "$O"
+ok "(f3) 「 | 」之後的任何內容 → 警示不含"      test "$(printf '%s' "$O" | grep -c 'secret-dir3')" -eq 0
 # (f2) 沒有「 | 」分隔、直接黏著 cwd=／cmd= 的變體(縱深防禦)
 lf_item "Failed to create unified exec process: boom cwd=C:\\\\secret-dir2 cmd=tool --token=zzz9" -1 failed | lf_events; O="$(lf_run)"
 ok "(f2) 無分隔符的 cwd／cmd → 仍被偵測"      lf_marked "$O"

@@ -1273,7 +1273,7 @@ shell_launch_failures() { # stdin=shell_cmd_events 的輸出 → 每個啟動失
   grep -E '"status"[[:space:]]*:[[:space:]]*"failed"' \
     | grep -E '"exit_code"[[:space:]]*:[[:space:]]*-1[[:space:]]*[,}]' \
     | grep -oE '"aggregated_output"[[:space:]]*:[[:space:]]*"(Failed to create unified exec process|CreateProcess[A-Za-z]* failed)[^"]*' \
-    | sed -E 's/^"aggregated_output"[[:space:]]*:[[:space:]]*"//; s/ \| .*$//; s/[[:space:]]+(cwd|cmd)=.*$//; s/\\+$//' \
+    | sed -E 's/^"aggregated_output"[[:space:]]*:[[:space:]]*"//; s/ \| .*$//; s/[[:space:]]+(cwd|cmd)=.*$//' \
     | tr -d '\r' | cut -c1-120
 }
 SHELL_CMD_EVENTS="$(shell_cmd_events "$JSON_FILE")"
