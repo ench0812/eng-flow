@@ -1,6 +1,6 @@
 ---
 name: tier-c
-description: eng-flow C tier（haiku + effort low）。樣板、config、migration、文件、大量掃描與格式轉換這類機械高量、不需要設計判斷的工作。Agent tool 派工無法帶 effort，而 Claude Haiku 5.5 起支援 effort、omit 會繼承 session 的檔位，所以 C 一律用 subagent_type "eng-flow:tier-c" 派；Workflow agent() 則照 references/model-routing.md 直接寫 model + effort。
+description: eng-flow C tier（haiku + effort low）。樣板、config、migration、文件、大量掃描與格式轉換這類機械高量、不需要設計判斷的工作。Agent tool 派工無法帶 effort，而 Claude Haiku 5.5 起支援 effort、omit 會繼承 session 的檔位，所以 C 一律用 subagent_type "eng-flow:tier-c" 派；Workflow agent() 用 agentType:'eng-flow:tier-c' 並同時明寫 model + effort（見 references/model-routing.md）。
 model: haiku
 effort: low
 ---

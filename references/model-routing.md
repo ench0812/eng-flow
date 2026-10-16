@@ -7,15 +7,32 @@ Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能
 | **Session** | 主線（settings.json `model`） | `high`（settings.json `effortLevel`） | 編排、架構決策、需求拆解 | 不由 `agent()` 設定；改 settings |
 | **D** | fable（`claude-fable-5-1`） | 繼承 session（見下） | **只有** mao-brainstorm 2.5 與 mao-plan Draft Stage 的起草 — 一次性，不參與後續 | `model:"fable"` |
 | **A** | opus（繼承主線） | `high` | 平行深度任務、跨模組驗證 — **節制使用** | Omit `model` + `effort:'high'` |
-| **B1** | sonnet | `xhigh` | 複雜商業邏輯、演算法 — 執行層首選工程師 | Workflow：`model:"sonnet"` + `effort:'xhigh'`；Agent tool：`subagent_type:"eng-flow:tier-b1"` |
-| **B2** | sonnet | `medium` | Spec 明確的實作、標準重構 | Workflow：`model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"` |
-| **C** | haiku（Haiku 5.5） | low | 樣板、config、migration、文件 | `model:"haiku"` + `effort:'low'`；Agent tool 用 `eng-flow:tier-c` |
+| **B1** | sonnet | `xhigh` | 複雜商業邏輯、演算法 — 執行層首選工程師 | Workflow：`agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'`；Agent tool：`subagent_type:"eng-flow:tier-b1"` |
+| **B2** | sonnet | `medium` | Spec 明確的實作、標準重構 | Workflow：`agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"` |
+| **C** | haiku（Haiku 5.5） | low | 樣板、config、migration、文件 | Workflow：`agentType:'eng-flow:tier-c'` + `model:"haiku"` + `effort:'low'`；Agent tool 用 `eng-flow:tier-c` |
 
 **檔位名稱跨模型不等值**（2026-10-06，依官方 prompting 指南，未在本機 eval）：`opus` 解析為 Opus 5.5，其 API 預設是 `medium` 而非 `high`，官方量測 5.5 的 `medium` 在 coding／知識工作上已追平或超過 Opus 5 的 `high`，且同一檔位下 5.5 想得比 5 多——所以 Session／A 的 `high` 比 Opus 5 時代貴，這是刻意保留的（使用者 2026-10-06 裁定維持）。`sonnet` 解析為 Sonnet 5.5，官方對 agentic coding 的起點是 `medium`（spec 明確）／`high`（較難較長），`xhigh` 只給量測過有增益的工作；B1 維持 `xhigh` 是使用者裁定，副作用與對策見沿革。來源（2026-10-06 讀取）：`platform.claude.com/docs/en/build-with-claude/effort` 的各模型建議檔位，以及 `.../prompt-engineering/prompting-claude-opus-5-5`、`prompting-claude-opus-5`、`prompting-claude-sonnet-5-5`、`prompting-claude-sonnet-5`。
 
 B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想出解法（演算法、跨模組互動、狀態機、並行/交易邏輯）→ B1；解法已寫在 spec/plan 裡、只是落地成 code → B2。C 層 effort 定為 low（2026-10-09 起；原為「刻意不設」——那是 Haiku 4.5 不支援 effort 時的寫法，Haiku 5.5 支援 effort、預設 medium，而 omit 會繼承 session 的 high）。
 
 **B 層走 Agent tool 時必須指名 plugin agent**（2026-09-29）：Agent tool 只有 `model` 參數、沒有 `effort`，直接寫 `model:"sonnet"` 會讓 effort 繼承 session 的 `effortLevel`（目前 `high`）——B1 少一檔、B2 多兩檔，而且沒有任何提示。`agents/tier-b1.md`、`agents/tier-b2.md`、`agents/tier-c.md` 把 model + effort 寫在 frontmatter（plugin agent 支援這兩個欄位），隨 plugin 發佈，不依賴本機 `~/.claude/agents/`。A 層照舊 omit `model`＋繼承 session，所以 Agent tool 直接派不受影響；C 層自 Haiku 5.5 起支援 effort，直接寫 `model:"haiku"` 會繼承 session 的 high，所以同樣要用 `eng-flow:tier-c`。
+
+### Context 與快取：subagent 成本的主要來源（2026-10-16）
+
+每一次請求都會重送 agent 的整份 context，所以 subagent 的成本由「context 多大」乘以「跑幾回合」決定，再加上快取過期後的整份重寫。2026-10-12～16 一週的本機量測（`~/.claude/scripts/claude-usage-report.py`；金額是 API 牌價等值，不等於訂閱扣法）：
+
+- 68 個 B1 agent、8,387 次請求，平均每個 123 次（B2 是 30 次）；單一 agent 的 context 最高 966k。Sonnet 5.5 預設 1M window，要到約 967K 才 compact，所以沒有任何東西會擋住 context 長大。
+- 撐大 context 的是 agent 自己讀進來的內容：`Read` 佔工具輸出字元的 71%，brief 中位數只有 2.5k 字元。冷啟基線約 100k（CLAUDE.md 匯入鏈），每一回合都要重讀。
+- subagent 的 prompt cache 預設 5 分鐘 TTL，主線在訂閱方案下是 1 小時。10-05 起 subagent 有 198 次單一 Bash 呼叫阻塞超過 5 分鐘（多半是 `until …; do sleep N; done` 在等 CI、mutation 或實驗），每次都讓幾十萬 token 的快取整份重寫。
+
+對應的設定與判準：
+
+- **compact 視窗**：tier-b1／b2 的 frontmatter 設 `autoCompactWindow: 300000`（試點）。選 300k 而不是 200k：模擬顯示 200k 的 compact 次數是 300k 的 2.7 倍，任務中途失去細節的風險較高。回退條件：一週後量測，若 B1 或 B2 的 `DONE_WITH_CONCERNS`／`BLOCKED` 比例或 review 打回率明顯上升，或每個完成 task 的總 token 沒有下降，就移除該 tier 的這一行。
+- **快取 TTL**：只有 tier-b1 設 `experimental.cacheTtl: 1h`。1h 的寫入單價是 2 倍（5m 是 1.25 倍），只有在長時間等待之後還要繼續的 agent 才划算：試算 10-05 起 tier-b1 開 1h 約省 $250，但 senior-reviewer 開 1h 反而多花約 $60，B2 也是淨增。所以不用全域的 `subagentPromptCacheTtl`。動用 usage credits 時，平台會忽略 frontmatter 的 1h。
+- **等待紀律**：優先用 `run_in_background` 加完成通知；需要輪詢時，所有 agent 單次阻塞等待都不超過 270 秒（回來一次只付一次快取讀取，約是重寫成本的 1/12）。tier-b1 也一樣，因為動用 usage credits 時平台會把它的 1h 降成 5m，而 agent 無從判斷；B1 的 1h 保護的是無法切段的單一長指令。完整 CI、mutation 與長實驗留給主線的整合節點，不寫進 implement brief。
+- **切片上限**：一個 task 要能在約 250k context 內做完（見 mao-plan 的 Size Tasks）。brief 用原文寫目標、驗收條件與約束，其他內容給指標，按需載入。
+- **併發**：每個 session 最多 3 個，`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=3` 管 Agent tool，`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=3` 管 Workflow，兩者分開計數。
+- **還沒採用**：`omitClaudeMd` 可拿掉每回合約 50～60k 的基線，但 agent 會看不到全域與專案的 AGENTS.md；使用者裁定等這輪的量測結果出來再評估。`maxTurns` 不設，因為撞到上限時會回傳 partial，可能停在 red→green 中途。
 
 ### D 層的判準：有沒有快速的驗證迴路
 
@@ -71,8 +88,8 @@ Fable 比 Opus 貴 2.5 倍且貴在 output。但**把這個當主判準會做出
 ## Rules
 
 - **mao-execute pipeline**: implement 依任務性質選 B1 或 B2（plan 標記 architecture-level / high-uncertainty 的升 A）；spec-review / code-review 走 B2，安全 / 認證 / 資料完整性相關的升 A。
-- **mao-review reviewer dispatch**: default B2（Workflow：`model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"`）。High-risk changes (security, auth, data integrity) → A（omit `model` + `effort:'high'`）。
-- **Plugin agents** (`agents/`, invoked as `eng-flow:<name>`): tier-b1=B1, tier-b2=B2, tier-c=C。B、C 層在 Agent tool 路徑上唯一能帶 effort 的方式；Workflow `agent()` 直接寫 `model` + `effort` 即可，不需要它們。
+- **mao-review reviewer dispatch**: default B2（Workflow：`agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"`）。High-risk changes (security, auth, data integrity) → A（omit `model` + `effort:'high'`）。
+- **Plugin agents** (`agents/`, invoked as `eng-flow:<name>`): tier-b1=B1, tier-b2=B2, tier-c=C。B、C 層在 Agent tool 路徑上唯一能帶 effort 的方式；Workflow `agent()` 自 2026-10-16 起也用 `opts.agentType` 指名它們，讓 compact 視窗、快取 TTL 與本文的讀檔／等待紀律在兩條路徑都生效，同時照舊明寫 `model` + `effort`（tier 配對不依賴 agentType 怎麼解析）。
 - **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=A, root-cause-debugger=A, implementer=B2（其定義就是「依明確 spec 落地」）, mechanical-scanner=C；另有同名覆蓋內建版的 `Explore`（Haiku 5.5／medium，2026-10-09）。These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
 - **Effort 寫在哪**：Workflow `agent()` 用 `opts.effort`；agent 定義檔（plugin `agents/*.md` 或 `~/.claude/agents/*.md`）用 frontmatter `effort:`；Agent tool 本身帶不了。每一層都明寫（C 層自 Haiku 5.5 起也支援 effort）——session 有自己的 effortLevel，omit 會讓 stage 悄悄繼承它、失去分層的意義。
 - **Draft stage dispatch**: mao-brainstorm 2.5 與 mao-plan Draft Stage 走 D（`model:"fable"`），一次，之後不再出現。Fable 不可用時由主線自己走完該階段並在交付時講一句，**不要為此停下來問使用者**——它是加速器不是必要條件。

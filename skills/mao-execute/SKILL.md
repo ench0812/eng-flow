@@ -9,7 +9,7 @@ description: Subagent 驅動執行。有 plan 需要逐 task 實作時使用。�
 If you are executing a specific task with defined inputs and expected outputs (dispatched via Agent tool OR a Workflow agent()), do NOT author a nested Workflow — nesting is not allowed. Run implement → spec-review → code-review sequentially via Agent tool instead.
 </SUBAGENT-STOP>
 
-One fresh subagent per task. Two-stage review after each: spec compliance first, then code quality. Continuous execution — do not pause between tasks; this binds within a single turn / a single Workflow run. A completion condition that spans turns is the user's `/goal` (see mao-plan's Execution Handoff). Provide full task text to subagents — never make them read plan files.
+One fresh subagent per task. Two-stage review after each: spec compliance first, then code quality. Continuous execution — do not pause between tasks; this binds within a single turn / a single Workflow run. A completion condition that spans turns is the user's `/goal` (see mao-plan's Execution Handoff). Put what the agent must not get wrong in the brief verbatim — the task's goal, acceptance criteria, and binding constraints — and give everything else as pointers (plan/spec path + section anchor, file path + symbol) that the agent opens only when a step needs it. Never paste the whole plan, and never tell the agent to read the whole plan; every request re-sends the agent's full context, so each extra page costs on every turn (2026-10-16: B1 agents averaged 123 requests with context up to 966k, driven by what they read, not by the ~2.5k-char briefs).
 
 ## Process
 
@@ -40,11 +40,15 @@ Model + effort routing (shared rules: `references/model-routing.md` — model an
 
 | Stage | Tier | Dispatch |
 |-------|------|----------|
-| implement — 複雜商業邏輯 / 演算法 / 跨模組互動 | **B1** | `model:"sonnet"` + `effort:'xhigh'` |
-| implement — spec 明確、只是落地 | **B2** | `model:"sonnet"` + `effort:'medium'` |
-| spec-review / code-review | **B2** | `model:"sonnet"` + `effort:'medium'` |
+| implement — 複雜商業邏輯 / 演算法 / 跨模組互動 | **B1** | `agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'` |
+| implement — spec 明確、只是落地 | **B2** | `agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` |
+| spec-review / code-review | **B2** | `agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` |
 | 任何 architecture-level / high-uncertainty / 安全相關的 stage | **A** | omit `model`（inherits session）+ `effort:'high'` |
-| 樣板、config、migration、文件這類機械高量 stage | **C** | `model:"haiku"` + `effort:'low'` |
+| 樣板、config、migration、文件這類機械高量 stage | **C** | `agentType:'eng-flow:tier-c'` + `model:"haiku"` + `effort:'low'` |
+
+`agentType` makes Workflow stages run the same tier agent the Agent-tool fallback uses, so its frontmatter (compact window, prompt-cache TTL) and body (context and waiting discipline) apply on both paths; `model` + `effort` stay written explicitly so the tier pairing never depends on how a stage resolves its definition.
+
+Long verification stays with the orchestrator: never put the full suite, full CI, mutation runs, or long experiments into an implement brief. They run at the final integration review (below), in the background. An implementer that cannot bound its targeted scope names the full verification it needs in `concerns`, and the integration gate does not pass until the orchestrator has run it on the same commit.
 
 Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand-tuning its effort. Never omit `effort`, tier C included (Claude Haiku 5.5 supports effort, so an omitted one inherits the session level too) — an omitted effort silently inherits the session level and the layering stops meaning anything.
 
@@ -52,7 +56,7 @@ Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand
 
 ## Parallel vs Sequential
 
-**Parallel** (via `pipeline()`/`parallel()`): tasks with independent files AND independent type/interface contracts. Use `isolation:'worktree'` when parallel agents write files or commit in the same working tree; every stage of that task (implement, spec-review, code-review, re-dispatches) works in the same task worktree — pass its path to each — and the task's whole branch is integrated after review passes. Workflow manages concurrency natively (cap 16, excess queued) — no manual cap needed.
+**Parallel** (via `pipeline()`/`parallel()`): tasks with independent files AND independent type/interface contracts. Use `isolation:'worktree'` when parallel agents write files or commit in the same working tree; every stage of that task (implement, spec-review, code-review, re-dispatches) works in the same task worktree — pass its path to each — and the task's whole branch is integrated after review passes. Concurrency is capped at 3 per session on both paths, enforced by the platform through `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=3` (Agent tool) and `CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=3` (Workflow; excess calls queue). The two limits count separately, so the orchestrator doesn't dispatch extra Agent-tool work while its own Workflow run is active. This binds the orchestrator only: a stage agent that runs the pipeline itself per `<SUBAGENT-STOP>` still dispatches its implement → spec-review → code-review via the Agent tool, one stage at a time. With more than 3 ready tasks, dispatch in priority order and refill as each one completes.
 
 **Must be sequential:** tasks sharing files, database migrations, dependency chains, or where task B's spec depends on task A's output types/interfaces.
 

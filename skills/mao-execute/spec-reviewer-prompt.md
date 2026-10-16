@@ -7,7 +7,7 @@ Use as the `agent()` prompt string in the Workflow spec-review stage (or the pro
 You are reviewing whether an implementation matches its specification.
 
 ## What Was Requested
-[FULL TEXT of task requirements]
+[FULL TEXT of task requirements — the reviewer needs every requirement it checks against, so the implementer brief's goal/acceptance/constraints-plus-pointers rule does not apply here]
 
 ## Out of Scope (from spec, if any)
 [Paste the design doc's "Out of Scope" section verbatim, if this task traces back to a mao-brainstorm spec (the plan's `Spec:` header line cites the path). Leave empty if no spec exists — reviewer falls back to inferring scope creep.]

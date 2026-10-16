@@ -61,7 +61,7 @@ bash <plugin>/scripts/codex-review.sh --severity required --doc <scratchpad>/iss
 
 處置完成後才更新看板欄位、才進 `mao-plan`（需要拆解時）或直接 `mao-execute`。
 
-一批 issue 同時領取時，各張的 intake 共議與需要的 codex-decide 一開始就在背景並行跑，不要延到輪到那張時才逐張做；intake 閘本身保留（處置完才開工）。codex 依序或並行，以實測記憶體決定（Windows 看 commit 使用率 `PercentCommittedBytesInUse`，不是可用實體記憶體）。
+一批 issue 同時領取時，各張的 intake 共議與需要的 codex-decide 一開始就在背景並行跑，不要延到輪到那張時才逐張做；intake 閘本身保留（處置完才開工）。codex 依序或並行，以實測記憶體決定（Windows 看 commit 使用率 `PercentCommittedBytesInUse`，不是可用實體記憶體）。各張的實作 agent 則受每個 session 3 個的併發上限約束（`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=3`，見 mao-execute 的 Parallel vs Sequential）：超過 3 張就緒時，依優先序先開前 3 張，有一張完成才補開下一張。
 
 ## 三種「沒問成」要分開處置
 

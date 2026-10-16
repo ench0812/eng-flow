@@ -5,9 +5,9 @@ description: 任務分解 + 實作計劃撰寫。有 spec 需要拆成可執行�
 
 # Task Breakdown & Plan Writing
 
-Write comprehensive implementation plans assuming the engineer has zero codebase context. Every step must contain actual code — no placeholders.
+Write implementation plans assuming the engineer has zero codebase context. Every step must be concrete: key interfaces, signatures, and non-obvious logic as actual code; everything else as the exact behavior to produce, the verification command, and its expected result — no placeholders.
 
-**Length calibration:** Match the plan's length to what it needs. The code blocks *are* the specification — keep them complete and literal. The prose around them is not: no per-task architecture recap, no restating in words what a code block already shows, no closing summary. State each fact once, in the task that owns it.
+**Length calibration:** Match the plan's length to what it needs. Code blocks are specification where they appear — keep them literal — but write code only where prose would leave room to get it wrong (interfaces other tasks consume, tricky logic, exact test assertions); routine code the implementer can derive from a precise behavior plus a failing test does not need to be pre-written, because every line of a task is re-read on every turn of the agent that executes it. No per-task architecture recap, no restating in words what a code block already shows, no closing summary. State each fact once, in the task that owns it.
 
 ## Plan Document Format
 
@@ -35,7 +35,7 @@ Each task:
 
 - [ ] **Step 1: Write failing test**
 ```language
-// complete test code here
+// the test's exact assertions (full code when expected values or setup are non-obvious)
 ```
 
 - [ ] **Step 2: Run test, verify it fails**
@@ -44,7 +44,7 @@ Expected: FAIL with "specific message"
 
 - [ ] **Step 3: Write minimal implementation**
 ```language
-// complete implementation code here
+// key signatures and non-obvious logic as code; otherwise the exact behavior to implement
 ```
 
 - [ ] **Step 4: Run test, verify it passes**
@@ -89,7 +89,7 @@ Agent(
 
 **你（Opus）接手後做三件事，順序不可調**：
 1. **先審骨架再補程式碼**——切片邊界錯了的話，補進去的程式碼全部要重寫。用 `## Planning Process` 的判準檢查：每一片寫不寫得出「誰送什麼 → 誰收到什麼 → 哪裡看得到結果」？有沒有哪片要等另一片才驗得起來（那條界線就切錯了）？
-2. **補完每個 task 的完整測試碼與實作碼**，遵守 `## No Placeholders — Ever`。骨架裡的檔案路徑與簽章是你的起點，不是不可改的定案——發現它引用了不存在的檔或簽章就改掉並記一句。
+2. **補完每個 task 的關鍵程式碼與驗收條件**（介面、簽章、非顯而易見的邏輯與測試斷言寫成程式碼，其餘寫成精確的行為描述、驗證指令與預期結果），遵守 `## No Placeholders — Ever`。骨架裡的檔案路徑與簽章是你的起點，不是不可改的定案——發現它引用了不存在的檔或簽章就改掉並記一句。
 3. **存檔後才進 Codex Co-Design Loop**。那個 loop 是 Opus 與 codex 兩方，Fable 不在裡面。
 
 **兩個硬限制**（詳見 `references/model-routing.md`）：Agent tool 沒有 `effort` 參數，所以這次派工的 effort 繼承 session；Fable 5.1 在 ZDR 組織不可用，會回 400。
@@ -141,7 +141,7 @@ Build complete feature paths, not horizontal layers.
 | L | 5-8 | Multi-component — consider splitting |
 | XL | 8+ | **Must split further** |
 
-**Break down further when:** >2 hours of work, can't describe acceptance in ≤3 bullets, touches 2+ independent subsystems, title contains "and".
+**Break down further when:** >2 hours of work, can't describe acceptance in ≤3 bullets, touches 2+ independent subsystems, title contains "and", or the task would not fit in one agent's ~250k-token context (the code it must read, edit and test, plus command output). That last limit is hard: an agent that runs into compaction mid-task loses detail, and every turn re-sends its whole context (2026-10-16: B1 agents reached 966k context and averaged 123 requests each).
 
 **plan／spec 本身的大小也要控制**：一個功能一份大 spec 會隨裁定累積而膨脹——
 實例是一份 spec 長到千行、裁定累積到 D1~D16，**後期裁定還推翻前期段落**，讀者要自己分辨哪些還有效；
@@ -156,9 +156,9 @@ Build complete feature paths, not horizontal layers.
 These are plan failures:
 - "TBD", "TODO", "implement later"
 - "Add appropriate error handling"
-- "Write tests for the above" (without actual test code)
-- "Similar to Task N" (repeat the code)
-- Steps describing what to do without showing how
+- "Write tests for the above" (without the exact assertions or expected results)
+- "Similar to Task N" (state what differs concretely)
+- Steps describing what to do without a verifiable result — each step needs code or an exact behavior plus the command that proves it
 
 ## Fog Rule
 
