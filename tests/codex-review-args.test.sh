@@ -259,8 +259,8 @@ else echo "FAIL [exec 參數缺 -c features.memories=false]"; fail=$((fail+1)); 
 CH="$STUB/codexhome"; mkdir -p "$CH"
 printf 'notify = ["x.exe"]\n[other]\nsandbox = "wrong"\n[windows]\nsandbox = "elevated"\n[mcp_servers.node_repl]\ncommand = "x"\n' > "$CH/config.toml"
 CODEX_HOME="$CH" check_e2e "隔離使用者 config" 0 "無重大補充" "RATE_LIMITED"
-if grep -qx -- "--ignore-user-config" "$STUB/args.txt" 2>/dev/null; then pass=$((pass+1))
-else echo "FAIL [exec 參數缺 --ignore-user-config]"; fail=$((fail+1)); fi
+if grep -qx -- "--ignore-user-config" "$STUB/args.txt" 2>/dev/null && awk 'p=="--disable" && $0=="plugins"{f=1} {p=$0} END{exit !f}' "$STUB/args.txt"; then pass=$((pass+1))
+else echo "FAIL [exec 參數缺 --ignore-user-config 或 --disable plugins]"; fail=$((fail+1)); fi
 if grep -qx 'windows.sandbox="elevated"' "$STUB/args.txt" 2>/dev/null && ! grep -q 'wrong' "$STUB/args.txt"; then pass=$((pass+1))
 else echo "FAIL [windows.sandbox 未從 [windows] 段原值帶回]"; fail=$((fail+1)); fi
 # TOML 行尾註解(段落標頭與值後面都有):第一版 awk 會讀不到段落或把值讀成 elevated#chosen
@@ -697,6 +697,8 @@ ok "resume: 用 exec resume 子指令"   has "^resume$" "$(cat "$ARGV")"
 ok "resume: 必帶 read-only sandbox"  has "^sandbox_mode=read-only$" "$(cat "$ARGV")"
 ok "resume: 必帶 memories off"       has "^features.memories=false$" "$(cat "$ARGV")"
 ok "resume: 必帶 --ignore-user-config" has "^--ignore-user-config$" "$(cat "$ARGV")"
+ok "resume: 必帶 --disable plugins"  has "^--disable$" "$(cat "$ARGV")"
+ok "resume: --disable 後接 plugins"  test "$(awk 'p=="--disable" && $0=="plugins"{n++} {p=$0} END{print n+0}' "$ARGV")" -eq 1
 ok "resume: codex 子程序拿到不存在的 LOCALAPPDATA" laa_overridden 1
 ok "resume: 送 delta 不送全文"       test "$(printf '%s' "$O_R" | sed -n 's/.*delta \([0-9][0-9]*\)\/\([0-9][0-9]*\) 字元.*/\1 \2/p' | awk '{print ($1<$2)?"y":"n"}')" = "y"
 

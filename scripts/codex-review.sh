@@ -1062,7 +1062,13 @@ USER_WIN_SANDBOX="$(awk '
     if (v ~ /^[A-Za-z0-9_-]+$/) print v
     exit
   }' "$CODEX_CFG" 2>/dev/null)"
-ISOLATE_ARGS=(--ignore-user-config)
+# --disable plugins(2026-10-17): codex-cli 0.162.1 的 --ignore-user-config 只忽略 config.toml,
+# 擋不住 ~/.codex/plugins/cache/ 下桌面版安裝的遠端 app plugin 自帶的 MCP(實例 firecrawl:每次
+# codex exec 都啟動並認證失敗,stderr 出現 rmcp::transport::worker ... mcp.firecrawl.dev)。
+# 對照實驗(照本腳本隔離參數、read-only sandbox、讀探針檔)重複兩次: 基準組 firecrawl/rmcp 各 1 行,
+# --disable plugins 組 0 行且 shell 正常。--disable remote_plugin、--disable apps 實測無效,勿用。
+# exec 與 exec resume 都接受 --disable。
+ISOLATE_ARGS=(--ignore-user-config --disable plugins)
 [ -n "$USER_WIN_SANDBOX" ] && ISOLATE_ARGS+=(-c "windows.sandbox=\"$USER_WIN_SANDBOX\"")
 
 # 只給 codex 子程序一個【不存在】的 LOCALAPPDATA(2026-10-14,--ignore-user-config 管不到這條):

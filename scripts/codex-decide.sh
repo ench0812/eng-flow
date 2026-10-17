@@ -148,7 +148,9 @@ USER_WIN_SANDBOX="$(awk '
     if (v ~ /^[A-Za-z0-9_-]+$/) print v
     exit
   }' "$CODEX_CFG" 2>/dev/null)"
-ISOLATE_ARGS=(--ignore-user-config)
+# --disable plugins: 理由同 codex-review.sh(--ignore-user-config 擋不住桌面版裝在 ~/.codex/plugins/cache
+# 的遠端 app plugin 自帶 MCP,如 firecrawl 每次啟動並認證失敗;2026-10-17 實測關掉後 0 行且 shell 正常)。
+ISOLATE_ARGS=(--ignore-user-config --disable plugins)
 [ -n "$USER_WIN_SANDBOX" ] && ISOLATE_ARGS+=(-c "windows.sandbox=\"$USER_WIN_SANDBOX\"")
 # 只給 codex 子程序一個【不存在】的 LOCALAPPDATA: 理由同 codex-review.sh 的 NO_LOCALAPPDATA
 # (0.162.1 的 sandbox setup refresh 會走訪 %LOCALAPPDATA%\OpenAI\Codex\runtimes 整棵樹,桌面版常駐的

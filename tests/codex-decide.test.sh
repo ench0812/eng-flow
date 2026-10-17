@@ -135,6 +135,7 @@ models() { awk 'p=="-m"{print} {p=$0}' "$T/calls.log" | tr '\n' ' ' | sed 's/ $/
 efforts() { grep -o 'model_reasoning_effort=.*' "$T/calls.log" | sed 's/model_reasoning_effort=//' | tr '\n' ' ' | sed 's/ $//'; }
 memflags() { grep -cx 'features.memories=false' "$T/calls.log"; }
 isoflags() { grep -cx -- '--ignore-user-config' "$T/calls.log"; }
+disflags() { awk 'p=="--disable" && $0=="plugins"{n++} {p=$0} END{print n+0}' "$T/calls.log"; }
 # LOCALAPPDATA 覆寫(2026-10-14): 0.162.1 的 sandbox setup refresh 會走訪
 # %LOCALAPPDATA%\OpenAI\Codex\runtimes,桌面版常駐的 helper 鎖住其中的 dll → os error 32 → shell 全失敗。
 # Windows 上子程序必須拿到一個【不存在】的 LOCALAPPDATA,【原本有沒有設都一樣】(沒設時上游會退回
@@ -169,6 +170,7 @@ for row in "critical gpt-6.1-sol medium" "required gpt-6.1-sol medium" "optional
   ok "$1: effort $3"                test "$(efforts)" = "$3"
   ok "$1: 帶 memories off"          test "$(memflags)" -eq 1
   ok "$1: 帶 --ignore-user-config"  test "$(isoflags)" -eq 1
+  ok "$1: 帶 --disable plugins"     test "$(disflags)" -eq 1
   ok "$1: windows.sandbox 原值帶回" test "$(grep -cx 'windows.sandbox="elevated"' "$T/calls.log")" -eq 1
   ok "$1: codex 子程序拿到不存在的 LOCALAPPDATA" laa_overridden 1
 done
@@ -182,6 +184,7 @@ for row in "required gpt-6.1-sol gpt-6-luna high" "optional gpt-6-luna gpt-6-ast
   ok "$1 退回: 退路 effort $4"              test "$(efforts | awk '{print $2}')" = "$4"
   ok "$1 退回: 兩次都帶 memories off"       test "$(memflags)" -eq 2
   ok "$1 退回: 兩次都帶 --ignore-user-config" test "$(isoflags)" -eq 2
+  ok "$1 退回: 兩次都帶 --disable plugins"    test "$(disflags)" -eq 2
   ok "$1 退回: 兩次都覆寫 LOCALAPPDATA"       laa_overridden 2
 done
 
