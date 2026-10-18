@@ -84,6 +84,7 @@ build_base() {
 Workflow: `agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'`; Agent tool: `subagent_type:"eng-flow:tier-b2"`.
 Object form: { agentType: 'eng-flow:tier-c', model: 'haiku', effort: 'low' }
 Reversed order: { effort: 'medium', model: 'sonnet', agentType: 'eng-flow:tier-b2' }
+JSON keys: {"subagent_type": "eng-flow:tier-b1", "model": "sonnet", "effort": "xhigh"} and {"effort": "medium", "model": "sonnet", "subagent_type": "eng-flow:tier-b2"}
 Counter-example: writing `model:"sonnet"` directly inherits the session effort. <!-- check-plugin: allow dispatch -->
 Mixed line: `agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` in Workflow; for high risk use A = omit `model` + `effort:'high'`
 Other model: Agent(subagent_type: "general-purpose", model: "fable")
@@ -179,6 +180,18 @@ new_tree d2b; printf '%s\n' "agent({ agentType:'tier-c', model:'haiku', effort:'
 fix "dispatch-prefix：agentType 缺前綴（references/）" 1 '^references/demo\.md:[0-9]+: \[dispatch-prefix\]'
 new_tree d2c; printf '%s\n' "Use subagent_type \"tier-b2\" to dispatch." >> "$T/agents/tier-b2.md"
 fix "dispatch-prefix：agents/ 底下、無冒號寫法" 1 '^agents/tier-b2\.md:[0-9]+: \[dispatch-prefix\]'
+
+# S6：JSON 的鍵是帶引號的（"subagent_type": "tier-b1"）。基底裡已放兩行正確的 JSON 寫法（必須通過）。
+new_tree j1; printf '%s\n' '{"subagent_type": "tier-b1", "model": "sonnet"}' >> "$T/skills/demo/SKILL.md"
+fix "JSON 鍵帶引號：缺 eng-flow: 前綴、model 又沒走 tier agent" 1 '^skills/demo/SKILL\.md:[0-9]+: \[dispatch-prefix\]' '^skills/demo/SKILL\.md:[0-9]+: \[dispatch-model\].*sonnet'
+new_tree j2; printf '%s\n' '{"subagent_type": "general-purpose", "model": "haiku"}' >> "$T/references/demo.md"
+fix "JSON 鍵帶引號：model 直接寫 haiku → dispatch-model" 1 '^references/demo\.md:[0-9]+: \[dispatch-model\].*haiku'
+new_tree j3; printf '%s\n' '{"subagent_type": "eng-flow:tier-b1", "model": "haiku", "effort": "xhigh"}' >> "$T/skills/demo/SKILL.md"
+fix "JSON 鍵帶引號：tier-b1 的 model 寫成 haiku → tier-line" 1 '^skills/demo/SKILL\.md:[0-9]+: \[tier-line\].*tier-b1.*model.*haiku'
+new_tree j4; printf '%s\n' '{"effort": "high", "subagent_type": "eng-flow:tier-b2", "model": "sonnet"}' >> "$T/skills/demo/SKILL.md"
+fix "JSON 鍵帶引號：tier-b2 的 effort 寫成 high（順序顛倒）→ tier-line" 1 '^skills/demo/SKILL\.md:[0-9]+: \[tier-line\].*tier-b2.*effort.*high'
+new_tree j5; printf '%s\n' '{"subagent_type": "tier-b1", "model": "sonnet"} <!-- check-plugin: allow dispatch -->' >> "$T/skills/demo/SKILL.md"
+fix "JSON 鍵帶引號：同行放行標記有效" 0 '^check-plugin: OK'
 
 # =====================================================================
 echo "== 規則 3：hooks.json =="

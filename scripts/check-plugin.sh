@@ -308,7 +308,7 @@ function firstword(s) { if (match(s, /[a-z][a-z0-9]*/)) return substr(s, RSTART,
 function bad(rule, msg) { printf "%s:%d: [%s] %s\n", FILENAME, FNR, rule, msg }
 function valof(t,   v) {
   v = t
-  sub(/^[a-zA-Z_]+[ ]*[:=][ ]*["'`]?/, "", v)
+  sub(/^[a-zA-Z_]+["'`]?[ ]*[:=][ ]*["'`]?/, "", v)        # 鍵名後可能跟一個引號（JSON："model": "sonnet"）
   sub(/[._-]+$/, "", v)
   return v
 }
@@ -338,10 +338,12 @@ BEGIN {
     names = names (i > 1 ? "|" : "") f[1]
     bylabel[toupper(substr(f[1], 6))] = f[1]          # tier-b1 -> B1
   }
-  keyt = "((agentType|subagent_type)[ ]*[:=][ ]*[\"'`]?)?"
-  tokre = "(" keyt "eng-flow:tier-[a-z0-9]+|model[ ]*[:=][ ]*[\"'`]?[a-z0-9._-]+|effort[ ]*[:=][ ]*[\"'`]?[a-z0-9._-]+)"
+  # 鍵名後面都允許跟一個引號（[\"'`]?）：JSON 寫法 {"subagent_type": "tier-b1", "model": "sonnet"} 的鍵是帶引號的，
+  # 少了這個，整段 lint 對 JSON 形式的派工範例完全沒有反應（掃描不到和通過外表一樣）
+  keyt = "((agentType|subagent_type)[\"'`]?[ ]*[:=][ ]*[\"'`]?)?"
+  tokre = "(" keyt "eng-flow:tier-[a-z0-9]+|model[\"'`]?[ ]*[:=][ ]*[\"'`]?[a-z0-9._-]+|effort[\"'`]?[ ]*[:=][ ]*[\"'`]?[a-z0-9._-]+)"
   gapre = "^[ `'\"+,{}()]*$"                            # 同一組寫法的 token 之間只允許這些字元
-  prefre = "(subagent_type|agentType)[ ]*[:=]?[ ]*[\"'`]?(" names ")([^a-z0-9-]|$)"
+  prefre = "(subagent_type|agentType)[\"'`]?[ ]*[:=]?[ ]*[\"'`]?(" names ")([^a-z0-9-]|$)"
 }
 {
   line = $0
