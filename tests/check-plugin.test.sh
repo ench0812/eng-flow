@@ -260,8 +260,9 @@ bump_commit() { # bump_commit <version>
   sed -i "s/\"version\":\"[^\"]*\"/\"version\":\"$1\"/" "$W/.claude-plugin/plugin.json"
   git -C "$W" add -A; git -C "$W" commit -q -m "bump $1"
 }
+PP_ARGS=(origin url-ignored)      # git 呼叫 pre-push 時的 $1（remote 名稱）與 $2（url）；測試可暫時改掉
 pp() { # pp <stdin 的多行，以 | 分隔> → 對 $W 跑 --pre-push
-  OUT="$(printf '%s\n' "$1" | tr '|' '\n' | bash "$CHECK" --root "$W" --pre-push 2>&1)"; RC=$?
+  OUT="$(printf '%s\n' "$1" | tr '|' '\n' | bash "$CHECK" --root "$W" --pre-push ${PP_ARGS[@]+"${PP_ARGS[@]}"} 2>&1)"; RC=$?
 }
 reset_to() { git -C "$W" reset -q --hard "$1"; }
 
@@ -325,6 +326,28 @@ git -C "$W" update-ref -d refs/remotes/origin/main
 pp "refs/heads/feature $CB refs/heads/main $Z"
 check_out "新建遠端 main、求不出比較基準 → fail-closed（exit 2）" 2 'merge-base|比較基準' 'git fetch'
 git -C "$W" update-ref refs/remotes/origin/main "$SAVED_ORIGIN_MAIN"
+
+# S4：新建遠端 main 的比較基準是 refs/remotes/<git 傳進來的 remote 名稱>/main，不是寫死的 origin
+git -C "$W" remote rename origin up >/dev/null 2>&1
+PP_ARGS=(up url-ignored)
+reset_to "$REMOTE_TIP"; edit_commit skills/demo/SKILL.md; CN2="$(head_sha)"
+pp "refs/heads/feature $CN2 refs/heads/main $Z"
+check_out "remote 改名為 up、新建 main、沒 bump → 以 refs/remotes/up/main 求基準並拒絕" 1 '\[version-bump\]'
+PP_ARGS=(origin url-ignored)
+pp "refs/heads/feature $CN2 refs/heads/main $Z"
+check_out "傳進來的名稱是 origin 但 origin/main 已不存在 → fail-closed，訊息指名 refs/remotes/origin/main" 2 'refs/remotes/origin/main' 'git fetch origin'
+PP_ARGS=()
+pp "refs/heads/feature $CN2 refs/heads/main $Z"
+check_out "沒收到 remote 名稱、又要新建 main → fail-closed，不猜 origin" 2 'remote 名稱'
+pp "refs/heads/feature $CN2 refs/heads/feature $Z"
+check_out "沒收到 remote 名稱、但不需要比較基準（推非 main）→ 照常檢查並放行" 0 '^check-plugin: OK'
+PP_ARGS=(a b c)
+pp "refs/heads/feature $CN2 refs/heads/feature $Z"
+check_out "多於 2 個位置參數 → exit 2" 2 '不認得的參數'
+PP_ARGS=(origin url-ignored)
+git -C "$W" remote rename up origin >/dev/null 2>&1
+run_check "$BASE" extra-positional
+check_out "非 --pre-push 模式不接受位置參數 → exit 2" 2 '不認得的參數'
 
 pp "refs/heads/feature $CN refs/heads/feature $Z|refs/heads/main $CN refs/heads/main $REMOTE_TIP"
 check_out "多個 ref：違規的 main 排第二 → 拒絕" 1 '\[version-bump\]'
@@ -427,6 +450,14 @@ git -C "$W" checkout -q main
 OUT="$(git -C "$W" push origin side:main 2>&1)"; RC=$?
 if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q 'prose-path' && [ "$(git -C "$tmp/e2e/remote.git" rev-parse main)" = "$E1" ]; then ok
 else ng "e2e：git push origin side:main 的壞 commit 被擋下且遠端沒變" "rc=$RC；輸出：$(printf '%s' "$OUT" | head -c 400)"; fi
+# hook 要把 git 傳的 remote 名稱（$1）轉交給腳本：推到一個空的、名叫 other 的 remote（新建 main），
+# 比較基準就該找 refs/remotes/other/main（沒有 → 擋下並指名它）；寫死 origin 的實作會找到 origin/main 而放行
+git -C "$W" branch -q -D side
+git init -q --bare -b main "$tmp/e2e/other.git"
+git -C "$W" remote add other "$tmp/e2e/other.git"
+OUT="$(git -C "$W" push other main 2>&1)"; RC=$?
+if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q 'refs/remotes/other/main' && [ -z "$(git -C "$tmp/e2e/other.git" for-each-ref refs/heads)" ]; then ok
+else ng "e2e：hook 轉交 remote 名稱（push 到 other 的新 main 以 refs/remotes/other/main 求基準）" "rc=$RC；輸出：$(printf '%s' "$OUT" | head -c 400)"; fi
 
 # ---------------------------------------------------------------------
 echo

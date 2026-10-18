@@ -94,7 +94,9 @@ Use it to decide *before* adding any lossy compression layer whether one is wort
 
 `scripts/check-plugin.sh` — read-only consistency check of the plugin itself: tier model/effort across `agents/` and the docs that repeat them, dispatch wording, `hooks/hooks.json` against `hooks/` and `tests/`, and plugin-relative paths in prose. Exit `0` clean, `1` problems found (`file:line` plus rule id), `2` environment insufficient (fail-closed, never a skip). Every rule has a failing fixture in `tests/check-plugin.test.sh`.
 
-`--pre-push` adds a version gate: a push to `main` that touches plugin content (`skills/`, `hooks/`, `agents/`, `scripts/`, `references/`, `templates/`, `.claude-plugin/`) without bumping `version` in `.claude-plugin/plugin.json` is refused. Enable it once per clone with `git config core.hooksPath githooks` (worktrees share the setting).
+`--pre-push` checks what is being pushed, not the working tree: every pushed commit (any ref, including `side:main`) is extracted with `git archive` and run through the same checks, so uncommitted edits can neither hide a bad commit nor block a clean one. It also adds a version gate: a push to `main` that touches plugin content (`skills/`, `hooks/`, `agents/`, `scripts/`, `references/`, `templates/`, `.claude-plugin/`) must raise `version` in `.claude-plugin/plugin.json` strictly (unchanged or lower is refused). Enable it once per clone with `git config core.hooksPath githooks` (worktrees share the setting).
+
+When the hook refuses because it cannot judge (exit `2`, e.g. it cannot find the comparison base for a brand-new remote `main`), the legitimate way out is `git fetch <remote>` and push again. Do not use `--no-verify`.
 
 A deliberate counter-example in the docs takes a same-line marker, `<!-- check-plugin: allow dispatch -->` or `<!-- check-plugin: allow path -->`.
 

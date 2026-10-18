@@ -82,15 +82,23 @@ emit() { # emit <awk 輸出的多行 findings>（格式已是 file:line: [rule] 
 }
 usage() { sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed '$d;s/^# \{0,1\}//' >&2; }
 
+POS=()      # --pre-push 的位置參數：git 傳給 pre-push hook 的 <remote 名稱> <url>
 while [ $# -gt 0 ]; do
   case "$1" in
     --pre-push) MODE=prepush ;;
     --root) shift; [ $# -gt 0 ] || die_env "--root 需要一個目錄"; ROOT="$(cd "$1" 2>/dev/null && pwd)" || die_env "--root 目錄不存在：$1" ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "check-plugin: 不認得的參數：$1（用 --help 看用法）" >&2; exit 2 ;;
+    -*) echo "check-plugin: 不認得的參數：$1（用 --help 看用法）" >&2; exit 2 ;;
+    *) POS+=("$1") ;;
   esac
   shift
 done
+# 位置參數只有 --pre-push 吃，且最多兩個（remote 名稱、url）；其餘一律當不認得的參數
+if [ "${#POS[@]}" -gt 0 ] && { [ "$MODE" != prepush ] || [ "${#POS[@]}" -gt 2 ]; }; then
+  echo "check-plugin: 不認得的參數：${POS[0]}（位置參數只給 --pre-push 用，格式是 <remote 名稱> [<url>]；用 --help 看用法）" >&2
+  exit 2
+fi
+REMOTE="${POS[0]:-}"        # url（POS[1]）不使用
 
 # ---------- 環境（fail-closed）----------
 command -v "$JQ" >/dev/null 2>&1 || die_env "找不到 jq（$JQ）；hooks.json 與版本比對都靠它，沒有就不能宣稱通過"
@@ -214,9 +222,14 @@ pre_push() {
     check_pushed_tree "$lsha"                                # 不論推到哪個 ref，檢查對象都是被推送的 commit
     [ "$rref" = "refs/heads/main" ] || continue              # 版本核對只管 main
     if is_zero "$rsha"; then
-      # 新建遠端 main：以 refs/remotes/origin/main 求比較基準，求不出來就拒絕（不猜）
-      if ! base="$("$GIT" merge-base "$lsha" refs/remotes/origin/main 2>/dev/null)" || [ -z "$base" ]; then
-        soft_env "refs/heads/main 是新建的遠端 ref，但求不出 $lsha 對 refs/remotes/origin/main 的比較基準；先 git fetch origin 再推"
+      # 新建遠端 main：以 refs/remotes/<remote>/main 求比較基準（remote 名稱由 git 傳給 hook 的 $1，
+      # 不假設叫 origin），求不出來就拒絕（不猜）
+      if [ -z "$REMOTE" ]; then
+        soft_env "refs/heads/main 是新建的遠端 ref，需要比較基準，但沒收到 remote 名稱（git 的 pre-push 會把它放在 \$1，githooks/pre-push 會轉交）；無法判斷"
+        continue
+      fi
+      if ! base="$("$GIT" merge-base "$lsha" "refs/remotes/$REMOTE/main" 2>/dev/null)" || [ -z "$base" ]; then
+        soft_env "refs/heads/main 是新建的遠端 ref，但求不出 $lsha 對 refs/remotes/$REMOTE/main 的比較基準；先 git fetch $REMOTE 再推"
         continue
       fi
     else
