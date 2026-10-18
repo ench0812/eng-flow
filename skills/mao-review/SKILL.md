@@ -22,6 +22,8 @@ Approve when the change **definitely improves overall code health**, even if it 
 - Error paths handled (not just happy path)?
 - Tests cover the change adequately?
 - Tests avoid tautological assertions (expected values from an independent source, not recomputed by the same logic)?
+- Does the RED evidence show an expected/actual mismatch on the fixed behavior (not just "it failed")?
+- If the change adds a checker or gate tool: does it have known-bad controls for each error class it claims to catch, and does it fail closed when input is missing?
 - New tests at the lowest pyramid level that expresses them — no duplicate coverage of what an existing/lower-level test already asserts, no obsolete tests left behind?
 
 **跨服務接縫（改動觸及兩個以上服務/程序時必查）**
@@ -94,7 +96,7 @@ Deprecated: `Important`/`Minor` — do not reintroduce these words when editing 
 2. **Review tests first** — tests reveal intent and coverage
 3. **Review implementation** — walk through each file with 5 axes
 4. **Categorize findings** — label severity on every comment
-5. **Verify verification** — what tests ran? Build pass? Manual check? Evidence scales with the checkpoint: per-task/dev-loop changes need targeted results (affected test file(s) + directly dependent modules, output pasted) — do not demand a full-suite run per commit. Full-suite evidence is required only at integration points (final integration review, merge/push/release gate).
+5. **Verify verification** — what tests ran? Build pass? Manual check? Did the RED output show an expected/actual mismatch on the fixed behavior? Evidence scales with the checkpoint: per-task/dev-loop changes need targeted results (affected test file(s) + directly dependent modules, output pasted) — do not demand a full-suite run per commit. Full-suite evidence is required only at integration points (final integration review, merge/push/release gate).
 
 ## Closing Cross-Check (Codex second opinion)
 

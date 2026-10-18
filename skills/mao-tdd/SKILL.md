@@ -23,6 +23,7 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 - Test describes the desired behavior
 - Run it — it MUST fail
 - If it passes, your test is wrong or the feature already exists
+- "It went red" is not evidence: an exception, import error, empty result or compile failure all show red. Only an expected/actual mismatch whose difference is the behavior being fixed proves the test measures it. Quote that expected/actual in the RED evidence, not just the assertion line.
 ```
 
 ### 2. GREEN — Write minimal code to pass
@@ -52,10 +53,14 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 
 **No Tautological Assertions:** Expected values must come from an independent source of truth — a known-good literal, a worked example, or the spec. Never recompute the expected value using the same logic as the code under test — it then passes by construction and proves nothing.
 
+**Known-bad controls for checkers:** When writing a check, comparison or gate tool (verification script, diff script, CI gate), plant one known-bad input for every class of error it claims to catch and confirm it is reported. Missing required input must be refused or answered "cannot determine" — never "match" or "pass".
+
+**Probes must need the new artifact:** A verification probe has to depend on behavior only the new build can produce, not on identity fields the old build also reports (the same version string or SHA).
+
 ## The Prove-It Pattern (Bug Fixes)
 
 1. Write a test that reproduces the bug (RED)
-2. Verify it fails for the right reason
+2. Verify it fails for the right reason (expected/actual mismatch on the bug itself) and keep an excerpt of that failing-before output for the final report
 3. Fix the bug (GREEN)
 4. Verify the targeted scope passes — the new test plus affected test file(s); the full suite runs at the integration/ship gate
 
