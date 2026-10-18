@@ -398,7 +398,19 @@ SAVED_ORIGIN_MAIN="$(git -C "$W" rev-parse refs/remotes/origin/main)"
 git -C "$W" update-ref -d refs/remotes/origin/main
 pp "refs/heads/feature $CB refs/heads/main $Z"
 check_out "新建遠端 main、求不出比較基準 → fail-closed（exit 2）" 2 'merge-base|比較基準' 'git fetch'
+# 首次發佈到空的遠端：沒有任何比較基準，fetch 也變不出 refs/remotes/<remote>/main。具名宣告
+# CHECK_PLUGIN_INITIAL_PUSH=1 只在「遠端沒有 main、本機也沒有 tracking ref」時生效，只跳過版本核對。
+export CHECK_PLUGIN_INITIAL_PUSH=1
+pp "refs/heads/feature $CB refs/heads/main $Z"
+check_out "首次發佈（宣告、沒有 tracking ref）→ 放行並說明跳過版本核對" 0 '首次發佈'
+reset_to "$CB"; printf '%s\n' 'Run `scripts/ghost-initial.sh` first.' >> "$W/skills/demo/SKILL.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "bad path"; CBAD="$(head_sha)"
+pp "refs/heads/feature $CBAD refs/heads/main $Z"
+check_out "首次發佈的宣告不豁免檢查 1～4（壞路徑照樣拒絕）" 1 '\[prose-path\]'
 git -C "$W" update-ref refs/remotes/origin/main "$SAVED_ORIGIN_MAIN"
+pp "refs/heads/feature $CN refs/heads/main $Z"
+check_out "有 tracking ref 時首次發佈的宣告無效（沒 bump 照樣拒絕）" 1 '\[version-bump\]'
+unset CHECK_PLUGIN_INITIAL_PUSH
 
 # S4：新建遠端 main 的比較基準是 refs/remotes/<git 傳進來的 remote 名稱>/main，不是寫死的 origin
 git -C "$W" remote rename origin up >/dev/null 2>&1

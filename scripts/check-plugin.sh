@@ -44,6 +44,8 @@
 #      --pre-push 的檢查 1～4 對象是「被推送的 commit」：每個 sha 用 read-tree + checkout-index（不套用 export-ignore）解到暫存目錄，再以本腳本
 #      --root 檢查那棵樹，輸出以 <sha7>: 開頭。不看工作樹——工作樹與被推送的內容常常不同（git push
 #      origin side:main、修正只留在工作樹、工作樹有未提交的半成品），看工作樹會在兩個方向都出錯。
+#      只檢查每次推送的 tip，不逐一檢查中間的 commit：claude plugin update 安裝的是 tip，中間的 commit
+#      送不到任何已安裝的副本（版本核對另外比對整段範圍的淨差異）。
 #      檢查 1～4 與版本核對都只套用在 refs/heads/main 的推送；其他 ref（tag、feature branch）與刪除 ref
 #      一律放行（marketplace 走預設分支發佈，且禁用 --no-verify，誤擋沒有正當出路）。
 set -u
@@ -239,7 +241,14 @@ pre_push() {
         continue
       fi
       if ! base="$("$GIT" merge-base "$lsha" "refs/remotes/$REMOTE/main" 2>/dev/null)" || [ -z "$base" ]; then
-        soft_env "refs/heads/main 是新建的遠端 ref，但求不出 $lsha 對 refs/remotes/$REMOTE/main 的比較基準；先 git fetch $REMOTE 再推"
+        # 首次發佈到空的遠端：沒有任何比較基準，fetch 也變不出 tracking ref，而 --no-verify 被禁用。
+        # 具名宣告只在「本機也沒有 refs/remotes/<remote>/main」時生效（有 tracking ref 卻求不出基準是
+        # 歷史不相關，照樣拒絕），而且只跳過版本核對：檢查 1～4 在上面已經對被推送的 commit 跑過。
+        if [ "${CHECK_PLUGIN_INITIAL_PUSH:-0}" = 1 ] && ! "$GIT" rev-parse -q --verify "refs/remotes/$REMOTE/main" >/dev/null 2>&1; then
+          echo "check-plugin: 首次發佈到 $REMOTE（CHECK_PLUGIN_INITIAL_PUSH=1）：遠端沒有 main，跳過版本核對"
+          continue
+        fi
+        soft_env "refs/heads/main 是新建的遠端 ref，但求不出 $lsha 對 refs/remotes/$REMOTE/main 的比較基準；先 git fetch $REMOTE 再推（遠端還沒有任何 main 的首次發佈，改用 CHECK_PLUGIN_INITIAL_PUSH=1）"
         continue
       fi
     else
