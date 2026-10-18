@@ -413,7 +413,7 @@ PP_ARGS=()
 pp "refs/heads/feature $CN2 refs/heads/main $Z"
 check_out "沒收到 remote 名稱、又要新建 main → fail-closed，不猜 origin" 2 'remote 名稱'
 pp "refs/heads/feature $CN2 refs/heads/feature $Z"
-check_out "沒收到 remote 名稱、但不需要比較基準（推非 main）→ 照常檢查並放行" 0 '^check-plugin: OK'
+check_out "沒收到 remote 名稱、但不需要比較基準（推非 main）→ 放行" 0 '^check-plugin: OK'
 PP_ARGS=(a b c)
 pp "refs/heads/feature $CN2 refs/heads/feature $Z"
 check_out "多於 2 個位置參數 → exit 2" 2 '不認得的參數'
@@ -439,10 +439,6 @@ check_out "刪除非 main → 略過" 0 '^check-plugin: OK'
 
 pp "refs/heads/main $CN refs/heads/main deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 check_out "remote sha 本機不存在 → fail-closed（exit 2）並提示 git fetch" 2 'git fetch' 'deadbeef'
-pp "refs/heads/feature $CN refs/heads/feature $REMOTE_TIP"
-check_out "推非 main 分支 → 不做版本核對" 0 '^check-plugin: OK'
-pp "refs/tags/v9 $CN refs/tags/v9 $Z"
-check_out "推 tag → 不做版本核對" 0 '^check-plugin: OK'
 pp "refs/heads/main $CN"
 check_out "stdin 格式不是 4 欄 → fail-closed（exit 2）" 2 '4 欄'
 
@@ -490,10 +486,16 @@ git -C "$W" checkout -q main                                         # HEAD 回�
 pp "refs/heads/side $CSIDE refs/heads/main $REMOTE_TIP"
 check_out "推非 HEAD 的壞 commit 到 main → 拒絕" 1 "^${CSIDE:0:7}:README\\.md:[0-9]+: \\[prose-path\\].*ghost2"
 
-# (c) 推非 main 的 ref 也看被推送的 commit
+# (c) 非 main 的 ref 一律放行、什麼都不檢查：內容故意放壞路徑（CBAD，同時沒 bump），
+# 對照組是同一個 commit 推 main 會被拒絕（(a) 已涵蓋）。
 reset_to "$REMOTE_TIP"
 pp "refs/heads/feature $CBAD refs/heads/feature $Z"
-check_out "推壞 commit 到非 main 的新分支 → 拒絕" 1 "^${CBAD:0:7}:.*\\[prose-path\\]"
+check_out "推壞 commit 到非 main 的新分支（feature branch）→ 放行" 0 '^check-plugin: OK'
+git -C "$W" tag -a vbad -m bad "$CBAD"; TBAD="$(git -C "$W" rev-parse vbad)"
+pp "refs/tags/vbad $TBAD refs/tags/vbad $Z"
+check_out "推指向壞 commit 的 annotated tag → 放行" 0 '^check-plugin: OK'
+pp "refs/tags/vlight $CBAD refs/tags/vlight $Z"
+check_out "推指向壞 commit 的 lightweight tag → 放行" 0 '^check-plugin: OK'
 
 # (d) 反方向：工作樹有未提交的半成品，被推送的 commit 是乾淨的
 reset_to "$REMOTE_TIP"; edit_commit tests/x-probe.txt; CCLEAN="$(head_sha)"
@@ -579,14 +581,6 @@ check_out "stdin 是 CRLF（兩行）：第一行乾淨的 commit → 放行" 0 
 OUT="$(printf 'refs/heads/main %s refs/heads/main %s\r\n(delete) %s refs/heads/gone %s\r\n' "$CN" "$REMOTE_TIP" "$Z" "$REMOTE_TIP" | bash "$CHECK" --root "$W" --pre-push origin 2>&1)"; RC=$?
 check_out "stdin 是 CRLF（兩行）：第一行沒 bump 的 commit → 拒絕" 1 '\[version-bump\]'
 
-# tag：annotated tag 的 sha 是 tag 物件，要剝到 commit 再檢查
-reset_to "$REMOTE_TIP"
-git -C "$W" tag -a vgood -m good "$CA"
-pp "refs/tags/vgood $(git -C "$W" rev-parse vgood) refs/tags/vgood $Z"
-check_out "推 annotated tag（指向乾淨 commit）→ 放行" 0 '^check-plugin: OK'
-git -C "$W" tag -a vbad -m bad "$CBAD"; TBAD="$(git -C "$W" rev-parse vbad)"     # 輸出的前綴是被推送的 sha（tag 物件），不是它指向的 commit
-pp "refs/tags/vbad $TBAD refs/tags/vbad $Z"
-check_out "推 annotated tag（指向壞 commit）→ 拒絕" 1 "^${TBAD:0:7}:.*\\[prose-path\\]"
 
 # ---- e2e：真的 git push，經過 githooks/pre-push 轉交 stdin 與離開碼 ----
 mk_repo e2e 1

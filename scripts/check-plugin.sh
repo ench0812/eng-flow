@@ -44,7 +44,8 @@
 #      --pre-push 的檢查 1～4 對象是「被推送的 commit」：每個 sha 用 read-tree + checkout-index（不套用 export-ignore）解到暫存目錄，再以本腳本
 #      --root 檢查那棵樹，輸出以 <sha7>: 開頭。不看工作樹——工作樹與被推送的內容常常不同（git push
 #      origin side:main、修正只留在工作樹、工作樹有未提交的半成品），看工作樹會在兩個方向都出錯。
-#      推非 main 的 ref（分支、tag）也一樣檢查被推送的 commit；刪除 ref 沒有東西可檢查。
+#      檢查 1～4 與版本核對都只套用在 refs/heads/main 的推送；其他 ref（tag、feature branch）與刪除 ref
+#      一律放行（marketplace 走預設分支發佈，且禁用 --no-verify，誤擋沒有正當出路）。
 set -u
 export LC_ALL=C
 
@@ -122,7 +123,7 @@ finish() { # 依 ENV_ERR／FOUND 收尾並離開
   fi
   if [ "$MODE" = prepush ]; then
     if [ "$PUSHED_CHECKED" -eq 0 ]; then
-      echo "check-plugin: OK（沒有需要檢查的 commit：stdin 沒有 ref，或只有刪除）"
+      echo "check-plugin: OK（沒有需要檢查的 commit：stdin 沒有 ref，或只有刪除、非 main 的 ref）"
     else
       echo "check-plugin: OK（被推送的 commit 的 tier 一致性、派工寫法、hooks、散文路徑、版本核對）"
     fi
@@ -168,6 +169,7 @@ ver_cmp() {
 }
 
 PUSHED_CHECKED=0
+PP_TD=""
 CHECKED=" "
 # 把 sha 的內容展開到暫存目錄，再以本腳本 --root 檢查那棵樹（檢查 1～4）。
 # 為什麼不直接檢查工作樹：被推送的內容常常不是工作樹——git push origin side:main、壞內容已 commit
@@ -182,13 +184,14 @@ check_pushed_tree() { # check_pushed_tree <sha>
   CHECKED="$CHECKED$sha "
   PUSHED_CHECKED=$((PUSHED_CHECKED + 1))
   td="$(mktemp -d 2>/dev/null)" && [ -n "$td" ] && [ -d "$td" ] || { soft_env "mktemp -d 失敗，無法檢查 $s7 的內容"; return 0; }
+  PP_TD="$td"                                              # 被信號中斷時由 pre_push 的 trap 清掉
   if ! mkdir "$td/tree" \
      || ! GIT_INDEX_FILE="$td/idx" "$GIT" read-tree "$sha" 2>/dev/null \
      || ! GIT_INDEX_FILE="$td/idx" "$GIT" checkout-index -a --prefix="$td/tree/" 2>/dev/null; then
     rm -rf "${td:?}"; soft_env "展開 $s7 的內容失敗（git read-tree／checkout-index），無法檢查被推送的內容"; return 0
   fi
   out="$(bash "$SELF" --root "$td/tree" 2>&1 </dev/null)"; rc=$?
-  rm -rf "${td:?}"
+  rm -rf "${td:?}"; PP_TD=""
   case "$rc" in
     0) ;;
     1)
@@ -209,6 +212,10 @@ check_pushed_tree() { # check_pushed_tree <sha>
 
 pre_push() {
   local input line lref lsha rref rsha extra base changed bv lv shown
+  # 每條路徑都在函式內清暫存目錄；這個 trap 是給「展開到一半被 Ctrl-C／TERM 中斷」留的後路。
+  trap '[ -z "${PP_TD:-}" ] || rm -rf "${PP_TD:?}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   input="$(cat)" || { soft_env "讀不到 pre-push 的 stdin"; return 0; }
   while IFS= read -r line; do
     line="${line%$'\r'}"
@@ -217,10 +224,13 @@ pre_push() {
     read -r lref lsha rref rsha extra <<<"$line"
     if [ -z "$rsha" ] || [ -n "$extra" ]; then soft_env "pre-push stdin 的格式不是 4 欄：$line"; continue; fi
     if is_zero "$lsha"; then continue; fi                    # 刪除 ref：沒有被推送的內容
+    # 只管 refs/heads/main，其他 ref（tag、feature branch）一律放行、什麼都不檢查：marketplace 走預設分支發佈，
+    # tag 與 feature branch 不會送到已安裝的副本；而 AGENTS.md 禁用 --no-verify，被誤擋（例如在舊 commit 上
+    # 建新 tag）時沒有正當出路，所以不為它們設閘。
+    [ "$rref" = "refs/heads/main" ] || continue
     if ! is_sha "$lsha"; then soft_env "local sha 不是合法的 sha：$lsha"; continue; fi
     if ! "$GIT" cat-file -e "${lsha}^{commit}" 2>/dev/null; then soft_env "local sha $lsha 不在本機物件庫"; continue; fi
-    check_pushed_tree "$lsha"                                # 不論推到哪個 ref，檢查對象都是被推送的 commit
-    [ "$rref" = "refs/heads/main" ] || continue              # 版本核對只管 main
+    check_pushed_tree "$lsha"                                # 檢查對象是被推送的 commit，不是工作樹
     if is_zero "$rsha"; then
       # 新建遠端 main：以 refs/remotes/<remote>/main 求比較基準（remote 名稱由 git 傳給 hook 的 $1，
       # 不假設叫 origin），求不出來就拒絕（不猜）
