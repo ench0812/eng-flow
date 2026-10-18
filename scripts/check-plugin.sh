@@ -141,6 +141,26 @@ plugin_version() { # plugin_version <commit> → 印 version；讀不到就回�
   printf '%s' "$v"
 }
 
+# ver_cmp <a> <b> → 設 VCMP 為 -1／0／1（a 小於／等於／大於 b）；格式不是純數字點分就回 1。
+# 不用 sort -V（BSD sort 沒有，且對 1.0.2 與 1.0.10 以外的怪格式行為不一）；逐段當十進位整數比，缺的段當 0，
+# 所以 1.0.2 與 1.0.2.0 相等。每段限 9 位數以內，避免 bash 算術溢位後比出錯誤的大小。
+ver_cmp() {
+  local a="$1" b="$2" i n x y
+  local -a va vb
+  [[ "$a" =~ ^[0-9]+([.][0-9]+)*$ ]] && [[ "$b" =~ ^[0-9]+([.][0-9]+)*$ ]] || return 1
+  IFS=. read -r -a va <<<"$a"
+  IFS=. read -r -a vb <<<"$b"
+  n=${#va[@]}; [ "${#vb[@]}" -le "$n" ] || n=${#vb[@]}
+  for ((i = 0; i < n; i++)); do
+    x="${va[i]:-0}"; y="${vb[i]:-0}"
+    if [ "${#x}" -gt 9 ] || [ "${#y}" -gt 9 ]; then return 1; fi
+    x=$((10#$x)); y=$((10#$y))
+    if [ "$x" -gt "$y" ]; then VCMP=1; return 0; fi
+    if [ "$x" -lt "$y" ]; then VCMP=-1; return 0; fi
+  done
+  VCMP=0
+}
+
 PUSHED_CHECKED=0
 CHECKED=" "
 # 把 sha 的內容用 git archive 解到暫存目錄，再以本腳本 --root 檢查那棵樹（檢查 1～4）。
@@ -214,9 +234,16 @@ pre_push() {
     [ -n "$changed" ] || continue                            # 只動 tests/、README.md、.gitattributes 等：不需要 bump
     if ! bv="$(plugin_version "$base")"; then soft_env "讀不到 $base 的 .claude-plugin/plugin.json version"; continue; fi
     if ! lv="$(plugin_version "$lsha")"; then soft_env "讀不到 $lsha 的 .claude-plugin/plugin.json version"; continue; fi
+    # version 要「嚴格變大」：不變或降版都拒絕（降版會讓已安裝新版的人拿不到更新）
+    shown="$(printf '%s\n' "$changed" | head -n 5 | tr '\n' ' ')"
     if [ "$bv" = "$lv" ]; then
-      shown="$(printf '%s\n' "$changed" | head -n 5 | tr '\n' ' ')"
       bad .claude-plugin/plugin.json 1 version-bump "推往 refs/heads/main 的 ${base:0:7}..${lsha:0:7} 動到 plugin 內容（$(printf '%s\n' "$changed" | grep -c '') 個檔：${shown% }），但 version 仍是 $lv，請先 bump"
+    elif ! ver_cmp "$lv" "$bv"; then
+      soft_env "version 從「$bv」變成「$lv」，格式不是純數字點分（如 1.2.3），無法判斷是不是變大；改成純數字點分，或先 bump 成可比較的版本"
+    elif [ "$VCMP" -lt 0 ]; then
+      bad .claude-plugin/plugin.json 1 version-bump "推往 refs/heads/main 的 ${base:0:7}..${lsha:0:7} 動到 plugin 內容（${shown% }），但 version 從 $bv 降到 $lv，必須嚴格變大"
+    elif [ "$VCMP" -eq 0 ]; then
+      bad .claude-plugin/plugin.json 1 version-bump "推往 refs/heads/main 的 ${base:0:7}..${lsha:0:7} 動到 plugin 內容（${shown% }），但 version 從 $bv 變成 $lv，數值相同，必須嚴格變大"
     fi
   done <<<"$input"
 }

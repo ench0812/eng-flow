@@ -286,6 +286,23 @@ pp "refs/heads/main $C4 refs/heads/main $C3"
 check_out "上次已 bump、這次只改不 bump → 拒絕" 1 '\[version-bump\].*1\.0\.2'
 REMOTE_TIP="$C3"
 
+# S3：version 要「嚴格變大」，不只是「不同」。遠端目前是 1.0.2。
+reset_to "$REMOTE_TIP"; bump_commit 1.0.1; edit_commit skills/demo/SKILL.md; CV="$(head_sha)"
+pp "refs/heads/main $CV refs/heads/main $REMOTE_TIP"
+check_out "降版（1.0.2 → 1.0.1）→ 拒絕" 1 '\[version-bump\].*從 1\.0\.2 降到 1\.0\.1'
+reset_to "$REMOTE_TIP"; bump_commit 1.0.2.0; edit_commit skills/demo/SKILL.md; CV="$(head_sha)"
+pp "refs/heads/main $CV refs/heads/main $REMOTE_TIP"
+check_out "字串不同但數值相同（1.0.2 → 1.0.2.0）→ 拒絕" 1 '\[version-bump\].*數值相同'
+reset_to "$REMOTE_TIP"; bump_commit 1.0.10; edit_commit skills/demo/SKILL.md; CV="$(head_sha)"
+pp "refs/heads/main $CV refs/heads/main $REMOTE_TIP"
+check_out "逐段比數字：1.0.2 → 1.0.10 → 放行（字串比較會判成變小）" 0 '^check-plugin: OK'
+reset_to "$REMOTE_TIP"; bump_commit 1.0.2.1; edit_commit skills/demo/SKILL.md; CV="$(head_sha)"
+pp "refs/heads/main $CV refs/heads/main $REMOTE_TIP"
+check_out "多一段（1.0.2 → 1.0.2.1）→ 放行" 0 '^check-plugin: OK'
+reset_to "$REMOTE_TIP"; bump_commit 1.1.0-rc1; edit_commit skills/demo/SKILL.md; CV="$(head_sha)"
+pp "refs/heads/main $CV refs/heads/main $REMOTE_TIP"
+check_out "版本格式不是純數字點分、字串又不同 → fail-closed（exit 2），不猜大小" 2 '1\.1\.0-rc1'
+
 for p in tests/x-probe.txt README.md .gitattributes githooks/x-probe.txt dist/x-probe.txt; do
   reset_to "$REMOTE_TIP"; edit_commit "$p"; C="$(head_sha)"
   pp "refs/heads/main $C refs/heads/main $REMOTE_TIP"
