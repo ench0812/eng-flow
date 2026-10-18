@@ -50,7 +50,7 @@ It is always OK to say "this is too hard for me." STOP and escalate when:
 Return an object matching:
 - `status`: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED
 - `summary`: what you implemented (or attempted)
-- `testResults`: test output / pass-fail
+- `testResults`: test output / pass-fail; for new behavior or a bug fix, also an excerpt of the RED-stage failure showing expected vs actual (an unrelated exception, import or compile error is not RED evidence). If the task adds a checker, comparison script or gate, also show it firing on one known-bad input per error class it claims to catch, and refusing or reporting inconclusive when a required input is missing
 - `filesChanged`: string[]
 - `concerns`: string (required if DONE_WITH_CONCERNS — what you are unsure about, or what turned out to fall outside the task's intent)
 - `blockerDescription`: string (required if BLOCKED or NEEDS_CONTEXT — what is missing)

@@ -20,6 +20,7 @@ Also check:
 - Each file has one clear responsibility
 - No large files created or significantly grown
 - Implementation follows the plan's file structure
+- A new checker, comparison script or gate has a known-bad control for each error class it claims to catch, and fails closed (refuses or reports inconclusive) on missing input
 
 ## Severity Labels
 - **Critical:** Blocks merge (security, data loss, broken functionality)
@@ -43,4 +44,4 @@ Also check:
 Return an object matching:
 - `verdict`: APPROVE | REQUEST_CHANGES — REQUEST_CHANGES only when at least one issue is Critical or Required
 - `strengths`: string (what's done well)
-- `issues`: [{ severity: Critical|Required|Optional|Nit, file, line, description }] — every issue you found, including low-severity ones and ones you are unsure about (say so in `description`). Label severity instead of leaving a finding out — apart from formatting a linter would catch, the DON'T list above limits what blocks the merge, not what gets reported, and the orchestrator triages the list. A non-empty list with verdict APPROVE is normal.
+- `issues`: [{ severity: Critical|Required|Optional|Nit, file, line, description }] — every issue you found, including low-severity ones and ones you are unsure about (say so in `description`). Label severity instead of leaving a finding out — apart from formatting a linter would catch, the DON'T list above limits what blocks the merge, not what gets reported, and the orchestrator triages the list. A Critical or Required `description` must state the execution path that triggers the problem, or the evidence for it. A non-empty list with verdict APPROVE is normal.
