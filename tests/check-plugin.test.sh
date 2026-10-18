@@ -349,6 +349,7 @@ git -C "$W" remote rename up origin >/dev/null 2>&1
 run_check "$BASE" extra-positional
 check_out "非 --pre-push 模式不接受位置參數 → exit 2" 2 '不認得的參數'
 
+
 pp "refs/heads/feature $CN refs/heads/feature $Z|refs/heads/main $CN refs/heads/main $REMOTE_TIP"
 check_out "多個 ref：違規的 main 排第二 → 拒絕" 1 '\[version-bump\]'
 pp "refs/heads/main $CN refs/heads/main $REMOTE_TIP|refs/heads/feature $CN refs/heads/feature $Z"
@@ -428,6 +429,61 @@ pp "refs/heads/main $CCLEAN refs/heads/main $REMOTE_TIP"
 check_out "工作樹有未提交的壞路徑、被推送的 commit 乾淨 → 放行" 0 '^check-plugin: OK'
 git -C "$W" checkout -q -- README.md
 git -C "$W" branch -q -D side
+
+# S5：fail-closed 分支的負控組。每一條都是「無法判斷 → exit 2，不放行」；
+# 每條都先有一個同形狀、但條件正常的輸入通過（前面的測試已涵蓋：改 skill 同時 bump → 放行），
+# 才能說 exit 2 是被植入的條件造成的。
+reset_to "$REMOTE_TIP"
+pp "refs/heads/main $CN refs/heads/main $REMOTE_TIP extra-field"
+check_out "stdin 一行有 5 欄 → exit 2（不是 4 欄）" 2 '4 欄'
+pp "refs/heads/main zzzz refs/heads/main $REMOTE_TIP"
+check_out "local sha 格式不合法 → exit 2" 2 '不是合法的 sha'
+pp "refs/heads/main abc123 refs/heads/main $REMOTE_TIP"
+check_out "local sha 太短 → exit 2" 2 '不是合法的 sha'
+pp "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main $REMOTE_TIP"
+check_out "local sha 格式正確但不在本機物件庫 → exit 2" 2 '不在本機物件庫'
+
+# plugin.json 讀不到版本（不存在或不是合法 JSON），在被推送端與基準端各一組。內容必須有變動才會走到版本核對。
+reset_to "$REMOTE_TIP"; printf '{ bad' > "$W/.claude-plugin/plugin.json"; edit_commit skills/demo/SKILL.md; CPJ1="$(head_sha)"
+pp "refs/heads/main $CPJ1 refs/heads/main $REMOTE_TIP"
+check_out "被推送端 plugin.json 不是合法 JSON → exit 2" 2 "讀不到 $CPJ1 的"
+reset_to "$REMOTE_TIP"; git -C "$W" rm -q .claude-plugin/plugin.json; edit_commit skills/demo/SKILL.md; CPJ2="$(head_sha)"
+pp "refs/heads/main $CPJ2 refs/heads/main $REMOTE_TIP"
+check_out "被推送端沒有 plugin.json → exit 2" 2 "讀不到 $CPJ2 的"
+git -C "$W" checkout -q "$REMOTE_TIP" -- .claude-plugin/plugin.json; bump_commit 1.0.5; CPJ3="$(head_sha)"
+pp "refs/heads/main $CPJ3 refs/heads/main $CPJ2"
+check_out "基準端（遠端現況）沒有 plugin.json → exit 2" 2 "讀不到 $CPJ2 的"
+reset_to "$REMOTE_TIP"; printf '{ bad' > "$W/.claude-plugin/plugin.json"; git -C "$W" add -A; git -C "$W" commit -q -m "bad json"; CPJ4="$(head_sha)"
+git -C "$W" checkout -q "$REMOTE_TIP" -- .claude-plugin/plugin.json; bump_commit 1.0.6; CPJ5="$(head_sha)"
+pp "refs/heads/main $CPJ5 refs/heads/main $CPJ4"
+check_out "基準端 plugin.json 不是合法 JSON → exit 2" 2 "讀不到 $CPJ4 的"
+
+# git archive／tar 失敗：沒辦法取得被推送的內容就不能宣稱它通過檢查。對照組先證明同一輸入在 git 正常時放行。
+reset_to "$REMOTE_TIP"; edit_commit tests/x-probe.txt; CA="$(head_sha)"
+pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
+check_out "git archive 失敗的對照組：同一輸入 git 正常 → 放行" 0 '^check-plugin: OK'
+mk_failgit "$tmp/git-fail-archive" archive
+CHECK_PLUGIN_GIT="$tmp/git-fail-archive" pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
+check_out "git archive 失敗 → fail-closed（exit 2）" 2 'git archive'
+printf '#!/usr/bin/env bash\necho "tar: simulated failure" >&2\nexit 2\n' > "$tmp/tar-fail"; chmod +x "$tmp/tar-fail"
+CHECK_PLUGIN_TAR="$tmp/tar-fail" pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
+check_out "tar 解開失敗 → fail-closed（exit 2）" 2 '解開'
+CHECK_PLUGIN_TAR=tar-does-not-exist pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
+check_out "缺 tar → exit 2（環境不足）" 2 '環境不足.*tar'
+
+# 被推送的樹本身讓檢查「無法判斷」（這裡是掃描不到任何文件）：子檢查回 exit 2，外層也要回 2，不能吞成放行或當成一般問題
+reset_to "$REMOTE_TIP"; git -C "$W" rm -rq skills references agents; git -C "$W" commit -q -m "gut docs"; CG="$(head_sha)"
+pp "refs/heads/feature $CG refs/heads/feature $Z"
+check_out "被推送的樹掃描不到任何文件 → exit 2，輸出指名那個 commit" 2 "^${CG:0:7}:check-plugin: 環境不足" '無法判斷'
+
+# tag：annotated tag 的 sha 是 tag 物件，要剝到 commit 再檢查
+reset_to "$REMOTE_TIP"
+git -C "$W" tag -a vgood -m good "$CA"
+pp "refs/tags/vgood $(git -C "$W" rev-parse vgood) refs/tags/vgood $Z"
+check_out "推 annotated tag（指向乾淨 commit）→ 放行" 0 '^check-plugin: OK'
+git -C "$W" tag -a vbad -m bad "$CBAD"; TBAD="$(git -C "$W" rev-parse vbad)"     # 輸出的前綴是被推送的 sha（tag 物件），不是它指向的 commit
+pp "refs/tags/vbad $TBAD refs/tags/vbad $Z"
+check_out "推 annotated tag（指向壞 commit）→ 拒絕" 1 "^${TBAD:0:7}:.*\\[prose-path\\]"
 
 # ---- e2e：真的 git push，經過 githooks/pre-push 轉交 stdin 與離開碼 ----
 mk_repo e2e 1
