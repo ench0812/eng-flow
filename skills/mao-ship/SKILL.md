@@ -32,6 +32,14 @@ After verification passes, present these options:
 | **Keep as-is** | Not ready yet, will continue later |
 | **Discard** | Experiment that didn't work out |
 
+## Merging a PR
+
+A review or a green check is a verdict on one head commit. Bind the merge to it, then prove the merge landed:
+
+1. **Pin the head.** Record the head SHA the review and the gate ran on. If `gh pr view <n> --json headRefOid` no longer matches it, review the delta first. Confirm `baseRefName` is the intended target: the head guard does not catch a retargeted base.
+2. **Merge with the guard.** `gh pr merge <n> --match-head-commit <reviewed-sha>` plus the merge-method flag. A push that lands after the review makes the merge fail instead of shipping unreviewed code.
+3. **Read it back.** "Merge succeeded" is not proof: on a base that requires a merge queue, `gh pr merge` only enables auto-merge or enqueues the PR, and `--auto` never merges on the spot. Require `gh pr view <n> --json state -q .state` to print `MERGED`, then `git fetch` and `git merge-base --is-ancestor $(gh pr view <n> --json mergeCommit -q .mergeCommit.oid) origin/<base>` to exit 0. For a local merge pushed directly, ask the remote itself: `git ls-remote origin refs/heads/<base>` must print the local branch's SHA (a successful push also rewrites the local `origin/<base>`, so that ref proves nothing).
+
 ## Merge Conflict Resolution
 
 When a merge or rebase produces conflicts:
@@ -75,10 +83,12 @@ CONCERNS:
 
 ## Worktree Cleanup
 
-If working in a git worktree:
-1. Verify all changes are committed or intentionally discarded
-2. Return to main workspace
-3. Clean up worktree directory
+If working in a git worktree, list what removal would destroy before removing it. An empty `git diff` does not mean nothing is lost:
+1. **Uncommitted and ignored files.** `git -C <wt> status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none`. `git worktree remove` deletes ignored files (`!!` lines: `.env`, `settings.local.json`, local data) without warning. List their paths only, never print their contents, and confirm each has a copy elsewhere or can be regenerated.
+2. **Commits only this worktree can reach.** The worktree's HEAD and its reflog are deleted with it, so a commit made on a detached HEAD, or on a branch deleted since, loses its last reference. `git -C <wt> reflog --format=%H HEAD | git -C <wt> rev-list --stdin HEAD --not --branches --remotes --tags` counts as clean only when it exits 0, writes nothing to stderr, and prints nothing; any other result means unknown, not clean. Keep each listed commit with `git branch keep/<name> <sha>`.
+3. **Submodules.** Their git dirs live under the worktree's admin dir (`.git/worktrees/<name>/modules/`) and are deleted with it, local branches and any `keep/` branch included, and steps 1–2 cannot see inside them. For each path in `git -C <wt> submodule status --recursive`, run step 1 inside it; then `git -C <sm> fetch --all --prune` (its remote-tracking refs are deleted with it too, and a stale one on any remote proves nothing; if the fetch exits non-zero, stop), then `git -C <sm> reflog --format=%H HEAD | git -C <sm> rev-list --stdin HEAD --branches --not --remotes` with step 2's clean criteria: only a commit already on a remote counts as safe. Push what it lists, or stop and ask the user.
+4. **Locks.** A worktree marked `locked` in `git worktree list --porcelain` was locked on purpose. Find out why; do not force it.
+5. Return to the main workspace in a separate command, then `git worktree remove <wt>`. Use `--force` only when every item steps 1–3 listed is handled (copied elsewhere, regenerable, kept on a `keep/` branch in the main repo, or pushed) or the user confirmed the loss.
 
 ## Red Flags
 - Merging without running tests
@@ -86,3 +96,4 @@ If working in a git worktree:
 - Force-pushing to shared branches without user approval
 - Skipping the change summary
 - Leaving worktrees with uncommitted changes
+- Merging a PR without `--match-head-commit`, or reporting it merged without reading the state back
