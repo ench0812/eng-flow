@@ -40,6 +40,20 @@ STAMP_DIR="${TMPDIR:-/tmp}/claude-git-guard"
 ROOTS_FILE="$HOME/.claude/git-guard-roots"
 SCAN_MAXDEPTH=3
 
+# TMPDIR 轉成與 git 頂層相同的寫法（小寫、正斜線、x:/ 磁碟形式），整支只算一次。
+# Git Bash 的 TMPDIR 可能是磁碟寫法（/d/Temp）或掛載寫法（/tmp，實際掛在 D:/Temp），
+# git rev-parse 卻回 D:/Temp/...，不先轉換前綴永遠對不上（2026-10-18：mktemp 的 fixture
+# 全被誤報）。cygpath 是每次 hook 一個子行程、不是每個路徑一個，不違反下面的效能守則。
+# 轉完若是空字串或根目錄就整條不用：`""/*` 會匹配所有絕對路徑，等於什麼都不報（fail-open）。
+TMP_NORM=""
+if [ -n "${TMPDIR:-}" ]; then
+  command -v cygpath >/dev/null 2>&1 && TMP_NORM="$(cygpath -m "$TMPDIR" 2>/dev/null)"
+  [ -n "$TMP_NORM" ] || TMP_NORM="${TMPDIR//\\//}"
+  TMP_NORM="${TMP_NORM,,}"; TMP_NORM="${TMP_NORM%/}"
+  case "$TMP_NORM" in /[a-z]/*) TMP_NORM="${TMP_NORM:1:1}:${TMP_NORM:2}" ;; esac
+  case "$TMP_NORM" in ""|/|[a-z]:) TMP_NORM="" ;; esac
+fi
+
 JQ="$(command -v jq || true)"
 [ -z "$JQ" ] && exit 0
 command -v git >/dev/null 2>&1 || exit 0
@@ -80,9 +94,8 @@ is_temp_path() {
   case "$lp" in
     */appdata/local/temp/*|/tmp/*|*/scratchpad/*|*/.cache/*) return 0 ;;
   esac
-  if [ -n "${TMPDIR:-}" ]; then
-    local lt="${TMPDIR//\\//}"; lt="${lt,,}"; lt="${lt%/}"
-    case "$lp" in "$lt"/*) return 0 ;; esac
+  if [ -n "$TMP_NORM" ]; then
+    case "$lp" in "$TMP_NORM"/*) return 0 ;; esac
   fi
   return 1
 }

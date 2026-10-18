@@ -150,10 +150,43 @@ case "$out_noup" in *"可直接處理"*) ng "沒有上游不得落入可直接�
 echo "== 臨時目錄底下的 repo 不列入 =="
 # 這一條【刻意不設 GIT_GUARD_ALLOW_TEMP】——其餘案例都設了那個繞道，若不留一條在
 # 真實條件下驗，排除規則壞掉時整份測試仍會全綠（開關把它要保護的行為一起關掉）。
-# $NOUP 位於 mktemp -d 底下，本身又是「無上游且無備份」的最該報情境；它若靜默，
-# 就只可能是被臨時目錄規則擋下。
-out_temp="$(jq -cn --arg c "$NOUP" --arg s "s_temp" '{session_id:$s, cwd:$c}' | bash "$HOOK" 2>/dev/null)"
-if [ -z "$out_temp" ]; then ok "臨時目錄底下的 repo 一律不報"; else ng "臨時目錄底下的 repo 一律不報" "仍報出: $(printf '%s' "$out_temp" | head -c 80)"; fi
+# 舊版這裡直接對 $NOUP 跑，靠的是「mktemp 剛好落在寫死的臨時根底下」：TMPDIR 已被本檔
+# 改成 $SANDBOX/tmp，所以 TEMP 搬到 D:\Temp 之後（2026-10-05）它就恆紅。改成把 TMPDIR
+# 明確指到 sandbox 內的臨時根，兩種寫法各驗一次：Git Bash 的 TMPDIR 常是 MSYS 寫法
+# （/d/Temp），git rev-parse 回的卻是 D:/Temp/...，前綴比對沒正規化時永遠對不上
+# （2026-10-18 實際踩到）。標記檔也因此留在 sandbox 裡，不會寫進真實的 TMPDIR。
+TROOT="$SANDBOX/tmproot"; TREPO="$TROOT/repo"
+git init -q -b main "$TREPO"
+echo x > "$TREPO/x.txt"; git_q "$TREPO" add x.txt; git_q "$TREPO" commit -qm "local only"
+ttop="$(git -C "$TREPO" rev-parse --show-toplevel)"; ttop="${ttop,,}"
+case "$ttop" in
+  */appdata/local/temp/*|/tmp/*|*/scratchpad/*|*/.cache/*)
+    # fixture 落在寫死的臨時根底下時，不報可能來自那幾條樣式而非 TMPDIR 規則，沒有鑑別力。
+    ok "TMPDIR 規則（fixture 在寫死的臨時根底下，略過：$ttop）" ;;
+  *)
+    tq(){ jq -cn --arg c "$TREPO" --arg s "$2" '{session_id:$s, cwd:$c}' | TMPDIR="$1" bash "$HOOK" 2>/dev/null; }
+    # 對照組：TMPDIR 指到別處就必須報，證明下面的「不報」是 TMPDIR 規則造成的。
+    out_ctl="$(tq "$SANDBOX/tmp" s_td_ctl)"
+    if [ -n "$out_ctl" ]; then ok "對照組：TMPDIR 不涵蓋時照報"; else ng "對照組：TMPDIR 不涵蓋時照報" "沒有輸出，下面兩條沒有鑑別力"; fi
+    # 同一個目錄的每種寫法都要驗：mktemp 原樣（視環境是 /d/Temp 或 /tmp 掛載寫法）、
+    # mixed（D:/...）、cygpath -u、手組的磁碟寫法（/d/...）。只驗當下那一種，換台機器就漏。
+    forms=("$TROOT")
+    if command -v cygpath >/dev/null 2>&1; then
+      tm="$(cygpath -m "$TROOT")"
+      forms+=("$tm" "$(cygpath -u "$tm")" "/${tm:0:1}${tm:2}")
+    fi
+    for td in "${forms[@]}"; do
+      out_td="$(tq "$td" "s_td_${#td}_${td//[^a-zA-Z]/}")"
+      if [ -z "$out_td" ]; then ok "TMPDIR=$td 底下的 repo 不報"; else ng "TMPDIR=$td 底下的 repo 不報" "仍報出: $(printf '%s' "$out_td" | head -c 80)"; fi
+    done
+    # TMPDIR 是根目錄時，正規化後只剩 "" 或 "d:"，前綴比對會吞掉整顆磁碟而什麼都不報
+    # （fail-open）。Windows 上 cygpath -m / 回的是 Git 安裝目錄、觸發不到，要用磁碟根。
+    roots=("/"); [ -n "${tm:-}" ] && roots+=("${tm:0:2}/")
+    for td in "${roots[@]}"; do
+      out_root="$(tq "$td" "s_td_root_${td//[^a-zA-Z]/}")"
+      if [ -n "$out_root" ]; then ok "TMPDIR=$td 不得讓所有 repo 靜默"; else ng "TMPDIR=$td 不得讓所有 repo 靜默" "沒有輸出"; fi
+    done ;;
+esac
 
 echo "== 落後遠端（非 fast-forward）不得歸入可直接處理 =="
 # 這是「自動推」的安全邊界：ahead>0 但 behind>0 時 push 會被拒，整合方式是使用者的決定。
