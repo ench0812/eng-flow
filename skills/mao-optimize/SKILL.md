@@ -43,7 +43,7 @@ Before concluding, confirm each of these. Mark inapplicable items N/A; any other
 - Both sides run production settings; if only one side is tuned, you compared configurations, not implementations.
 - A result beyond the hardware limit is suspect: it may be a cache, a no-op, or a bug.
 - Errors are counted.
-- A/B runs alternate at least 5 times each; report the median and range. A gap smaller than the variance is no difference. If one run is too expensive for 5 alternations, downgrade to inconclusive or no difference and say why.
+- A/B runs alternate at least 5 times each; report the median and range. A gap smaller than the variance is no difference. If one run is too expensive for 5 alternations, the verdict is inconclusive: keep the runs you have and say why.
 - The micro result's share of the end-to-end time is known.
 - The work inside the timed region really executed (lazy or un-awaited code still yields a number).
 - Machine load and memory use during the measurement were checked.

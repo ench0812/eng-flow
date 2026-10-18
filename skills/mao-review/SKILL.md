@@ -82,7 +82,7 @@ Approve when the change **definitely improves overall code health**, even if it 
 | **Optional:** | Suggestion | Worth considering |
 | **FYI** | Informational | No action needed |
 
-A Critical/Required finding that cannot name its triggering path is downgraded to Optional and marked "unverified", not deleted.
+A Critical/Required finding that can name neither its triggering path nor direct evidence (a committed secret is evidence on its own) is downgraded to Optional and marked "unverified", not deleted. Auth, authorization, data-integrity and security findings are the exception: they keep their severity as "pending" until checked.
 
 Deprecated: `Important`/`Minor` — do not reintroduce these words when editing any reviewer prompt.
 
