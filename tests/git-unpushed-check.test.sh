@@ -15,10 +15,12 @@ command -v git >/dev/null 2>&1 || { echo "需要 git" >&2; exit 2; }
 SANDBOX="$(mktemp -d)"
 export TMPDIR="$SANDBOX/tmp"    # hook 的「已警告」標記寫這裡，測完即棄
 mkdir -p "$TMPDIR"
-trap 'rm -rf "$SANDBOX"' EXIT
+trap 'rm -rf "$SANDBOX"; [ -n "${TROOT:-}" ] && rm -rf "${TROOT:?}"' EXIT
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 ok(){ pass=$((pass+1)); printf '  PASS  %s\n' "$1"; }
+# 沒有鑑別力而沒跑的案例另計，不算進 PASS——否則「整組沒跑」和「整組通過」看起來一樣。
+sk(){ skip=$((skip+1)); printf '  SKIP  %s\n' "$1"; }
 ng(){ fail=$((fail+1)); printf '  FAIL  %s\n     %s\n' "$1" "$2"; }
 
 # fire <cwd> <session> -> hook stdout
@@ -152,41 +154,57 @@ echo "== 臨時目錄底下的 repo 不列入 =="
 # 真實條件下驗，排除規則壞掉時整份測試仍會全綠（開關把它要保護的行為一起關掉）。
 # 舊版這裡直接對 $NOUP 跑，靠的是「mktemp 剛好落在寫死的臨時根底下」：TMPDIR 已被本檔
 # 改成 $SANDBOX/tmp，所以 TEMP 搬到 D:\Temp 之後（2026-10-05）它就恆紅。改成把 TMPDIR
-# 明確指到 sandbox 內的臨時根，兩種寫法各驗一次：Git Bash 的 TMPDIR 常是 MSYS 寫法
-# （/d/Temp），git rev-parse 回的卻是 D:/Temp/...，前綴比對沒正規化時永遠對不上
-# （2026-10-18 實際踩到）。標記檔也因此留在 sandbox 裡，不會寫進真實的 TMPDIR。
-TROOT="$SANDBOX/tmproot"; TREPO="$TROOT/repo"
-git init -q -b main "$TREPO"
-echo x > "$TREPO/x.txt"; git_q "$TREPO" add x.txt; git_q "$TREPO" commit -qm "local only"
-ttop="$(git -C "$TREPO" rev-parse --show-toplevel)"; ttop="${ttop,,}"
-case "$ttop" in
-  */appdata/local/temp/*|/tmp/*|*/scratchpad/*|*/.cache/*)
-    # fixture 落在寫死的臨時根底下時，不報可能來自那幾條樣式而非 TMPDIR 規則，沒有鑑別力。
-    ok "TMPDIR 規則（fixture 在寫死的臨時根底下，略過：$ttop）" ;;
-  *)
-    tq(){ jq -cn --arg c "$TREPO" --arg s "$2" '{session_id:$s, cwd:$c}' | TMPDIR="$1" bash "$HOOK" 2>/dev/null; }
-    # 對照組：TMPDIR 指到別處就必須報，證明下面的「不報」是 TMPDIR 規則造成的。
-    out_ctl="$(tq "$SANDBOX/tmp" s_td_ctl)"
-    if [ -n "$out_ctl" ]; then ok "對照組：TMPDIR 不涵蓋時照報"; else ng "對照組：TMPDIR 不涵蓋時照報" "沒有輸出，下面兩條沒有鑑別力"; fi
-    # 同一個目錄的每種寫法都要驗：mktemp 原樣（視環境是 /d/Temp 或 /tmp 掛載寫法）、
-    # mixed（D:/...）、cygpath -u、手組的磁碟寫法（/d/...）。只驗當下那一種，換台機器就漏。
-    forms=("$TROOT")
-    if command -v cygpath >/dev/null 2>&1; then
-      tm="$(cygpath -m "$TROOT")"
-      forms+=("$tm" "$(cygpath -u "$tm")" "/${tm:0:1}${tm:2}")
-    fi
-    for td in "${forms[@]}"; do
-      out_td="$(tq "$td" "s_td_${#td}_${td//[^a-zA-Z]/}")"
-      if [ -z "$out_td" ]; then ok "TMPDIR=$td 底下的 repo 不報"; else ng "TMPDIR=$td 底下的 repo 不報" "仍報出: $(printf '%s' "$out_td" | head -c 80)"; fi
-    done
-    # TMPDIR 是根目錄時，正規化後只剩 "" 或 "d:"，前綴比對會吞掉整顆磁碟而什麼都不報
-    # （fail-open）。Windows 上 cygpath -m / 回的是 Git 安裝目錄、觸發不到，要用磁碟根。
-    roots=("/"); [ -n "${tm:-}" ] && roots+=("${tm:0:2}/")
-    for td in "${roots[@]}"; do
-      out_root="$(tq "$td" "s_td_root_${td//[^a-zA-Z]/}")"
-      if [ -n "$out_root" ]; then ok "TMPDIR=$td 不得讓所有 repo 靜默"; else ng "TMPDIR=$td 不得讓所有 repo 靜默" "沒有輸出"; fi
-    done ;;
-esac
+# 明確指到一個臨時根，各種寫法都驗：Git Bash 的 TMPDIR 常是 MSYS 寫法（/d/Temp），
+# git rev-parse 回的卻是 D:/Temp/...，前綴比對沒正規化時永遠對不上（2026-10-18 實際踩到）。
+# 臨時根放在 $HOME 底下而不是 mktemp 的位置：Linux 的 /tmp 與預設 Windows 的
+# AppData/Local/Temp 都在 hook 寫死的臨時根裡，fixture 放那裡就證明不了 TMPDIR 規則。
+# 標記檔用 GIT_GUARD_STAMP_DIR 留在 sandbox，不會寫進磁碟根或網路路徑。
+# 兩個 fixture 根各驗一輪：$HOME 底下（Linux 的 /tmp 與預設 Windows 的 AppData/Local/Temp
+# 都在 hook 寫死的臨時根裡，放那裡證明不了 TMPDIR 規則），以及 mktemp 的位置（本機在 D:\Temp，
+# 才驗得到 /tmp 掛載寫法，與「不在 HOME 那顆磁碟」的磁碟根）。落在寫死的臨時根就記 SKIP。
+# 標記檔用 GIT_GUARD_STAMP_DIR 留在 sandbox，不會寫進磁碟根或網路路徑。
+TROOT="$(mktemp -d "$HOME/.git-guard-test.XXXXXX")"
+home_m="$HOME"; command -v cygpath >/dev/null 2>&1 && home_m="$(cygpath -m "$HOME")"
+td_round(){ # td_round <fixture 根> <標籤>
+  local root=$1 tag=$2 repo="$1/repo" top tm="" td seen="|" o
+  git init -q -b main "$repo"
+  echo x > "$repo/x.txt"; git_q "$repo" add x.txt; git_q "$repo" commit -qm "local only"
+  top="$(git -C "$repo" rev-parse --show-toplevel)"; top="${top,,}"
+  case "$top" in */appdata/local/temp/*|/tmp/*|*/scratchpad/*|*/.cache/*)
+    sk "[$tag] TMPDIR 規則（fixture 在寫死的臨時根底下：$top）"; return 0 ;; esac
+  tq(){ jq -cn --arg c "$repo" --arg s "$2" '{session_id:$s, cwd:$c}' \
+        | TMPDIR="$1" GIT_GUARD_STAMP_DIR="$SANDBOX/stamps" bash "$HOOK" 2>/dev/null; }
+  must_report(){ o="$(tq "$1" "s_${tag}_r_${#1}_${1//[^a-zA-Z]/}")"
+    if [ -n "$o" ]; then ok "[$tag] TMPDIR=$1 $2"; else ng "[$tag] TMPDIR=$1 $2" "沒有輸出"; fi; }
+  # 對照組：TMPDIR 指到別處就必須報，證明下面的「不報」是 TMPDIR 規則造成的。
+  must_report "$SANDBOX/tmp" "不涵蓋時照報（對照組）"
+  # 同一個目錄的每種寫法：原樣、mixed（D:/...）、cygpath -u（可能是 /tmp 掛載寫法）、手組的
+  # 磁碟寫法（/d/...）。去重後各跑一次；只驗當下那一種，換台機器就漏。
+  local forms=("$root")
+  if command -v cygpath >/dev/null 2>&1; then
+    tm="$(cygpath -m "$root")"; forms+=("$tm" "$(cygpath -u "$tm")" "/${tm:0:1}${tm:2}")
+  fi
+  for td in "${forms[@]}"; do
+    case "$seen" in *"|$td|"*) continue ;; esac; seen="$seen$td|"
+    o="$(tq "$td" "s_${tag}_${#td}_${td//[^a-zA-Z]/}")"
+    if [ -z "$o" ]; then ok "[$tag] TMPDIR=$td 底下的 repo 不報"; else ng "[$tag] TMPDIR=$td 底下的 repo 不報" "仍報出: $(printf '%s' "$o" | head -c 80)"; fi
+  done
+  # fail-open 的方向：TMPDIR 指向 repo 的上層時，寫法對上就會吞掉底下所有 repo。
+  # Windows 上 cygpath -m / 回的是 Git 安裝目錄、觸發不到，"/" 只在沒有 cygpath 時驗。
+  # 磁碟根在 HOME 那顆磁碟上會先被 HOME 防護擋下，根目錄防護要靠另一顆磁碟的那一輪才驗得到。
+  if [ -z "$tm" ]; then must_report "/" "（根目錄）不得讓所有 repo 靜默"
+  else must_report "${tm:0:2}/" "（磁碟根）不得讓所有 repo 靜默"; fi
+  if [ "$tag" = home ]; then
+    must_report "$HOME" "（涵蓋 HOME）不得讓其下 repo 靜默"
+    must_report "$(dirname "$HOME")" "（HOME 的上層）不得讓其下 repo 靜默"
+  elif [ -n "$tm" ] && [ "${tm:0:1}" = "${home_m:0:1}" ]; then
+    sk "[$tag] 磁碟根防護（fixture 與 HOME 同一顆磁碟，會先被 HOME 防護擋下）"
+  fi
+}
+td_round "$TROOT" home
+td_round "$SANDBOX/td" sandbox
+# UNC 的 server／share 根也不採用（主要為了標記檔不寫到網路路徑：實測一次 53 秒，超過 timeout）。
+# 這條沒有測試：要有一個放在 UNC 上的 repo，前綴比對的差異才驗得出來。
 
 echo "== 落後遠端（非 fast-forward）不得歸入可直接處理 =="
 # 這是「自動推」的安全邊界：ahead>0 但 behind>0 時 push 會被拒，整合方式是使用者的決定。
@@ -563,5 +581,5 @@ printf 'not json' | bash "$HOOK" >/dev/null 2>&1
 [ $? -eq 0 ] && ok "壞輸入 → exit 0" || ng "壞輸入 → exit 0" "結束碼非 0"
 
 echo
-echo "結果: $pass passed, $fail failed"
+echo "結果: $pass passed, $fail failed, $skip skipped"
 [ "$fail" -eq 0 ] || exit 1

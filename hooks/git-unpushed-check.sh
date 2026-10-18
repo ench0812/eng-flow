@@ -36,23 +36,8 @@
 # 根目錄」的明確加選，不是預設。多數情況不需要它——session 範圍已經涵蓋。
 set -uo pipefail
 
-STAMP_DIR="${TMPDIR:-/tmp}/claude-git-guard"
 ROOTS_FILE="$HOME/.claude/git-guard-roots"
 SCAN_MAXDEPTH=3
-
-# TMPDIR 轉成與 git 頂層相同的寫法（小寫、正斜線、x:/ 磁碟形式），整支只算一次。
-# Git Bash 的 TMPDIR 可能是磁碟寫法（/d/Temp）或掛載寫法（/tmp，實際掛在 D:/Temp），
-# git rev-parse 卻回 D:/Temp/...，不先轉換前綴永遠對不上（2026-10-18：mktemp 的 fixture
-# 全被誤報）。cygpath 是每次 hook 一個子行程、不是每個路徑一個，不違反下面的效能守則。
-# 轉完若是空字串或根目錄就整條不用：`""/*` 會匹配所有絕對路徑，等於什麼都不報（fail-open）。
-TMP_NORM=""
-if [ -n "${TMPDIR:-}" ]; then
-  command -v cygpath >/dev/null 2>&1 && TMP_NORM="$(cygpath -m "$TMPDIR" 2>/dev/null)"
-  [ -n "$TMP_NORM" ] || TMP_NORM="${TMPDIR//\\//}"
-  TMP_NORM="${TMP_NORM,,}"; TMP_NORM="${TMP_NORM%/}"
-  case "$TMP_NORM" in /[a-z]/*) TMP_NORM="${TMP_NORM:1:1}:${TMP_NORM:2}" ;; esac
-  case "$TMP_NORM" in ""|/|[a-z]:) TMP_NORM="" ;; esac
-fi
 
 JQ="$(command -v jq || true)"
 [ -z "$JQ" ] && exit 0
@@ -60,6 +45,45 @@ command -v git >/dev/null 2>&1 || exit 0
 
 input="$(cat 2>/dev/null || true)"
 [ -z "$input" ] && exit 0
+
+# TMPDIR 轉成與 git 頂層相同的寫法（小寫、正斜線、x:/ 磁碟形式），整支只算一次。
+# Git Bash 的 TMPDIR 可能是磁碟寫法（/d/Temp）或掛載寫法（/tmp，實際掛在 D:/Temp），
+# git rev-parse 卻回 D:/Temp/...，不先轉換前綴永遠對不上（2026-10-18：mktemp 的 fixture
+# 全被誤報）。cygpath 一次轉 TMPDIR 與 HOME 兩個值，每次 hook 一個子行程、不是每個路徑
+# 一個，不違反下面的效能守則。
+# 【轉得越準，TMPDIR 吞掉的範圍就越真】：寫法對上之後，TMPDIR 若指向 repo 的上層，底下
+# 所有 repo 都會靜默——這是本 hook 唯一不能出現的方向（fail-open）。所以以下幾種整條不用：
+# 空字串與根目錄（""/* 匹配所有絕對路徑）、磁碟根（d:）、UNC 的 server 或 share 根、
+# 以及涵蓋 $HOME 的值（~/.claude 的三個 repo 都在那底下）。列舉擋不完所有上層目錄，
+# 擋的是真的會被設成 TMPDIR 的那幾種；D:/Projects 這種值仍會吞掉其下的 repo。
+TMP_NORM=""; tmp_path=""
+if [ -n "${TMPDIR:-}" ]; then
+  home_norm=""
+  if command -v cygpath >/dev/null 2>&1; then
+    { IFS= read -r tmp_path; IFS= read -r home_norm; } < <(cygpath -m "$TMPDIR" "$HOME" 2>/dev/null)
+  fi
+  if [ -z "$tmp_path" ]; then
+    tmp_path="${TMPDIR//\\//}"; home_norm="${HOME//\\//}"
+    # /d/... 只在 Windows 上是磁碟寫法；Linux 的 /d/temp 是一般目錄，不能轉。
+    case "${OSTYPE:-}" in msys*|cygwin*)
+      case "$tmp_path" in /[a-zA-Z]/*) tmp_path="${tmp_path:1:1}:${tmp_path:2}" ;; esac
+      case "$home_norm" in /[a-zA-Z]/*) home_norm="${home_norm:1:1}:${home_norm:2}" ;; esac ;;
+    esac
+  fi
+  tmp_path="${tmp_path%/}"; TMP_NORM="${tmp_path,,}"
+  home_norm="${home_norm,,}"; home_norm="${home_norm%/}"
+  case "$TMP_NORM" in
+    ""|/|[a-z]:) TMP_NORM="" ;;
+    //*) case "$TMP_NORM" in //*/*/*) ;; *) TMP_NORM="" ;; esac ;;
+  esac
+  if [ -n "$TMP_NORM" ] && [ -n "$home_norm" ]; then
+    case "$home_norm/" in "$TMP_NORM"/*) TMP_NORM="" ;; esac
+  fi
+  [ -n "$TMP_NORM" ] || tmp_path=""
+fi
+# 標記檔只寫進驗證過的 TMPDIR：原始值若是 //server/share，每次寫入都要等網路逾時
+# （實測 53 秒，超過 15 秒 timeout，hook 被取消就等於靜默）。GIT_GUARD_STAMP_DIR 只給測試用。
+STAMP_DIR="${GIT_GUARD_STAMP_DIR:-${tmp_path:-/tmp}/claude-git-guard}"
 
 sid="$(printf '%s' "$input" | "$JQ" -r '.session_id // "nosession"' 2>/dev/null || echo nosession)"
 sid="$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9._-' | cut -c1-40)"
