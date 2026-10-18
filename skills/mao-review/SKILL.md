@@ -25,6 +25,7 @@ Approve when the change **definitely improves overall code health**, even if it 
 - Does the RED evidence show an expected/actual mismatch on the fixed behavior (not just "it failed")?
 - If the change adds a checker or gate tool: does it have known-bad controls for each error class it claims to catch, and does it fail closed when input is missing?
 - New tests at the lowest pyramid level that expresses them — no duplicate coverage of what an existing/lower-level test already asserts, no obsolete tests left behind?
+- Dev-environment breakage: renamed or new env vars, changed ports, moved secrets location, a new script that must be run? Also, features that were behind a feature flag and are now exposed? Skip when the break is the PR's stated intent and its scope is controlled — but still report it if the author may be underestimating the consequences.
 
 **跨服務接縫（改動觸及兩個以上服務/程序時必查）**
 單側全綠是已知的假綠形態——A 服務測「我送出的形狀是這樣」、B 服務測「我收到這個形狀會正確處理」，
@@ -97,6 +98,17 @@ Deprecated: `Important`/`Minor` — do not reintroduce these words when editing 
 3. **Review implementation** — walk through each file with 5 axes
 4. **Categorize findings** — label severity on every comment
 5. **Verify verification** — what tests ran? Build pass? Manual check? Did the RED output show an expected/actual mismatch on the fixed behavior? Evidence scales with the checkpoint: per-task/dev-loop changes need targeted results (affected test file(s) + directly dependent modules, output pasted) — do not demand a full-suite run per commit. Full-suite evidence is required only at integration points (final integration review, merge/push/release gate).
+
+## Triaging Findings
+
+Applies to findings the orchestrator receives, from a reviewer agent or from codex. Reviewers still report everything; triage happens only here.
+- Hypotheticals ("what if null is passed") need tracing to a caller that proves it can happen.
+- A list of only nits means the code is fine.
+- "I would write it differently" with no concrete defect: dismiss.
+- A finding about code the author did not touch, or a pattern matching existing codebase convention, lacks context.
+- A security or correctness finding from a single source still gets a hard look; do not drop it because only one side raised it.
+- A claim of contract or test drift: run that test at the current tip first, then classify.
+- Every dismissal gets a written, specific reason.
 
 ## Closing Cross-Check (Codex second opinion)
 
