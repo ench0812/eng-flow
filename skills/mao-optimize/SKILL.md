@@ -38,6 +38,18 @@ Measure again with the same methodology:
 - By how much? (quantify)
 - Any regressions in other metrics?
 
+Before concluding, confirm each of these (any unanswerable item means "inconclusive"):
+- The bottleneck was found by profiling, not by reading code.
+- Both sides run production settings; if only one side is tuned, you compared configurations, not implementations.
+- A result beyond the hardware limit is suspect: it may be a cache, a no-op, or a bug.
+- Errors are counted.
+- A/B runs alternate at least 5 times each; report the median and range. A gap smaller than the variance is no difference.
+- The micro result's share of the end-to-end time is known.
+- The work inside the timed region really executed (lazy or un-awaited code still yields a number).
+- Machine load and memory use during the measurement were checked (use whatever command fits the platform).
+
+The conclusion is one of: faster / slower / no difference / inconclusive.
+
 ### 5. Guard
 Add a performance test or assertion to prevent regression:
 - Benchmark for critical paths
