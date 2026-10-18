@@ -332,6 +332,26 @@ check_out "推 tag → 不做版本核對" 0 '^check-plugin: OK'
 pp "refs/heads/main $CN"
 check_out "stdin 格式不是 4 欄 → fail-closed（exit 2）" 2 '4 欄'
 
+# 假 git：遇到指定的子指令就失敗（exit 128），其餘原樣轉給真 git。給 fail-closed 分支的負控組用。
+mk_failgit() { # mk_failgit <path> <子指令>
+  cat > "$1" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "$2" ] && { echo "fatal: simulated failure" >&2; exit 128; }; done
+exec git "\$@"
+EOF
+  chmod +x "$1"
+}
+
+# R1：git diff 失敗不能被當成「沒有變動」而放行。舊寫法 `git diff | tr` 的離開碼取的是 tr，
+# 失敗被吞掉、changed 變空字串、直接 continue。先用真 git 確認同一輸入會被擋（排除「輸入本身就放行」），
+# 再換成會讓 diff 失敗的 git，期望 exit 2。
+mk_failgit "$tmp/git-fail-diff" diff
+reset_to "$REMOTE_TIP"; edit_commit skills/demo/SKILL.md; CD="$(head_sha)"
+pp "refs/heads/main $CD refs/heads/main $REMOTE_TIP"
+check_out "git diff 失敗的對照組：真 git 同一輸入 → 拒絕" 1 '\[version-bump\]'
+CHECK_PLUGIN_GIT="$tmp/git-fail-diff" pp "refs/heads/main $CD refs/heads/main $REMOTE_TIP"
+check_out "git diff 失敗 → fail-closed（exit 2），不是放行" 2 'git diff'
+
 reset_to "$REMOTE_TIP"
 OUT="$(bash "$CHECK" --root "$W" --pre-push </dev/null 2>&1)"; RC=$?
 check_out "空 stdin：只跑檢查 1～4 → 放行" 0 '^check-plugin: OK'

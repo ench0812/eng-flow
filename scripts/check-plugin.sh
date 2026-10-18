@@ -98,7 +98,10 @@ cd "$ROOT" || die_env "無法進入根目錄 $ROOT"
 DOCS=()
 for d in skills references agents; do
   [ -d "$d" ] || continue
-  while IFS= read -r f; do DOCS+=("$f"); done < <(find "$d" -type f -name '*.md' | sort)
+  # find 的失敗不能被後面的 sort 吞掉（少掃檔案卻照樣通過是 fail-open），所以先收進變數檢查離開碼再排序
+  fl="$(find "$d" -type f -name '*.md')" || die_env "find $d 失敗"
+  [ -n "$fl" ] || continue
+  while IFS= read -r f; do DOCS+=("$f"); done < <(sort <<<"$fl")
 done
 [ "${#DOCS[@]}" -gt 0 ] || die_env "在 $ROOT 底下找不到任何 skills/ references/ agents/ 的 .md（根目錄不對？）——掃描零個檔案不能算通過"
 PROSE=("${DOCS[@]}")
@@ -400,9 +403,11 @@ done <<<"$out"
 is_zero() { case "$1" in ''|*[!0]*) return 1 ;; *) return 0 ;; esac; }
 is_sha()  { case "$1" in ''|*[!0-9a-f]*) return 1 ;; *) [ "${#1}" -ge 40 ] ;; esac; }
 plugin_version() { # plugin_version <commit> → 印 version；讀不到就回非 0
-  local v
-  v="$("$GIT" show "$1:.claude-plugin/plugin.json" 2>/dev/null | "$JQ" -r '.version // empty' 2>/dev/null)" || return 1
-  v="${v%$'\r'}"
+  local j v
+  # 兩段各自檢查離開碼（不接管線，理由同 pre_push_versions 裡的 git diff）。
+  j="$("$GIT" show "$1:.claude-plugin/plugin.json" 2>/dev/null)" || return 1
+  v="$("$JQ" -r '.version // empty' <<<"$j" 2>/dev/null)" || return 1
+  v="${v%$'\r'}"                                          # 本機 jq 輸出 CRLF
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }
@@ -433,7 +438,9 @@ pre_push_versions() {
       fi
       base="$rsha"
     fi
-    if ! changed="$("$GIT" diff --name-only -z --no-renames "$base" "$lsha" -- $CONTENT_PATHS 2>/dev/null | tr '\0' '\n')"; then
+    # 不接管線：管線的離開碼是最後一段的，`git diff | tr` 會把 git 的失敗吞掉、changed 變空字串而被當成
+    # 「沒動到 plugin 內容」放行（fail-open）。也不用 -z：bash 變數放不了 NUL，這裡只需要知道有沒有變動與列前幾個檔名。
+    if ! changed="$("$GIT" diff --name-only --no-renames "$base" "$lsha" -- $CONTENT_PATHS 2>/dev/null)"; then
       soft_env "git diff $base $lsha 失敗"; continue
     fi
     [ -n "$changed" ] || continue                            # 只動 tests/、README.md、.gitattributes 等：不需要 bump
