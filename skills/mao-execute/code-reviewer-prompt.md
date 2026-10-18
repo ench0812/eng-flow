@@ -20,6 +20,7 @@ Also check:
 - Each file has one clear responsibility
 - No large files created or significantly grown
 - Implementation follows the plan's file structure
+- A new checker, comparison script or gate has a known-bad control for each error class it claims to catch, and fails closed (refuses or reports inconclusive) on missing input
 
 ## Severity Labels
 - **Critical:** Blocks merge (security, data loss, broken functionality)
