@@ -38,7 +38,7 @@ A review or a green check is a verdict on one head commit. Bind the merge to it,
 
 1. **Pin the head.** Record the head SHA the review and the gate ran on. If `gh pr view <n> --json headRefOid` no longer matches it, review the delta first. Confirm `baseRefName` is the intended target: the head guard does not catch a retargeted base.
 2. **Merge with the guard.** `gh pr merge <n> --match-head-commit <reviewed-sha>` plus the merge-method flag. A push that lands after the review makes the merge fail instead of shipping unreviewed code.
-3. **Read it back.** "Merge succeeded" is not proof: when required checks are still pending, `gh pr merge` enables auto-merge instead, and a queue only accepts the PR. Require `gh pr view <n> --json state,mergedAt,mergeCommit,baseRefName` to show `MERGED` on the intended base, then `git fetch` and `git merge-base --is-ancestor <mergeCommit> origin/<base>` to exit 0. For a local merge pushed directly, require `git rev-parse origin/<base>` to equal the local branch after the push.
+3. **Read it back.** "Merge succeeded" is not proof: on a base that requires a merge queue, `gh pr merge` only enables auto-merge or enqueues the PR, and `--auto` never merges on the spot. Require `gh pr view <n> --json state -q .state` to print `MERGED`, then `git fetch` and `git merge-base --is-ancestor $(gh pr view <n> --json mergeCommit -q .mergeCommit.oid) origin/<base>` to exit 0. For a local merge pushed directly, ask the remote itself: `git ls-remote origin refs/heads/<base>` must print the local branch's SHA (a successful push also rewrites the local `origin/<base>`, so that ref proves nothing).
 
 ## Merge Conflict Resolution
 
@@ -84,10 +84,11 @@ CONCERNS:
 ## Worktree Cleanup
 
 If working in a git worktree, list what removal would destroy before removing it. An empty `git diff` does not mean nothing is lost:
-1. **Uncommitted and ignored files.** `git -C <wt> status --porcelain --untracked-files=all --ignored --ignore-submodules=none`. `git worktree remove` deletes ignored files (`!!` lines: `.env`, `settings.local.json`, local data) without warning. List their paths only, never print their contents, and confirm each has a copy elsewhere or can be regenerated.
-2. **Commits only this worktree can reach.** A commit made on a detached HEAD is held only by the worktree's own reflog, which removal deletes. `git -C <wt> rev-list $(git -C <wt> reflog --format=%H HEAD) --not --branches --remotes --tags` must print nothing; otherwise keep each with `git branch keep/<name> <sha>` first.
-3. **Locks.** A worktree marked `locked` in `git worktree list --porcelain` was locked on purpose. Find out why; do not force it.
-4. Return to the main workspace in a separate command, then `git worktree remove <wt>`. Use `--force` only after steps 1–3 came back clean or the user confirmed the losses.
+1. **Uncommitted and ignored files.** `git -C <wt> status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none`. `git worktree remove` deletes ignored files (`!!` lines: `.env`, `settings.local.json`, local data) without warning. List their paths only, never print their contents, and confirm each has a copy elsewhere or can be regenerated.
+2. **Commits only this worktree can reach.** The worktree's HEAD and its reflog are deleted with it, so a commit made on a detached HEAD, or on a branch deleted since, loses its last reference. `git -C <wt> reflog --format=%H HEAD | git -C <wt> rev-list --stdin HEAD --not --branches --remotes --tags` counts as clean only when it exits 0, writes nothing to stderr, and prints nothing; any other result means unknown, not clean. Keep each listed commit with `git branch keep/<name> <sha>`.
+3. **Submodules.** Their git dirs live under the worktree's admin dir and are deleted with it, and steps 1–2 cannot see inside them. If the worktree has submodules, run steps 1–2 inside each (`git -C <wt> submodule foreach --recursive`), or stop and ask the user.
+4. **Locks.** A worktree marked `locked` in `git worktree list --porcelain` was locked on purpose. Find out why; do not force it.
+5. Return to the main workspace in a separate command, then `git worktree remove <wt>`. Use `--force` only when every item steps 1–3 listed is handled (copied elsewhere, regenerable, or kept on a `keep/` branch) or the user confirmed the loss.
 
 ## Red Flags
 - Merging without running tests
