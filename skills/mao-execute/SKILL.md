@@ -22,7 +22,7 @@ implement    (implementer-prompt.md,   schema: implementerStatus)
   → spec-review  (spec-reviewer-prompt.md, schema: reviewVerdict)
     → code-review (code-reviewer-prompt.md, schema: reviewVerdict)
 REQUEST_CHANGES → back to implement → re-review (conditional branch in the same stage;
-                 at most two fix rounds per task — see Fix-Loop Cap below)
+                 at most two fix rounds per task — see Fix-loop cap below)
 All tasks done → final integration review: run the FULL test suite first
                  (per-task commits only ran targeted scopes — this is the one
                  place cross-task regressions surface), then review cross-task
@@ -55,7 +55,7 @@ Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand
 
 **Fallback:** if the Workflow tool is not in your available tools, fall back to the legacy flow — dispatch implement → spec-review → code-review sequentially via Agent tool *within* each task. Tasks that may run in parallel (see Parallel vs Sequential) still run concurrently: send their Agent calls in one message, with `isolation: "worktree"` when they write files or commit in the same working tree. Losing Workflow is not a reason to serialize independent tasks. The Agent tool has no `effort` parameter, so dispatch B-tier stages by plugin agent instead of `model:"sonnet"`: B1 → `subagent_type:"eng-flow:tier-b1"`, B2 → `subagent_type:"eng-flow:tier-b2"`, C → `subagent_type:"eng-flow:tier-c"` (their frontmatter carries the model + effort pair). A plain `model:"sonnet"` or `model:"haiku"` would silently run at the session's effort level.
 
-**Fix-loop cap:** each task gets at most two REQUEST_CHANGES → implement → re-review rounds. If blocking issues remain after the second, stop and do one of: shrink or split the task, move it up a tier, or report BLOCKED to the user with evidence. Never treat an unresolved issue as a pass. In a Workflow script, encode the cap in the control flow (a counter on the review loop). This cap covers the per-task fix loop only; the Closing Cross-Check's "no consultation cap" is a separate rule and is unchanged.
+**Fix-loop cap:** each task gets at most two REQUEST_CHANGES → implement → re-review rounds. If blocking issues remain after the second, stop and do one of: shrink or split the task, move it up a tier, or report BLOCKED to the user with evidence. A split or tier-up task inherits the cumulative round count (no reset); once it is used up, only BLOCKED to the user remains. REQUEST_CHANGES from the final integration review is counted separately, at most two rounds, then BLOCKED. Never treat an unresolved issue as a pass. In a Workflow script, encode the cap in the control flow (a counter on the review loop). This cap covers the per-task fix loop only; the Closing Cross-Check's "no consultation cap" is a separate rule and is unchanged.
 
 ## Parallel vs Sequential
 
@@ -63,7 +63,7 @@ Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand
 
 **Must be sequential:** tasks sharing files, database migrations, dependency chains, or where task B's spec depends on task A's output types/interfaces.
 
-**Pilot first:** when a batch of same-shaped tasks shares one not-yet-validated brief template or acceptance command, run the first task alone; fill the concurrency only after it is green. A batch whose template is already validated runs in parallel as usual.
+**Pilot first:** when a batch of same-shaped tasks shares one not-yet-validated brief template or acceptance command, run the first task alone (the template is unvalidated when no task using it has gone green yet); fill the concurrency only after it is green. If the pilot is red, fix the template or acceptance command before releasing the rest. A batch with an already validated template runs in parallel.
 
 **Frozen-contract exception:** when the *only* dependency between two tasks is a type/interface contract, and they modify no files in common, freezing that contract in the plan before dispatch (fields, types, nullability, omitted-vs-empty, absent-field handling) lets both run in parallel; the cross-seam check runs when both land. It never lifts the other conditions above — shared files, migrations and real execution dependencies stay sequential.
 
@@ -74,11 +74,12 @@ Escalate by moving up a tier (B2 → B1 → A), never by keeping a tier and hand
 **NEEDS_CONTEXT:** Provide missing context and re-dispatch.
 **BLOCKED:** Assess: context problem → provide context. Task too large → split. "Needs a higher tier" (a tier-C or B2 agent hit a judgment call) → re-dispatch one tier up (C → B2 → B1). Plan wrong → escalate to user.
 
-**A dispatched agent fails or dies mid-run — handle by failure shape:**
-- Context limit, stream idle timeout or OOM: sweep leftovers first (`git status`, half-written files, run the tests once), then re-dispatch with a smaller scope.
+**A dispatched agent fails or dies mid-run:** first sweep leftovers, whatever the failure shape (`git status`, files added or changed this run, run the tests once to confirm it did not stop mid red→green). Then:
+- Context limit, stream idle timeout or OOM: re-dispatch with a smaller scope.
 - Network or transient error: retry once as-is.
 - Tool or environment error: fix the environmental cause, then re-dispatch.
 - Cause unknown: retry once only.
+- To continue the original agent, use `SendMessage` only if its latest context is under ~150k; otherwise start a new agent with the goal, acceptance criteria, required constraints, plus the diff and review comments.
 - The same unit fails twice: stop; re-plan around it or report to the user.
 
 ## Prompt Templates

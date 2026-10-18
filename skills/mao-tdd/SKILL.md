@@ -24,6 +24,7 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 - Run it — it MUST fail
 - If it passes, your test is wrong or the feature already exists
 - "It went red" is not evidence: an exception, import error, empty result or compile failure all show red. Only an expected/actual mismatch whose difference is the behavior being fixed proves the test measures it. Quote that expected/actual in the RED evidence, not just the assertion line.
+- Legitimate forms: for a new function or type, first add a stub or signature so it compiles/imports, then let the test fail on behavior. For a test expecting an exception or expecting something not to happen, use the expected exception type and message against the actual behavior as expected/actual.
 ```
 
 ### 2. GREEN — Write minimal code to pass
@@ -60,7 +61,7 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 ## The Prove-It Pattern (Bug Fixes)
 
 1. Write a test that reproduces the bug (RED)
-2. Verify it fails for the right reason (expected/actual mismatch on the bug itself) and keep an excerpt of that failing-before output for the final report
+2. Verify it fails for the right reason (RED evidence per step 1) and keep an excerpt of that failing-before output for the final report
 3. Fix the bug (GREEN)
 4. Verify the targeted scope passes — the new test plus affected test file(s); the full suite runs at the integration/ship gate
 
