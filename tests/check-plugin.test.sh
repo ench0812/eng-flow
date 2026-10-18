@@ -467,7 +467,7 @@ CHECK_PLUGIN_GIT="$tmp/git-fail-diff" pp "refs/heads/main $CD refs/heads/main $R
 check_out "git diff 失敗 → fail-closed（exit 2），不是放行" 2 'git diff'
 
 # R2：--pre-push 的檢查 1～4 看的是「被推送的 commit」，不是工作樹。
-# 做法是把每個被推送的 sha 用 git archive 解到暫存目錄再檢查（輸出以 <sha7>: 開頭）。
+# 做法是把每個被推送的 sha 用 read-tree + checkout-index 解到暫存目錄再檢查（輸出以 <sha7>: 開頭）。
 # 這一組的前提：工作樹（HEAD）永遠是乾淨的或與被推送的 commit 不同，所以看錯對象的實作會得到相反的結果。
 reset_to "$REMOTE_TIP"
 OUT="$(bash "$CHECK" --root "$W" --pre-push </dev/null 2>&1)"; RC=$?
@@ -503,6 +503,29 @@ check_out "工作樹有未提交的壞路徑、被推送的 commit 乾淨 → �
 git -C "$W" checkout -q -- README.md
 git -C "$W" branch -q -D side
 
+# (e) export-ignore 不能把壞檔案藏起來：被推送的 commit 自己的 .gitattributes（或本機 .git/info/attributes）
+# 標了 export-ignore 的檔案，git archive 會略過，但安裝的人拿到的 git 內容裡有它。
+# 同一個 commit 新增含壞路徑的 references/bad.md、用 export-ignore 蓋掉它、同時 bump 版本（讓版本核對也過）。
+# 展開改用 read-tree + checkout-index（不套用 gitattributes）；修正前這則實得 rc=0（放行）。
+reset_to "$REMOTE_TIP"
+mkdir -p "$W/references"
+printf '%s\n' "Bad \`scripts/ghost-export.sh\`." > "$W/references/bad.md"
+printf '%s\n' "references/bad.md export-ignore" >> "$W/.gitattributes"
+sed -i 's/"version":"[^"]*"/"version":"1.0.9"/' "$W/.claude-plugin/plugin.json"
+git -C "$W" add -A; git -C "$W" commit -q -m "hide bad file with export-ignore"; CEXP="$(head_sha)"
+pp "refs/heads/main $CEXP refs/heads/main $REMOTE_TIP"
+check_out "export-ignore 藏起來的壞路徑 → 仍拒絕（不套用 gitattributes）" 1 "^${CEXP:0:7}:references/bad\\.md:[0-9]+: \\[prose-path\\].*ghost-export"
+# 本機 .git/info/attributes 的 export-ignore 同樣不能生效（對照：同一個 commit 在 .gitattributes 之外也被蓋）
+reset_to "$REMOTE_TIP"
+mkdir -p "$W/references"
+printf '%s\n' "Bad \`scripts/ghost-info.sh\`." > "$W/references/bad2.md"
+sed -i 's/"version":"[^"]*"/"version":"1.0.9"/' "$W/.claude-plugin/plugin.json"
+git -C "$W" add -A; git -C "$W" commit -q -m "bad file 2"; CEXP2="$(head_sha)"
+printf '%s\n' "references/bad2.md export-ignore" >> "$W/.git/info/attributes"
+pp "refs/heads/main $CEXP2 refs/heads/main $REMOTE_TIP"
+check_out "本機 info/attributes 的 export-ignore 也不能藏壞檔案 → 拒絕" 1 "^${CEXP2:0:7}:references/bad2\\.md:[0-9]+: \\[prose-path\\].*ghost-info"
+: > "$W/.git/info/attributes"
+
 # S5：fail-closed 分支的負控組。每一條都是「無法判斷 → exit 2，不放行」；
 # 每條都先有一個同形狀、但條件正常的輸入通過（前面的測試已涵蓋：改 skill 同時 bump → 放行），
 # 才能說 exit 2 是被植入的條件造成的。
@@ -531,22 +554,20 @@ git -C "$W" checkout -q "$REMOTE_TIP" -- .claude-plugin/plugin.json; bump_commit
 pp "refs/heads/main $CPJ5 refs/heads/main $CPJ4"
 check_out "基準端 plugin.json 不是合法 JSON → exit 2" 2 "讀不到 $CPJ4 的"
 
-# git archive／tar 失敗：沒辦法取得被推送的內容就不能宣稱它通過檢查。對照組先證明同一輸入在 git 正常時放行。
+# read-tree／checkout-index 失敗：沒辦法取得被推送的內容就不能宣稱它通過檢查。對照組先證明同一輸入在 git 正常時放行。
 reset_to "$REMOTE_TIP"; edit_commit tests/x-probe.txt; CA="$(head_sha)"
 pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
-check_out "git archive 失敗的對照組：同一輸入 git 正常 → 放行" 0 '^check-plugin: OK'
-mk_failgit "$tmp/git-fail-archive" archive
-CHECK_PLUGIN_GIT="$tmp/git-fail-archive" pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
-check_out "git archive 失敗 → fail-closed（exit 2）" 2 'git archive'
-printf '#!/usr/bin/env bash\necho "tar: simulated failure" >&2\nexit 2\n' > "$tmp/tar-fail"; chmod +x "$tmp/tar-fail"
-CHECK_PLUGIN_TAR="$tmp/tar-fail" pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
-check_out "tar 解開失敗 → fail-closed（exit 2）" 2 '解開'
-CHECK_PLUGIN_TAR=tar-does-not-exist pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
-check_out "缺 tar → exit 2（環境不足）" 2 '環境不足.*tar'
+check_out "展開失敗的對照組：同一輸入 git 正常 → 放行" 0 '^check-plugin: OK'
+mk_failgit "$tmp/git-fail-readtree" read-tree
+CHECK_PLUGIN_GIT="$tmp/git-fail-readtree" pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
+check_out "git read-tree 失敗 → fail-closed（exit 2）" 2 'read-tree'
+mk_failgit "$tmp/git-fail-checkout" checkout-index
+CHECK_PLUGIN_GIT="$tmp/git-fail-checkout" pp "refs/heads/main $CA refs/heads/main $REMOTE_TIP"
+check_out "git checkout-index 失敗 → fail-closed（exit 2）" 2 'checkout-index'
 
 # 被推送的樹本身讓檢查「無法判斷」（這裡是掃描不到任何文件）：子檢查回 exit 2，外層也要回 2，不能吞成放行或當成一般問題
 reset_to "$REMOTE_TIP"; git -C "$W" rm -rq skills references agents; git -C "$W" commit -q -m "gut docs"; CG="$(head_sha)"
-pp "refs/heads/feature $CG refs/heads/feature $Z"
+pp "refs/heads/main $CG refs/heads/main $REMOTE_TIP"
 check_out "被推送的樹掃描不到任何文件 → exit 2，輸出指名那個 commit" 2 "^${CG:0:7}:check-plugin: 環境不足" '無法判斷'
 
 # stdin 是 CRLF（行尾 \r 不能黏在最後一欄的 sha 上）。一定要兩行以上、而且有事要做的放第一行：

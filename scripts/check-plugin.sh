@@ -41,7 +41,7 @@
 #      指的是使用者專案裡的路徑時，在同一行行尾加：<!-- check-plugin: allow path -->
 #   5. --pre-push：(version-bump) 推往 refs/heads/main 的範圍內動到 plugin 內容，version 卻沒有嚴格變大
 #      （不變或降版都拒絕）。
-#      --pre-push 的檢查 1～4 對象是「被推送的 commit」：每個 sha 用 git archive 解到暫存目錄，再以本腳本
+#      --pre-push 的檢查 1～4 對象是「被推送的 commit」：每個 sha 用 read-tree + checkout-index（不套用 export-ignore）解到暫存目錄，再以本腳本
 #      --root 檢查那棵樹，輸出以 <sha7>: 開頭。不看工作樹——工作樹與被推送的內容常常不同（git push
 #      origin side:main、修正只留在工作樹、工作樹有未提交的半成品），看工作樹會在兩個方向都出錯。
 #      推非 main 的 ref（分支、tag）也一樣檢查被推送的 commit；刪除 ref 沒有東西可檢查。
@@ -53,7 +53,6 @@ SELF="$SELF_DIR/${BASH_SOURCE[0]##*/}"     # 絕對路徑：--pre-push 會對解
 ROOT="$(cd "$SELF_DIR/.." && pwd)" || exit 2
 JQ="${CHECK_PLUGIN_JQ:-jq}"        # 測試用：指向不存在的指令即可模擬「環境缺 jq」
 GIT="${CHECK_PLUGIN_GIT:-git}"     # 測試用：指向會讓特定子指令失敗的包裝程式，驗證 fail-closed 分支
-TAR="${CHECK_PLUGIN_TAR:-tar}"     # 同上（解開 git archive 的輸出）
 MODE=check
 
 # 不需要測試檔、也不需要註冊的 hooks 輔助檔（lib）。明文清單，不放寬規則。
@@ -108,7 +107,6 @@ for t in awk grep sed find sort; do
 done
 if [ "$MODE" = prepush ]; then
   command -v "$GIT" >/dev/null 2>&1 || die_env "找不到 git（$GIT）；--pre-push 需要它"
-  command -v "$TAR" >/dev/null 2>&1 || die_env "找不到 tar（$TAR）；--pre-push 要把被推送的 commit 解開來檢查"
   command -v mktemp >/dev/null 2>&1 || die_env "找不到 mktemp"
 fi
 cd "$ROOT" || die_env "無法進入根目錄 $ROOT"
@@ -171,21 +169,23 @@ ver_cmp() {
 
 PUSHED_CHECKED=0
 CHECKED=" "
-# 把 sha 的內容用 git archive 解到暫存目錄，再以本腳本 --root 檢查那棵樹（檢查 1～4）。
+# 把 sha 的內容展開到暫存目錄，再以本腳本 --root 檢查那棵樹（檢查 1～4）。
 # 為什麼不直接檢查工作樹：被推送的內容常常不是工作樹——git push origin side:main、壞內容已 commit
 # 而修正只留在工作樹、工作樹有未提交的半成品；看工作樹在兩個方向都會判錯。
-# 不接管線：git archive 先寫成檔案再解開，兩段各自檢查離開碼，失敗一律 fail-closed。
+# 為什麼不用 git archive：它會套用該 commit 自己的 .gitattributes（與本機 .git/info/attributes）的
+# export-ignore，同一個 commit 就能新增壞檔案、再標 export-ignore 把它從檢查裡藏掉，而安裝的人拿到的
+# git 內容裡有它。read-tree + checkout-index 展開 index 的內容，不套用 export-ignore。
+# 不接管線，每一步各自檢查離開碼，失敗一律 fail-closed；暫存目錄由函式內每條路徑清掉。
 check_pushed_tree() { # check_pushed_tree <sha>
   local sha="$1" s7="${1:0:7}" td out rc l n=0
   case "$CHECKED" in *" $sha "*) return 0 ;; esac        # 同一個 sha 推到多個 ref，只檢查一次
   CHECKED="$CHECKED$sha "
   PUSHED_CHECKED=$((PUSHED_CHECKED + 1))
   td="$(mktemp -d 2>/dev/null)" && [ -n "$td" ] && [ -d "$td" ] || { soft_env "mktemp -d 失敗，無法檢查 $s7 的內容"; return 0; }
-  if ! "$GIT" archive --format=tar -o "$td/pushed.tar" "$sha" 2>/dev/null; then
-    rm -rf "${td:?}"; soft_env "git archive $sha 失敗，無法檢查被推送的內容"; return 0
-  fi
-  if ! mkdir "$td/tree" || ! "$TAR" -x -C "$td/tree" <"$td/pushed.tar" 2>/dev/null; then
-    rm -rf "${td:?}"; soft_env "解開 $s7 的內容失敗（$TAR）"; return 0
+  if ! mkdir "$td/tree" \
+     || ! GIT_INDEX_FILE="$td/idx" "$GIT" read-tree "$sha" 2>/dev/null \
+     || ! GIT_INDEX_FILE="$td/idx" "$GIT" checkout-index -a --prefix="$td/tree/" 2>/dev/null; then
+    rm -rf "${td:?}"; soft_env "展開 $s7 的內容失敗（git read-tree／checkout-index），無法檢查被推送的內容"; return 0
   fi
   out="$(bash "$SELF" --root "$td/tree" 2>&1 </dev/null)"; rc=$?
   rm -rf "${td:?}"
