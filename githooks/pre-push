@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# git pre-push hook：把 stdin（<local ref> <local sha> <remote ref> <remote sha>）原樣交給
+# scripts/check-plugin.sh --pre-push。邏輯全在那支腳本裡，這裡只負責找到它並轉交 stdin 與離開碼。
+# 安裝（每個 clone 一次，worktree 共用 repo config 所以只需做一次）：
+#   git config core.hooksPath githooks
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 2
+exec bash "$HOOK_DIR/../scripts/check-plugin.sh" --pre-push

@@ -270,8 +270,8 @@ for f in agents/tier-*.md; do [ -f "$f" ] && tier_files+=("$f"); done
 if [ "${#tier_files[@]}" -eq 0 ]; then
   bad agents 1 tier-frontmatter "找不到任何 agents/tier-*.md（tier 一致性的唯一來源）"
 fi
-for f in "${tier_files[@]}"; do
-  name="$(basename "$f" .md)"
+for f in ${tier_files[@]+"${tier_files[@]}"}; do
+  name="${f##*/}"; name="${name%.md}"
   fm="$(awk "$AWK_FRONTMATTER" "$f")" || die_env "awk 解析 $f 失敗"
   IFS='|' read -r t_model t_ml t_effort t_el t_dl t_dm t_de <<<"${fm%$'\r'}"
   ok=1
@@ -300,28 +300,38 @@ if [ ! -f hooks/hooks.json ]; then
   bad hooks/hooks.json 1 hooks-json "hooks/hooks.json 不存在"
 else
   if ! cmds="$("$JQ" -r '.. | objects | select(has("command")) | .command' hooks/hooks.json 2>&1)"; then
-    bad hooks/hooks.json 1 hooks-json "jq 無法解析：$(printf '%s' "$cmds" | head -n 1)"
+    bad hooks/hooks.json 1 hooks-json "jq 無法解析：${cmds%%$'\n'*}"
     cmds=""
   fi
+  # 迴圈內全用 bash 內建（不開子行程）：Windows 上每個 fork 約 30～100 ms，這段原本佔掉執行時間的一半
+  HJ=()
+  while IFS= read -r l || [ -n "$l" ]; do HJ+=("${l%$'\r'}"); done < hooks/hooks.json
+  hj_line() { # hj_line <needle> → HJ_LN = hooks.json 中第一個含 needle 的行號（找不到 1）
+    local i=0 l
+    HJ_LN=1
+    for l in ${HJ[@]+"${HJ[@]}"}; do
+      i=$((i + 1))
+      case "$l" in *"$1"*) HJ_LN=$i; return 0 ;; esac
+    done
+  }
+  ref_re='CLAUDE_PLUGIN_ROOT[}]?"?/([A-Za-z0-9._/-]+)'
   REFS=()      # hooks.json 裡引用的 plugin 內相對路徑（去重）
   while IFS= read -r cmd; do
     cmd="${cmd%$'\r'}"                                  # 本機 jq 輸出 CRLF
-    [ -n "$cmd" ] || continue
-    while IFS= read -r ref; do
-      ref="${ref%$'\r'}"
-      [ -n "$ref" ] || continue
-      ref="$(printf '%s' "$ref" | sed -E 's#^CLAUDE_PLUGIN_ROOT[}]?"?/##')"
+    rest="$cmd"
+    while [[ "$rest" =~ $ref_re ]]; do
+      ref="${BASH_REMATCH[1]}"; whole="${BASH_REMATCH[0]}"
+      rest="${rest#*"$whole"}"
       seen=0
       for r in ${REFS[@]+"${REFS[@]}"}; do [ "$r" = "$ref" ] && seen=1; done
       [ "$seen" = 1 ] || REFS+=("$ref")
-    done < <(printf '%s\n' "$cmd" | grep -oE 'CLAUDE_PLUGIN_ROOT[}]?"?/[A-Za-z0-9._/-]+')
+    done
   done <<<"$cmds"
 
   REGISTERED=()   # 註冊的 hooks/<檔名>（檔名，不含目錄）
   for ref in ${REFS[@]+"${REFS[@]}"}; do
-    ln="$(grep -n -F -- "$ref" hooks/hooks.json | head -n 1 | cut -d: -f1)"
     if [ ! -e "$ref" ]; then
-      bad hooks/hooks.json "${ln:-1}" hooks-missing "hooks.json 引用的 $ref 不存在"
+      hj_line "$ref"; bad hooks/hooks.json "$HJ_LN" hooks-missing "hooks.json 引用的 $ref 不存在"
       continue
     fi
     case "$ref" in hooks/*) REGISTERED+=("${ref#hooks/}") ;; esac
@@ -330,7 +340,7 @@ else
   # 每支 hooks/*.sh 都要註冊，或列在 HOOK_LIBS
   for f in hooks/*.sh; do
     [ -f "$f" ] || continue
-    b="$(basename "$f")"
+    b="${f##*/}"
     reg=0
     for r in ${REGISTERED[@]+"${REGISTERED[@]}"}; do [ "$r" = "$b" ] && reg=1; done
     for l in $HOOK_LIBS; do [ "$l" = "$b" ] && reg=1; done
@@ -338,21 +348,24 @@ else
   done
 
   # 每支註冊的 hook 都要有測試檔。名稱對不上的例外用明文對照表，不放寬規則。
-  hook_test_candidates() {
+  hook_test_candidates() { # → CANDS（陣列）
     case "$1" in
-      no-heredoc-backslashes) echo "tests/test_heredoc_backslashes.py" ;;
-      *) echo "tests/$1.test.sh"; echo "tests/test_${1//-/_}.py" ;;
+      no-heredoc-backslashes) CANDS=("tests/test_heredoc_backslashes.py") ;;
+      *) CANDS=("tests/$1.test.sh" "tests/test_${1//-/_}.py") ;;
     esac
   }
   for b in ${REGISTERED[@]+"${REGISTERED[@]}"}; do
     name="${b%.*}"
+    hook_test_candidates "$name"
     found=0; cands=""
-    while IFS= read -r c; do
+    for c in "${CANDS[@]}"; do
       cands="${cands:+$cands 或 }$c"
       [ -f "$c" ] && found=1
-    done < <(hook_test_candidates "$name")
-    ln="$(grep -n -F -- "hooks/$b" hooks/hooks.json | head -n 1 | cut -d: -f1)"
-    [ "$found" = 1 ] || bad hooks/hooks.json "${ln:-1}" hooks-no-test "已註冊的 hook「$name」沒有測試檔（期望 $cands）"
+    done
+    if [ "$found" != 1 ]; then
+      hj_line "hooks/$b"
+      bad hooks/hooks.json "$HJ_LN" hooks-no-test "已註冊的 hook「$name」沒有測試檔（期望 $cands）"
+    fi
   done
 fi
 
