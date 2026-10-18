@@ -11,10 +11,13 @@
 # 都有一個會讓它失敗的 fixture。
 #
 # 用法：
-#   bash scripts/check-plugin.sh                 檢查 1～4
-#   bash scripts/check-plugin.sh --pre-push      給 git pre-push hook：檢查 1～4，再核對推往
-#                                                refs/heads/main 的 ref 有沒有 bump 版本
-#                                                （stdin 為 <local ref> <local sha> <remote ref> <remote sha>）
+#   bash scripts/check-plugin.sh                 對工作樹跑檢查 1～4
+#   bash scripts/check-plugin.sh --pre-push [<remote> [<url>]]
+#                                                給 git pre-push hook（git 會把 remote 名稱與 url 放在 $1 $2，
+#                                                githooks/pre-push 原樣轉交）。對每個被推送的 commit
+#                                                （不是工作樹）跑檢查 1～4，再核對推往 refs/heads/main 的 ref
+#                                                有沒有把版本嚴格調大。
+#                                                stdin 為 <local ref> <local sha> <remote ref> <remote sha>
 #   --root DIR                                   指定 plugin 根目錄（預設：本檔所在目錄的上一層）
 #
 # 離開碼：0 全過；1 發現問題（印 file:line 與規則）；2 環境不足或無法判斷
@@ -36,15 +39,21 @@
 #   4. 散文路徑：(prose-path) 反引號內以 scripts/ hooks/ references/ skills/ agents/ tests/
 #      templates/ 開頭的相對路徑必須存在於根目錄之下；不含 fenced code block。
 #      指的是使用者專案裡的路徑時，在同一行行尾加：<!-- check-plugin: allow path -->
-#   5. --pre-push：(version-bump) 推往 refs/heads/main 的範圍內動到 plugin 內容卻沒 bump version。
-#      檢查 1～4 看的是工作樹，不是被推的 commit；pre-push 時兩者通常相同（推的是 HEAD）。
+#   5. --pre-push：(version-bump) 推往 refs/heads/main 的範圍內動到 plugin 內容，version 卻沒有嚴格變大
+#      （不變或降版都拒絕）。
+#      --pre-push 的檢查 1～4 對象是「被推送的 commit」：每個 sha 用 git archive 解到暫存目錄，再以本腳本
+#      --root 檢查那棵樹，輸出以 <sha7>: 開頭。不看工作樹——工作樹與被推送的內容常常不同（git push
+#      origin side:main、修正只留在工作樹、工作樹有未提交的半成品），看工作樹會在兩個方向都出錯。
+#      推非 main 的 ref（分支、tag）也一樣檢查被推送的 commit；刪除 ref 沒有東西可檢查。
 set -u
 export LC_ALL=C
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 2
+SELF="$SELF_DIR/${BASH_SOURCE[0]##*/}"     # 絕對路徑：--pre-push 會對解出來的樹再叫自己一次，而那時已 cd 走了
 ROOT="$(cd "$SELF_DIR/.." && pwd)" || exit 2
 JQ="${CHECK_PLUGIN_JQ:-jq}"        # 測試用：指向不存在的指令即可模擬「環境缺 jq」
-GIT="${CHECK_PLUGIN_GIT:-git}"
+GIT="${CHECK_PLUGIN_GIT:-git}"     # 測試用：指向會讓特定子指令失敗的包裝程式，驗證 fail-closed 分支
+TAR="${CHECK_PLUGIN_TAR:-tar}"     # 同上（解開 git archive 的輸出）
 MODE=check
 
 # 不需要測試檔、也不需要註冊的 hooks 輔助檔（lib）。明文清單，不放寬規則。
@@ -91,8 +100,131 @@ for t in awk grep sed find sort; do
 done
 if [ "$MODE" = prepush ]; then
   command -v "$GIT" >/dev/null 2>&1 || die_env "找不到 git（$GIT）；--pre-push 需要它"
+  command -v "$TAR" >/dev/null 2>&1 || die_env "找不到 tar（$TAR）；--pre-push 要把被推送的 commit 解開來檢查"
+  command -v mktemp >/dev/null 2>&1 || die_env "找不到 mktemp"
 fi
 cd "$ROOT" || die_env "無法進入根目錄 $ROOT"
+
+finish() { # 依 ENV_ERR／FOUND 收尾並離開
+  if [ "$ENV_ERR" = 1 ]; then
+    echo "check-plugin: 有無法判斷的項目（fail-closed，離開碼 2）" >&2
+    exit 2
+  fi
+  if [ "$FOUND" -gt 0 ]; then
+    echo "check-plugin: $FOUND 個問題" >&2
+    exit 1
+  fi
+  if [ "$MODE" = prepush ]; then
+    if [ "$PUSHED_CHECKED" -eq 0 ]; then
+      echo "check-plugin: OK（沒有需要檢查的 commit：stdin 沒有 ref，或只有刪除）"
+    else
+      echo "check-plugin: OK（被推送的 commit 的 tier 一致性、派工寫法、hooks、散文路徑、版本核對）"
+    fi
+  else
+    echo "check-plugin: OK（tier 一致性、派工寫法、hooks、散文路徑）"
+  fi
+  exit 0
+}
+
+# =====================================================================
+# --pre-push：檢查「被推送的 commit」（規則 5 與規則 1～4 的 commit 版）
+# =====================================================================
+is_zero() { case "$1" in ''|*[!0]*) return 1 ;; *) return 0 ;; esac; }
+is_sha()  { case "$1" in ''|*[!0-9a-f]*) return 1 ;; *) [ "${#1}" -ge 40 ] ;; esac; }
+plugin_version() { # plugin_version <commit> → 印 version；讀不到就回非 0
+  local j v
+  # 兩段各自檢查離開碼（不接管線，理由同下方 git diff）。
+  j="$("$GIT" show "$1:.claude-plugin/plugin.json" 2>/dev/null)" || return 1
+  v="$("$JQ" -r '.version // empty' <<<"$j" 2>/dev/null)" || return 1
+  v="${v%$'\r'}"                                          # 本機 jq 輸出 CRLF
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
+
+PUSHED_CHECKED=0
+CHECKED=" "
+# 把 sha 的內容用 git archive 解到暫存目錄，再以本腳本 --root 檢查那棵樹（檢查 1～4）。
+# 為什麼不直接檢查工作樹：被推送的內容常常不是工作樹——git push origin side:main、壞內容已 commit
+# 而修正只留在工作樹、工作樹有未提交的半成品；看工作樹在兩個方向都會判錯。
+# 不接管線：git archive 先寫成檔案再解開，兩段各自檢查離開碼，失敗一律 fail-closed。
+check_pushed_tree() { # check_pushed_tree <sha>
+  local sha="$1" s7="${1:0:7}" td out rc l n=0
+  case "$CHECKED" in *" $sha "*) return 0 ;; esac        # 同一個 sha 推到多個 ref，只檢查一次
+  CHECKED="$CHECKED$sha "
+  PUSHED_CHECKED=$((PUSHED_CHECKED + 1))
+  td="$(mktemp -d 2>/dev/null)" && [ -n "$td" ] && [ -d "$td" ] || { soft_env "mktemp -d 失敗，無法檢查 $s7 的內容"; return 0; }
+  if ! "$GIT" archive --format=tar -o "$td/pushed.tar" "$sha" 2>/dev/null; then
+    rm -rf "${td:?}"; soft_env "git archive $sha 失敗，無法檢查被推送的內容"; return 0
+  fi
+  if ! mkdir "$td/tree" || ! "$TAR" -x -C "$td/tree" <"$td/pushed.tar" 2>/dev/null; then
+    rm -rf "${td:?}"; soft_env "解開 $s7 的內容失敗（$TAR）"; return 0
+  fi
+  out="$(bash "$SELF" --root "$td/tree" 2>&1 </dev/null)"; rc=$?
+  rm -rf "${td:?}"
+  case "$rc" in
+    0) ;;
+    1)
+      while IFS= read -r l; do
+        printf '%s:%s\n' "$s7" "$l" >&2
+        case "$l" in check-plugin:*) ;; *) n=$((n + 1)) ;; esac
+      done <<<"$out"
+      [ "$n" -gt 0 ] || n=1
+      FOUND=$((FOUND + n))
+      ;;
+    *)
+      while IFS= read -r l; do printf '%s:%s\n' "$s7" "$l" >&2; done <<<"$out"
+      soft_env "被推送的 $s7 無法判斷（對它跑檢查的離開碼是 $rc）"
+      ;;
+  esac
+  return 0
+}
+
+pre_push() {
+  local input line lref lsha rref rsha extra base changed bv lv shown
+  input="$(cat)" || { soft_env "讀不到 pre-push 的 stdin"; return 0; }
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [ -n "$line" ] || continue
+    extra=""
+    read -r lref lsha rref rsha extra <<<"$line"
+    if [ -z "$rsha" ] || [ -n "$extra" ]; then soft_env "pre-push stdin 的格式不是 4 欄：$line"; continue; fi
+    if is_zero "$lsha"; then continue; fi                    # 刪除 ref：沒有被推送的內容
+    if ! is_sha "$lsha"; then soft_env "local sha 不是合法的 sha：$lsha"; continue; fi
+    if ! "$GIT" cat-file -e "${lsha}^{commit}" 2>/dev/null; then soft_env "local sha $lsha 不在本機物件庫"; continue; fi
+    check_pushed_tree "$lsha"                                # 不論推到哪個 ref，檢查對象都是被推送的 commit
+    [ "$rref" = "refs/heads/main" ] || continue              # 版本核對只管 main
+    if is_zero "$rsha"; then
+      # 新建遠端 main：以 refs/remotes/origin/main 求比較基準，求不出來就拒絕（不猜）
+      if ! base="$("$GIT" merge-base "$lsha" refs/remotes/origin/main 2>/dev/null)" || [ -z "$base" ]; then
+        soft_env "refs/heads/main 是新建的遠端 ref，但求不出 $lsha 對 refs/remotes/origin/main 的比較基準；先 git fetch origin 再推"
+        continue
+      fi
+    else
+      if ! is_sha "$rsha" || ! "$GIT" cat-file -e "${rsha}^{commit}" 2>/dev/null; then
+        soft_env "remote sha $rsha 不在本機物件庫，無法比較版本；先 git fetch 再推"
+        continue
+      fi
+      base="$rsha"
+    fi
+    # 不接管線：管線的離開碼是最後一段的，`git diff | tr` 會把 git 的失敗吞掉、changed 變空字串而被當成
+    # 「沒動到 plugin 內容」放行（fail-open）。也不用 -z：bash 變數放不了 NUL，這裡只需要知道有沒有變動與列前幾個檔名。
+    if ! changed="$("$GIT" diff --name-only --no-renames "$base" "$lsha" -- $CONTENT_PATHS 2>/dev/null)"; then
+      soft_env "git diff $base $lsha 失敗"; continue
+    fi
+    [ -n "$changed" ] || continue                            # 只動 tests/、README.md、.gitattributes 等：不需要 bump
+    if ! bv="$(plugin_version "$base")"; then soft_env "讀不到 $base 的 .claude-plugin/plugin.json version"; continue; fi
+    if ! lv="$(plugin_version "$lsha")"; then soft_env "讀不到 $lsha 的 .claude-plugin/plugin.json version"; continue; fi
+    if [ "$bv" = "$lv" ]; then
+      shown="$(printf '%s\n' "$changed" | head -n 5 | tr '\n' ' ')"
+      bad .claude-plugin/plugin.json 1 version-bump "推往 refs/heads/main 的 ${base:0:7}..${lsha:0:7} 動到 plugin 內容（$(printf '%s\n' "$changed" | grep -c '') 個檔：${shown% }），但 version 仍是 $lv，請先 bump"
+    fi
+  done <<<"$input"
+}
+
+if [ "$MODE" = prepush ]; then
+  pre_push
+  finish
+fi
 
 # 待掃描的文件：skills/ references/ agents/ 下的 .md（規則 1、2、4）；規則 4 另加 README.md。
 DOCS=()
@@ -397,73 +529,5 @@ while IFS=$'\t' read -r pfile pline ptok; do
   bad "$pfile" "$pline" prose-path "反引號內的路徑 $ptok 不存在於 plugin 根目錄；若指的是使用者專案或使用者設定 repo 的路徑，改寫成 ~/... 或在行尾加 $MARK_PATH"
 done <<<"$out"
 
-# =====================================================================
-# 規則 5：--pre-push 的版本核對
-# =====================================================================
-is_zero() { case "$1" in ''|*[!0]*) return 1 ;; *) return 0 ;; esac; }
-is_sha()  { case "$1" in ''|*[!0-9a-f]*) return 1 ;; *) [ "${#1}" -ge 40 ] ;; esac; }
-plugin_version() { # plugin_version <commit> → 印 version；讀不到就回非 0
-  local j v
-  # 兩段各自檢查離開碼（不接管線，理由同 pre_push_versions 裡的 git diff）。
-  j="$("$GIT" show "$1:.claude-plugin/plugin.json" 2>/dev/null)" || return 1
-  v="$("$JQ" -r '.version // empty' <<<"$j" 2>/dev/null)" || return 1
-  v="${v%$'\r'}"                                          # 本機 jq 輸出 CRLF
-  [ -n "$v" ] || return 1
-  printf '%s' "$v"
-}
-
-pre_push_versions() {
-  local input line lref lsha rref rsha extra base changed bv lv shown
-  input="$(cat)"
-  while IFS= read -r line; do
-    line="${line%$'\r'}"
-    [ -n "$line" ] || continue
-    extra=""
-    read -r lref lsha rref rsha extra <<<"$line"
-    if [ -z "$rsha" ] || [ -n "$extra" ]; then soft_env "pre-push stdin 的格式不是 4 欄：$line"; continue; fi
-    [ "$rref" = "refs/heads/main" ] || continue              # 非 main 只跑 1～4
-    if is_zero "$lsha"; then continue; fi                    # 刪除 ref：沒有東西要版本核對
-    if ! is_sha "$lsha"; then soft_env "local sha 不是合法的 sha：$lsha"; continue; fi
-    if ! "$GIT" cat-file -e "${lsha}^{commit}" 2>/dev/null; then soft_env "local sha $lsha 不在本機物件庫"; continue; fi
-    if is_zero "$rsha"; then
-      # 新建遠端 main：以 refs/remotes/origin/main 求比較基準，求不出來就拒絕（不猜）
-      if ! base="$("$GIT" merge-base "$lsha" refs/remotes/origin/main 2>/dev/null)" || [ -z "$base" ]; then
-        soft_env "refs/heads/main 是新建的遠端 ref，但求不出 $lsha 對 refs/remotes/origin/main 的比較基準；先 git fetch origin 再推"
-        continue
-      fi
-    else
-      if ! is_sha "$rsha" || ! "$GIT" cat-file -e "${rsha}^{commit}" 2>/dev/null; then
-        soft_env "remote sha $rsha 不在本機物件庫，無法比較版本；先 git fetch 再推"
-        continue
-      fi
-      base="$rsha"
-    fi
-    # 不接管線：管線的離開碼是最後一段的，`git diff | tr` 會把 git 的失敗吞掉、changed 變空字串而被當成
-    # 「沒動到 plugin 內容」放行（fail-open）。也不用 -z：bash 變數放不了 NUL，這裡只需要知道有沒有變動與列前幾個檔名。
-    if ! changed="$("$GIT" diff --name-only --no-renames "$base" "$lsha" -- $CONTENT_PATHS 2>/dev/null)"; then
-      soft_env "git diff $base $lsha 失敗"; continue
-    fi
-    [ -n "$changed" ] || continue                            # 只動 tests/、README.md、.gitattributes 等：不需要 bump
-    if ! bv="$(plugin_version "$base")"; then soft_env "讀不到 $base 的 .claude-plugin/plugin.json version"; continue; fi
-    if ! lv="$(plugin_version "$lsha")"; then soft_env "讀不到 $lsha 的 .claude-plugin/plugin.json version"; continue; fi
-    if [ "$bv" = "$lv" ]; then
-      shown="$(printf '%s\n' "$changed" | head -n 5 | tr '\n' ' ')"
-      bad .claude-plugin/plugin.json 1 version-bump "推往 refs/heads/main 的 ${base:0:7}..${lsha:0:7} 動到 plugin 內容（$(printf '%s\n' "$changed" | grep -c '') 個檔：${shown% }），但 version 仍是 $lv，請先 bump"
-    fi
-  done <<<"$input"
-}
-
-[ "$MODE" = prepush ] && pre_push_versions
-
 # ---------- 結果 ----------
-if [ "$ENV_ERR" = 1 ]; then
-  echo "check-plugin: 有無法判斷的項目（fail-closed，離開碼 2）" >&2
-  exit 2
-fi
-if [ "$FOUND" -gt 0 ]; then
-  echo "check-plugin: $FOUND 個問題" >&2
-  exit 1
-fi
-if [ "$MODE" = prepush ]; then tail_note='、版本核對'; else tail_note=''; fi
-echo "check-plugin: OK（tier 一致性、派工寫法、hooks、散文路徑${tail_note}）"
-exit 0
+finish

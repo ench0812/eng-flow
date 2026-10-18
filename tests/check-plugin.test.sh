@@ -352,13 +352,42 @@ check_out "git diff 失敗的對照組：真 git 同一輸入 → 拒絕" 1 '\[v
 CHECK_PLUGIN_GIT="$tmp/git-fail-diff" pp "refs/heads/main $CD refs/heads/main $REMOTE_TIP"
 check_out "git diff 失敗 → fail-closed（exit 2），不是放行" 2 'git diff'
 
+# R2：--pre-push 的檢查 1～4 看的是「被推送的 commit」，不是工作樹。
+# 做法是把每個被推送的 sha 用 git archive 解到暫存目錄再檢查（輸出以 <sha7>: 開頭）。
+# 這一組的前提：工作樹（HEAD）永遠是乾淨的或與被推送的 commit 不同，所以看錯對象的實作會得到相反的結果。
 reset_to "$REMOTE_TIP"
 OUT="$(bash "$CHECK" --root "$W" --pre-push </dev/null 2>&1)"; RC=$?
-check_out "空 stdin：只跑檢查 1～4 → 放行" 0 '^check-plugin: OK'
+check_out "空 stdin：沒有要推的 ref，不看工作樹 → 放行" 0 '^check-plugin: OK'
+
+# (a) 壞內容已 commit，修正只留在工作樹：舊實作看工作樹，會放行一個壞 commit
+reset_to "$REMOTE_TIP"
 printf '%s\n' "Bad \`scripts/ghost.sh\`." >> "$W/README.md"
-OUT="$(bash "$CHECK" --root "$W" --pre-push </dev/null 2>&1)"; RC=$?
-check_out "--pre-push 也先跑檢查 1～4（工作樹有壞路徑 → 拒絕）" 1 '\[prose-path\]'
+git -C "$W" add -A; git -C "$W" commit -q -m "broken path"; CBAD="$(head_sha)"
+git -C "$W" show "$REMOTE_TIP:README.md" > "$W/README.md"           # 工作樹是乾淨版本，但沒有 commit
+pp "refs/heads/main $CBAD refs/heads/main $REMOTE_TIP"
+check_out "已 commit 的壞路徑、修正只在工作樹 → 拒絕，並指名被推送的 commit" 1 "^${CBAD:0:7}:README\\.md:[0-9]+: \\[prose-path\\].*scripts/ghost\\.sh"
+
+# (b) git push origin side:main：被推送的不是 HEAD
+reset_to "$REMOTE_TIP"
+git -C "$W" checkout -q -b side
+printf '%s\n' "Bad \`scripts/ghost2.sh\`." >> "$W/README.md"
+git -C "$W" add -A; git -C "$W" commit -q -m "side broken"; CSIDE="$(head_sha)"
+git -C "$W" checkout -q main                                         # HEAD 回到乾淨的遠端 tip
+pp "refs/heads/side $CSIDE refs/heads/main $REMOTE_TIP"
+check_out "推非 HEAD 的壞 commit 到 main → 拒絕" 1 "^${CSIDE:0:7}:README\\.md:[0-9]+: \\[prose-path\\].*ghost2"
+
+# (c) 推非 main 的 ref 也看被推送的 commit
+reset_to "$REMOTE_TIP"
+pp "refs/heads/feature $CBAD refs/heads/feature $Z"
+check_out "推壞 commit 到非 main 的新分支 → 拒絕" 1 "^${CBAD:0:7}:.*\\[prose-path\\]"
+
+# (d) 反方向：工作樹有未提交的半成品，被推送的 commit 是乾淨的
+reset_to "$REMOTE_TIP"; edit_commit tests/x-probe.txt; CCLEAN="$(head_sha)"
+printf '%s\n' "Half-done \`scripts/wip-ghost.sh\`." >> "$W/README.md"
+pp "refs/heads/main $CCLEAN refs/heads/main $REMOTE_TIP"
+check_out "工作樹有未提交的壞路徑、被推送的 commit 乾淨 → 放行" 0 '^check-plugin: OK'
 git -C "$W" checkout -q -- README.md
+git -C "$W" branch -q -D side
 
 # ---- e2e：真的 git push，經過 githooks/pre-push 轉交 stdin 與離開碼 ----
 mk_repo e2e 1
@@ -372,6 +401,15 @@ bump_commit 1.0.9
 OUT="$(git -C "$W" push origin main 2>&1)"; RC=$?
 if [ "$RC" = 0 ] && [ "$(git -C "$tmp/e2e/remote.git" rev-parse main)" = "$(head_sha)" ]; then ok
 else ng "e2e：bump 後的 push 放行且遠端更新" "rc=$RC；輸出：$(printf '%s' "$OUT" | head -c 400)"; fi
+# 被推送的是 side 上的壞 commit（版本有 bump），HEAD 留在乾淨的 main：舊實作看工作樹，會放行
+E1="$(git -C "$tmp/e2e/remote.git" rev-parse main)"
+git -C "$W" checkout -q -b side
+printf '%s\n' "Bad \`scripts/ghost.sh\`." >> "$W/README.md"
+bump_commit 1.0.10
+git -C "$W" checkout -q main
+OUT="$(git -C "$W" push origin side:main 2>&1)"; RC=$?
+if [ "$RC" != 0 ] && printf '%s' "$OUT" | grep -q 'prose-path' && [ "$(git -C "$tmp/e2e/remote.git" rev-parse main)" = "$E1" ]; then ok
+else ng "e2e：git push origin side:main 的壞 commit 被擋下且遠端沒變" "rc=$RC；輸出：$(printf '%s' "$OUT" | head -c 400)"; fi
 
 # ---------------------------------------------------------------------
 echo
