@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# git pre-push hook：把 stdin（<local ref> <local sha> <remote ref> <remote sha>）與 git 傳進來的
+# 引數（$1 = remote 名稱、$2 = url）原樣交給 scripts/check-plugin.sh --pre-push。
+# 邏輯全在那支腳本裡，這裡只負責找到它並轉交 stdin、引數與離開碼。
+# 引數一定要轉交：新建遠端 main 時，比較基準是 refs/remotes/<remote 名稱>/main，不能假設叫 origin。
+# 安裝（每個 clone 一次，worktree 共用 repo config 所以只需做一次）：
+#   git config core.hooksPath githooks
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 2
+exec bash "$HOOK_DIR/../scripts/check-plugin.sh" --pre-push "$@"

@@ -90,6 +90,16 @@ Reads sizes as *what the model actually received*, which is the definition of co
 
 Use it to decide *before* adding any lossy compression layer whether one is worth it — and note that the most actionable output is usually the per-command table, since changing the command itself is lossless.
 
+## Self-check
+
+`scripts/check-plugin.sh` — read-only consistency check of the plugin itself: tier model/effort across `agents/` and the docs that repeat them, dispatch wording, `hooks/hooks.json` against `hooks/` and `tests/`, and plugin-relative paths in prose. Exit `0` clean, `1` problems found (`file:line` plus rule id), `2` environment insufficient (fail-closed, never a skip). Every rule has a failing fixture in `tests/check-plugin.test.sh`.
+
+`--pre-push` checks what is being pushed, not the working tree: the commit each push leaves at the tip of `refs/heads/main` (including `side:main`) is extracted with `git read-tree` + `git checkout-index` (not `git archive`, so `export-ignore` cannot hide a file) and run through the same checks, so uncommitted edits can neither hide a bad commit nor block a clean one. Intermediate commits in the same push are not checked one by one: `claude plugin update` installs the tip, so only the tip reaches an installed copy (the version gate still compares the whole range). Pushes to any other ref (tags, feature branches) are let through unchecked, because the marketplace publishes from the default branch and `--no-verify` is forbidden. It also adds a version gate: a push to `main` that touches plugin content (`skills/`, `hooks/`, `agents/`, `scripts/`, `references/`, `templates/`, `.claude-plugin/`) must raise `version` in `.claude-plugin/plugin.json` strictly (unchanged or lower is refused). Enable it once per clone with `git config core.hooksPath githooks` (worktrees share the setting).
+
+When the hook refuses because it cannot judge (exit `2`, e.g. it cannot find the comparison base for a brand-new remote `main`), the legitimate way out is `git fetch <remote>` and push again. The very first push of `main` to an empty remote has no base at all; declare it with `CHECK_PLUGIN_INITIAL_PUSH=1 git push ...`, which only skips the version gate and only while no `refs/remotes/<remote>/main` exists. Do not use `--no-verify`.
+
+A deliberate counter-example in the docs takes a same-line marker, `<!-- check-plugin: allow dispatch -->` or `<!-- check-plugin: allow path -->`.
+
 ## Install
 
 ### Method 1: Add marketplace + install (recommended)
