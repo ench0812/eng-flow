@@ -389,10 +389,12 @@ BEGIN {
       L = toupper(substr(lab, 3, length(lab) - 4))
       if (L in bylabel) {
         tn = bylabel[L]
-        if (firstword(c[3]) != tmodel[tn])
-          bad("tier-table", "表格列 " lab " 的 model 欄是「" firstword(c[3]) "」，agents/" tn ".md frontmatter 是「" tmodel[tn] "」")
-        if (firstword(c[4]) != teffort[tn])
-          bad("tier-table", "表格列 " lab " 的 effort 欄是「" firstword(c[4]) "」，agents/" tn ".md frontmatter 是「" teffort[tn] "」")
+        # 先轉小寫再取第一個字：firstword 的字元類只收小寫，「Sonnet」會被讀成「onnet」而誤報
+        mw = firstword(tolower(c[3])); ew = firstword(tolower(c[4]))
+        if (mw != tmodel[tn])
+          bad("tier-table", "表格列 " lab " 的 model 欄是「" mw "」，agents/" tn ".md frontmatter 是「" tmodel[tn] "」")
+        if (ew != teffort[tn])
+          bad("tier-table", "表格列 " lab " 的 effort 欄是「" ew "」，agents/" tn ".md frontmatter 是「" teffort[tn] "」")
       }
     }
   }

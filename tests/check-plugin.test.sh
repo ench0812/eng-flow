@@ -100,8 +100,8 @@ EOF
 | Tier | Model | Effort | How |
 |---|---|---|---|
 | **Session** | main | `high` | settings |
-| **B1** | sonnet | `xhigh` | `agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'` |
-| **B2** | sonnet | `medium` | `agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` |
+| **B1** | Sonnet | `xhigh` | `agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'` |
+| **B2** | sonnet | `Medium` |`agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` |
 | **C** | haiku（Haiku 5.5） | low | `agentType:'eng-flow:tier-c'` + `model:"haiku"` + `effort:'low'` |
 EOF
   printf '# fx\n\nSee `scripts/foo.sh`.\n' > "$d/README.md"
@@ -159,6 +159,12 @@ new_tree t4; sed -i 's/| `xhigh` |/| `high` |/' "$T/references/demo.md"
 fix "tier-table：B1 列的 effort 欄不符" 1 '^references/demo\.md:5: \[tier-table\].*effort'
 new_tree t4b; sed -i 's/| haiku（Haiku 5.5） |/| sonnet（x） |/' "$T/references/demo.md"
 fix "tier-table：C 列的 model 欄不符" 1 '^references/demo\.md:7: \[tier-table\].*model'
+# N8：欄位大小寫不影響比對（基底裡 B1 的 model 寫 Sonnet、B2 的 effort 寫 Medium 必須通過）；寫成別的值照樣抓
+new_tree t4c; printf '%s\n' '| **B2** | Opus | Medium | x |' >> "$T/references/demo.md"
+fix "tier-table：大小寫不同但值也不同（Opus）→ 拒絕，並以小寫回報" 1 '^references/demo\.md:[0-9]+: \[tier-table\].*B2.*model 欄是「opus」'
+new_tree t4d; printf '%s\n' '| **B1** | SONNET | `High` | x |' >> "$T/references/demo.md"
+fix "tier-table：model 大寫相符、effort 值不符（High）→ 只報 effort" 1 '^references/demo\.md:[0-9]+: \[tier-table\].*B1.*effort 欄是「high」'
+check_absent "tier-table：大寫的 SONNET 不被誤報成 model 不符" 'B1.*model 欄是'
 
 new_tree t5; printf '%s\n' "Stale: \`agentType:'eng-flow:tier-d'\`" >> "$T/skills/demo/SKILL.md"
 fix "tier-unknown：引用不存在的 tier agent" 1 '^skills/demo/SKILL\.md:[0-9]+: \[tier-unknown\].*tier-d'
