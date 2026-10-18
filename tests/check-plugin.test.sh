@@ -109,6 +109,9 @@ EOF
   # 三支註冊的 hook：測試檔三種命名各一（<name>.test.sh、test_<name 的 - 換成 _>.py、明文例外表）；
   # 另有一支 lib（在腳本的 HOOK_LIBS 清單）不需要註冊也不需要測試。
   for h in alpha beta-two no-heredoc-backslashes iso-secret-lib; do printf '#!/bin/sh\n' > "$d/hooks/$h.sh"; done
+  # no-heredoc-backslashes.sh 會呼叫同名的 .py（真實 repo 的樣子）：.py 沒有自己的註冊，不能因此報成未註冊
+  printf '#!/bin/sh\npython "$DIR/no-heredoc-backslashes.py"\n' > "$d/hooks/no-heredoc-backslashes.sh"
+  printf '# py\n' > "$d/hooks/no-heredoc-backslashes.py"
   hooks_json "$d/hooks/hooks.json" alpha.sh beta-two.sh no-heredoc-backslashes.sh
   printf '#!/bin/sh\n' > "$d/tests/alpha.test.sh"
   printf '# t\n' > "$d/tests/test_beta_two.py"
@@ -217,6 +220,21 @@ check_absent "hooks-missing：存在的 hook 沒被誤報" 'hooks/alpha\.sh.*不
 new_tree h2; printf '#!/bin/sh\n' > "$T/hooks/orphan.sh"
 fix "hooks-unregistered：hooks/*.sh 沒註冊也不在 lib 清單" 1 '^hooks/orphan\.sh:1: \[hooks-unregistered\]'
 check_absent "hooks-unregistered：lib 清單內的 iso-secret-lib.sh 不誤報" '^hooks/iso-secret-lib\.sh'
+
+# N9：hooks/*.py 要有人用——hooks.json 直接引用，或已註冊的 .sh 會呼叫它（基底裡 no-heredoc-backslashes.py 就是後者，必須通過）
+new_tree h2b; printf '# py\n' > "$T/hooks/orphan.py"
+fix "hooks-unregistered：hooks/*.py 沒人註冊也沒人呼叫" 1 '^hooks/orphan\.py:1: \[hooks-unregistered\]'
+check_absent "hooks-unregistered：被已註冊的 .sh 呼叫的 .py 不誤報" 'no-heredoc-backslashes\.py'
+new_tree h2c; printf '# py\n' > "$T/hooks/helper.py"; printf '#!/bin/sh\npython helper.py\n' > "$T/hooks/lonely.sh"
+fix "hooks-unregistered：只被「未註冊的 .sh」提到的 .py 仍算未註冊（.sh 本身也報）" 1 '^hooks/helper\.py:1: \[hooks-unregistered\]' '^hooks/lonely\.sh:1: \[hooks-unregistered\]'
+new_tree h2d; printf '# py\n' > "$T/hooks/helper.py"; printf 'python helper.py\n' >> "$T/hooks/alpha.sh"
+fix "hooks-unregistered：被已註冊的 alpha.sh 呼叫的 .py → 放行" 0 '^check-plugin: OK'
+new_tree h2e; printf '# py\n' > "$T/hooks/direct.py"; printf '# t\n' > "$T/tests/test_direct.py"
+hooks_json "$T/hooks/hooks.json" alpha.sh beta-two.sh no-heredoc-backslashes.sh direct.py
+fix "hooks-unregistered：hooks.json 直接引用的 .py（有測試檔）→ 放行" 0 '^check-plugin: OK'
+new_tree h2f; printf '# py\n' > "$T/hooks/direct.py"
+hooks_json "$T/hooks/hooks.json" alpha.sh beta-two.sh no-heredoc-backslashes.sh direct.py
+fix "hooks-no-test：hooks.json 直接引用的 .py 沒有測試檔 → 拒絕" 1 '\[hooks-no-test\].*direct'
 
 new_tree h3; rm -f "$T/tests/alpha.test.sh"
 fix "hooks-no-test：<name>.test.sh 不存在" 1 '^hooks/hooks\.json:[0-9]+: \[hooks-no-test\].*alpha'

@@ -526,6 +526,25 @@ else
     [ "$reg" = 1 ] || bad "$f" 1 hooks-unregistered "$b 沒有在 hooks/hooks.json 註冊，也不在 HOOK_LIBS 清單（$HOOK_LIBS）"
   done
 
+  # 每支 hooks/*.py 也要有人用：hooks.json 直接引用它，或某支「已註冊的 .sh」會呼叫它（內容裡提到它的檔名）。
+  # 只放行這兩種：no-heredoc-backslashes.sh 呼叫 no-heredoc-backslashes.py 不能報成未註冊，但沒人用的 .py
+  # 是 dead code 或漏註冊的 hook。「提到檔名」是近似判斷（註解裡提到也算），刻意往寬鬆的方向；未註冊的 .sh 提到它不算。
+  for f in hooks/*.py; do
+    [ -f "$f" ] || continue
+    b="${f##*/}"
+    reg=0
+    for r in ${REGISTERED[@]+"${REGISTERED[@]}"}; do
+      if [ "$r" = "$b" ]; then reg=1; break; fi
+      case "$r" in
+        *.sh)
+          if ! src="$(<"hooks/$r")"; then bad hooks/hooks.json 1 hooks-unregistered "讀不到已註冊的 hooks/$r，無法判斷 $b 是不是被它呼叫"; reg=1; break; fi
+          case "$src" in *"$b"*) reg=1; break ;; esac
+          ;;
+      esac
+    done
+    [ "$reg" = 1 ] || bad "$f" 1 hooks-unregistered "$b 沒有在 hooks/hooks.json 註冊，也沒有任何已註冊的 .sh 提到它（沒人用的 .py 是 dead code，或是漏註冊的 hook）"
+  done
+
   # 每支註冊的 hook 都要有測試檔。名稱對不上的例外用明文對照表，不放寬規則。
   hook_test_candidates() { # → CANDS（陣列）
     case "$1" in
