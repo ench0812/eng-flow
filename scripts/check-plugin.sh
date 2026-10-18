@@ -144,7 +144,7 @@ plugin_version() { # plugin_version <commit> → 印 version；讀不到就回�
   # 兩段各自檢查離開碼（不接管線，理由同下方 git diff）。
   j="$("$GIT" show "$1:.claude-plugin/plugin.json" 2>/dev/null)" || return 1
   v="$("$JQ" -r '.version // empty' <<<"$j" 2>/dev/null)" || return 1
-  v="${v%$'\r'}"                                          # 本機 jq 輸出 CRLF
+  v="${v%$'\r'}"                                          # 保險：jq 輸出 CRLF 時的尾端 \r（Git Bash 的 $(...) 本來就會清掉，測不出差異）
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }
@@ -483,7 +483,7 @@ else
     cmds=""
   fi
   # 迴圈內全用 bash 內建（不開子行程）：Windows 上每個 fork 約 30～100 ms，這段原本佔掉執行時間的一半
-  HJ=()
+  HJ=()   # 只用來找行號（子字串比對），行尾 \r 不影響結果；清掉是保險
   while IFS= read -r l || [ -n "$l" ]; do HJ+=("${l%$'\r'}"); done < hooks/hooks.json
   hj_line() { # hj_line <needle> → HJ_LN = hooks.json 中第一個含 needle 的行號（找不到 1）
     local i=0 l
@@ -496,7 +496,7 @@ else
   ref_re='CLAUDE_PLUGIN_ROOT[}]?"?/([A-Za-z0-9._/-]+)'
   REFS=()      # hooks.json 裡引用的 plugin 內相對路徑（去重）
   while IFS= read -r cmd; do
-    cmd="${cmd%$'\r'}"                                  # 本機 jq 輸出 CRLF
+    cmd="${cmd%$'\r'}"                                  # 保險：ref_re 的字元集本來就不含 \r，這行沒有行為差異（mutation 驗證過）
     rest="$cmd"
     while [[ "$rest" =~ $ref_re ]]; do
       ref="${BASH_REMATCH[1]}"; whole="${BASH_REMATCH[0]}"

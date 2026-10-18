@@ -10,8 +10,15 @@
 #      「不該擋」的案例放在基底裡，由基底通過來證明。
 #   3. pre-push：用暫存 git repo + bare remote 實際 commit，涵蓋版本核對的各種推送形狀。
 #
-# 本機 jq 輸出 CRLF：hooks.json 的 fixture 放兩筆以上，並讓「排在前面那筆」出錯，
-# 這樣讀取時沒清 \r 的實作會在第一筆就露餡。
+# CRLF 的涵蓋範圍（2026-10-18 對 check-plugin.sh 逐行刪掉清 \r 的處理做 mutation，結果如下）：
+#   - 有鑑別力（刪掉就紅；在「CRLF」那一節與 pre-push 的 stdin 兩行測試）：
+#     AWK_FRONTMATTER 的 sub(/\r$/)、AWK_DOCSCAN 的 sub(/\r$/)、pre_push 的 line="${line%$'\r'}"。
+#     這台的 MSYS gawk 讀檔時自己就把 \r\n 當換行，所以 CRLF 那一節用 BINMODE=3 的 awk shim 讓 \r 原樣保留；
+#     這台的 bash 會清掉 $(cat) 結果最後一行的尾端 \r，所以 stdin 測試要兩行、有事要做的放第一行。
+#   - 沒有任何測試能證明有用（刪掉仍全綠）：cmd、HJ、plugin_version 的 v、tier 解析的 fm、AWK_PROSE 的 sub(/\r$/)。
+#     原因各自不同（ref_re 與 prose 的反引號 span 本來就吃不到 \r；HJ 只做子字串找行號；Git Bash 的 $(...) 會先清掉
+#     尾端 \r；fm 前面還有 AWK_FRONTMATTER 的清除），它們是保險，不是被驗證過的行為。所以 hooks.json 的
+#     「不存在的 hook 排在前面那筆」fixture 只代表「不是最後一筆也抓得到」，不要拿來宣稱涵蓋了 CRLF。
 #
 # Run: bash tests/check-plugin.test.sh   (exit 0 = all pass)
 set -u
@@ -209,9 +216,10 @@ fix "hooks-json：不是合法 JSON" 1 '^hooks/hooks\.json:1: \[hooks-json\]'
 new_tree h0b; rm -f "$T/hooks/hooks.json"
 fix "hooks-json：hooks.json 不存在" 1 '^hooks/hooks\.json:1: \[hooks-json\]'
 
-# 兩筆以上，排在前面那筆出錯（jq 輸出 CRLF：沒清 \r 的實作在第一筆就會露餡）
+# 兩筆以上，不存在的排在前面那筆、也排在最後那筆各測一次（不要只測最後一筆）。
+# 輸出不帶 CR 是對最終結果的檢查（本機 jq 輸出 CRLF）；它不是清 \r 那行程式的 mutation 證據，見檔頭說明。
 new_tree h1; hooks_json "$T/hooks/hooks.json" ghost.sh alpha.sh beta-two.sh no-heredoc-backslashes.sh
-fix "hooks-missing：排在前面那筆引用的檔案不存在" 1 '^hooks/hooks\.json:[0-9]+: \[hooks-missing\].*hooks/ghost\.sh'
+fix "hooks-missing：排在前面那筆引用的檔案不存在" 1 '^hooks/hooks\.json:[0-9]+: \[hooks-missing\].*hooks/ghost\.sh 不存在$'
 check_absent "hooks-missing：輸出不帶 CR" $'\r'
 new_tree h1b; hooks_json "$T/hooks/hooks.json" alpha.sh beta-two.sh no-heredoc-backslashes.sh ghost.sh
 fix "hooks-missing：排在最後那筆也抓得到" 1 '\[hooks-missing\].*hooks/ghost\.sh'
@@ -257,6 +265,34 @@ new_tree p1e; printf '%s\n' "Pattern \`agents/nothing-*.md\` matches nothing." >
 fix "prose-path：萬用字元沒有任何符合" 1 '\[prose-path\].*agents/nothing-\*\.md'
 new_tree p1f; printf '%s\n' "Outside plugin: \`scripts/ghost.sh\` <!-- check-plugin: allow path -->" >> "$T/skills/demo/SKILL.md"
 fix "prose-path：同行放行標記有效" 0 '^check-plugin: OK'
+
+# =====================================================================
+echo "== CRLF =="
+# .md 是 CRLF（Windows 的 autocrlf checkout）：frontmatter 的 --- 判斷、agents 內 model: 行的略過、表格與派工寫法
+# 都靠 awk 內清掉行尾 \r（刪掉 AWK_FRONTMATTER 或 AWK_DOCSCAN 的 sub(/\r$/, ...) 會變紅；AWK_PROSE 那條測不出來，見檔頭說明）。
+# 這台的 MSYS gawk 讀檔時自己就把 \r\n 當成換行，不加 shim 的話這一節在這台量不到任何東西；
+# shim 用 BINMODE=3 讓 awk 原樣保留 \r（和 Linux 的 awk 一樣），所以這一節在任何平台都有鑑別力。
+REAL_AWK="$(command -v awk)"
+mkdir -p "$tmp/awkshim"
+printf '#!/bin/sh\nexec "%s" -v BINMODE=3 "$@"\n' "$REAL_AWK" > "$tmp/awkshim/awk"
+chmod +x "$tmp/awkshim/awk"
+OLD_PATH="$PATH"; PATH="$tmp/awkshim:$PATH"
+crlf_md() { find "$T" -name '*.md' -exec sed -i 's/$/\r/' {} +; }
+new_tree c0; printf 'a\r\n' > "$T/probe.txt"
+if [ "$(awk '{ print ($0 == "a") }' "$T/probe.txt")" = 0 ]; then ok; else ng "CRLF 的前提：shim 之下 awk 看得到行尾 \\r" "shim 沒有生效，這一節的測試不具鑑別力"; fi
+new_tree c1; crlf_md
+fix "CRLF 的 .md：基底照樣通過（frontmatter 與 agents 的 model: 行不被誤判）" 0 '^check-plugin: OK'
+new_tree c2; crlf_md; sed -i 's/| `xhigh` |/| `high` |/' "$T/references/demo.md"
+fix "CRLF 的 .md：tier-table 錯誤照樣抓到" 1 '^references/demo\.md:5: \[tier-table\].*effort'
+check_absent "CRLF 的 .md：輸出不帶 CR" $'\r'
+new_tree c3; crlf_md; sed -i 's/effort xhigh）/effort high）/' "$T/agents/tier-b1.md"
+fix "CRLF 的 agent：tier-desc 錯誤照樣抓到" 1 '^agents/tier-b1\.md:3: \[tier-desc\].*high'
+new_tree c4; crlf_md; printf 'Dispatch with `model:"haiku"` for scanning.\r\n' >> "$T/skills/demo/SKILL.md"
+fix "CRLF 的 .md：dispatch-model 照樣抓到" 1 '^skills/demo/SKILL\.md:[0-9]+: \[dispatch-model\].*haiku'
+new_tree c5; crlf_md; printf 'Also see `scripts/ghost.sh`.\r\n' >> "$T/README.md"
+fix "CRLF 的 .md：prose-path 照樣抓到" 1 '^README\.md:[0-9]+: \[prose-path\].*scripts/ghost\.sh'
+check_absent "CRLF 的 .md：prose-path 的路徑不帶 CR" $'\r'
+PATH="$OLD_PATH"
 
 # =====================================================================
 echo "== 環境不足（fail-closed，exit 2）=="
@@ -512,6 +548,15 @@ check_out "缺 tar → exit 2（環境不足）" 2 '環境不足.*tar'
 reset_to "$REMOTE_TIP"; git -C "$W" rm -rq skills references agents; git -C "$W" commit -q -m "gut docs"; CG="$(head_sha)"
 pp "refs/heads/feature $CG refs/heads/feature $Z"
 check_out "被推送的樹掃描不到任何文件 → exit 2，輸出指名那個 commit" 2 "^${CG:0:7}:check-plugin: 環境不足" '無法判斷'
+
+# stdin 是 CRLF（行尾 \r 不能黏在最後一欄的 sha 上）。一定要兩行以上、而且有事要做的放第一行：
+# 這台的 bash 會把 $(cat) 結果最後一行的尾端 \r 一起清掉，單行輸入量不到「逐行清 \r」那一行；
+# 排在前面的行才保留 \r（對 `line="${line%$'\r'}"` 做 mutation 驗證過，刪掉它這兩則會變紅）。
+reset_to "$REMOTE_TIP"
+OUT="$(printf 'refs/heads/main %s refs/heads/main %s\r\n(delete) %s refs/heads/gone %s\r\n' "$CA" "$REMOTE_TIP" "$Z" "$REMOTE_TIP" | bash "$CHECK" --root "$W" --pre-push origin 2>&1)"; RC=$?
+check_out "stdin 是 CRLF（兩行）：第一行乾淨的 commit → 放行" 0 '^check-plugin: OK'
+OUT="$(printf 'refs/heads/main %s refs/heads/main %s\r\n(delete) %s refs/heads/gone %s\r\n' "$CN" "$REMOTE_TIP" "$Z" "$REMOTE_TIP" | bash "$CHECK" --root "$W" --pre-push origin 2>&1)"; RC=$?
+check_out "stdin 是 CRLF（兩行）：第一行沒 bump 的 commit → 拒絕" 1 '\[version-bump\]'
 
 # tag：annotated tag 的 sha 是 tag 物件，要剝到 commit 再檢查
 reset_to "$REMOTE_TIP"
