@@ -1,11 +1,12 @@
 """Start Codex hooks with native Git Bash on Windows, never the WSL shim."""
+from __future__ import annotations
+
 from pathlib import Path
 import os
 import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = os.name == 'nt'
 
 
@@ -32,6 +33,7 @@ def find_bash() -> Path | None:
 
 def main() -> int:
     try:
+        root = Path(__file__).resolve().parents[1]
         # Drain the host's input even when dependencies are missing, so a broken
         # stdin pipe cannot replace the intentional blocking status.
         payload = sys.stdin.buffer.read()
@@ -43,13 +45,19 @@ def main() -> int:
         # The inner adapter also resolves bash. Keep it on this same native shell;
         # do not mutate the user's PATH or config.toml.
         env['PATH'] = str(bash.parent) + os.pathsep + env.get('PATH', '')
-        result = subprocess.run([str(bash), (ROOT/'scripts/codex-hook.sh').as_posix(), *sys.argv[1:]],
+        result = subprocess.run([str(bash), (root/'scripts/codex-hook.sh').as_posix(), *sys.argv[1:]],
                                 input=payload, env=env, timeout=27)
-    except (OSError, subprocess.TimeoutExpired):
+        return 0 if result.returncode == 0 else 2
+    except Exception:
         print('[eng-flow Codex] 原生 Bash 啟動失敗或逾時，已阻擋；請修復執行環境。', file=sys.stderr)
         return 2
-    return 0 if result.returncode == 0 else 2
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        exit_code = main()
+    except BaseException:
+        # Includes interruption and unexpected SystemExit from dependencies.
+        # Keep our intentional successful exit outside this catch-all boundary.
+        exit_code = 2
+    sys.exit(exit_code)

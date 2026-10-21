@@ -3,6 +3,7 @@ import json
 import importlib.util
 import io
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -35,10 +36,10 @@ class LauncherUnit(unittest.TestCase):
              mock.patch.object(self.launch.shutil, 'which', return_value='/usr/bin/bash'):
             self.assertEqual(self.launch.find_bash(), Path('/usr/bin/bash'))
 
-    def invoke(self, bash, result=None, error=None):
+    def invoke(self, bash, result=None, error=None, finder_error=None):
         payload = b'{"tool_input":{"command":"fake private payload"}}'
         errors = io.StringIO()
-        with mock.patch.object(self.launch, 'find_bash', return_value=bash), \
+        with mock.patch.object(self.launch, 'find_bash', return_value=bash, side_effect=finder_error), \
              mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(payload))), \
              mock.patch.object(sys, 'stderr', errors), \
              mock.patch.object(sys, 'argv', ['launcher', '--host', 'codex', '--hook', 'iso-scan-write']), \
@@ -51,6 +52,18 @@ class LauncherUnit(unittest.TestCase):
         code, run, _ = self.invoke(None)
         self.assertEqual(code, 2)
         run.assert_not_called()
+
+    def test_unexpected_finder_exception_blocks(self):
+        for exception in (RuntimeError, ValueError, MemoryError, TypeError):
+            with self.subTest(exception=exception.__name__):
+                try:
+                    actual = self.invoke(None, finder_error=exception('fake private payload'))[0]
+                except Exception as error:
+                    actual = ('uncaught', type(error).__name__)
+                self.assertEqual(actual, 2)
+
+    def test_annotations_are_deferred(self):
+        self.assertIsInstance(self.launch.find_bash.__annotations__['return'], str)
 
     def test_child_failures_block(self):
         for error in (OSError('fixture'), subprocess.TimeoutExpired('fixture', 27)):
@@ -73,6 +86,35 @@ class LauncherUnit(unittest.TestCase):
         self.assertEqual(kwargs['timeout'], 27)
         self.assertEqual(kwargs['env']['PATH'].split(os.pathsep)[0], str(bash.parent))
         self.assertEqual(os.environ.get('PATH'), original)
+
+
+class EntryBoundary(unittest.TestCase):
+    def test_normal_completion_keeps_successful_exit(self):
+        with mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
+             mock.patch.object(sys, 'argv', ['launcher', '--host', 'codex', '--hook', 'iso-scan-bash']), \
+             mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(ROOT/'scripts/codex_hook_launch.py'), run_name='__main__')
+        self.assertEqual(result.exception.code, 0)
+
+    def test_interruptions_and_early_exit_block(self):
+        for error in (KeyboardInterrupt('fake private payload'),
+                      GeneratorExit('fake private payload'), SystemExit(0), SystemExit(1)):
+            with self.subTest(error=type(error).__name__, args=error.args):
+                errors = io.StringIO()
+                with mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
+                     mock.patch.object(sys, 'stderr', errors), \
+                     mock.patch('shutil.which', side_effect=error):
+                    try:
+                        runpy.run_path(str(ROOT/'scripts/codex_hook_launch.py'), run_name='__main__')
+                        actual = ('returned', None)
+                    except SystemExit as result:
+                        actual = ('exit', result.code)
+                    except BaseException as result:
+                        actual = ('uncaught', type(result).__name__)
+                self.assertEqual(actual, ('exit', 2))
+                self.assertNotIn('fake private payload', errors.getvalue())
+                self.assertNotIn('Traceback', errors.getvalue())
 
 
 class ManifestLaunch(unittest.TestCase):
