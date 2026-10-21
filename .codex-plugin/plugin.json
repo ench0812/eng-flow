@@ -1,6 +1,6 @@
 {
   "name": "eng-flow",
-  "version": "1.44.0",
+  "version": "1.44.1",
   "description": "eng-flow engineering skills and explicit fail-closed Codex hook adapters",
   "skills": "./skills/",
   "hooks": {
@@ -11,7 +11,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"${PLUGIN_ROOT}/hooks/iso-scan-write.sh\" --host codex",
+              "command": "python \"${PLUGIN_ROOT}/scripts/codex_hook_launch.py\" --host codex --hook iso-scan-write",
               "timeout": 30
             }
           ]
@@ -21,7 +21,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"${PLUGIN_ROOT}/hooks/iso-scan-bash.sh\" --host codex",
+              "command": "python \"${PLUGIN_ROOT}/scripts/codex_hook_launch.py\" --host codex --hook iso-scan-bash",
               "timeout": 30
             }
           ]
@@ -31,7 +31,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-blind-sleep",
+              "command": "python \"${PLUGIN_ROOT}/scripts/codex_hook_launch.py\" --host codex --hook no-blind-sleep",
               "timeout": 30
             }
           ]
@@ -41,7 +41,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-swallowed-exit-code",
+              "command": "python \"${PLUGIN_ROOT}/scripts/codex_hook_launch.py\" --host codex --hook no-swallowed-exit-code",
               "timeout": 30
             }
           ]
@@ -51,7 +51,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-heredoc-backslashes",
+              "command": "python \"${PLUGIN_ROOT}/scripts/codex_hook_launch.py\" --host codex --hook no-heredoc-backslashes",
               "timeout": 30
             }
           ]
@@ -61,7 +61,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-unbounded-wait",
+              "command": "python \"${PLUGIN_ROOT}/scripts/codex_hook_launch.py\" --host codex --hook no-unbounded-wait",
               "timeout": 30
             }
           ]
@@ -72,7 +72,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook git-unpushed-check",
+              "command": "python \"${PLUGIN_ROOT}/scripts/codex_hook_launch.py\" --host codex --hook git-unpushed-check",
               "timeout": 30
             }
           ]
