@@ -39,6 +39,7 @@
 #   4. 散文路徑：(prose-path) 反引號內以 scripts/ hooks/ references/ skills/ agents/ tests/
 #      templates/ 開頭的相對路徑必須存在於根目錄之下；不含 fenced code block。
 #      指的是使用者專案裡的路徑時，在同一行行尾加：<!-- check-plugin: allow path -->
+#      (version-sync)    Codex manifest 存在時，兩份 manifest 的非空字串版本必須相同
 #   5. --pre-push：(version-bump) 推往 refs/heads/main 的範圍內動到 plugin 內容，version 卻沒有嚴格變大
 #      （不變或降版都拒絕）。
 #      --pre-push 的檢查 1～4 對象是「被推送的 commit」：每個 sha 用 read-tree + checkout-index（不套用 export-ignore）解到暫存目錄，再以本腳本
@@ -63,7 +64,7 @@ HOOK_LIBS="iso-secret-lib.sh"
 
 # 需要 bump version 的 plugin 內容（相對根目錄）。tests/、README.md、.gitattributes、
 # githooks/、dist/ 不在其中：改那些不影響安裝 plugin 的人拿到的行為。
-CONTENT_PATHS="skills hooks agents scripts references templates .claude-plugin"
+CONTENT_PATHS="skills hooks agents scripts references templates .claude-plugin .codex-plugin .agents"
 
 MARK_DISPATCH='<!-- check-plugin: allow dispatch -->'
 MARK_PATH='<!-- check-plugin: allow path -->'
@@ -127,10 +128,10 @@ finish() { # 依 ENV_ERR／FOUND 收尾並離開
     if [ "$PUSHED_CHECKED" -eq 0 ]; then
       echo "check-plugin: OK（沒有需要檢查的 commit：stdin 沒有 ref，或只有刪除、非 main 的 ref）"
     else
-      echo "check-plugin: OK（被推送的 commit 的 tier 一致性、派工寫法、hooks、散文路徑、版本核對）"
+      echo "check-plugin: OK（被推送的 commit 的 tier 一致性、派工寫法、hooks、散文路徑、版本同步、版本核對）"
     fi
   else
-    echo "check-plugin: OK（tier 一致性、派工寫法、hooks、散文路徑）"
+    echo "check-plugin: OK（tier 一致性、派工寫法、hooks、散文路徑、版本同步）"
   fi
   exit 0
 }
@@ -284,6 +285,19 @@ if [ "$MODE" = prepush ]; then
   pre_push
   finish
 fi
+
+# ---------- version-sync（屬於工作樹與被推送 commit 共用的檢查 1～4）----------
+if [ -e .codex-plugin/plugin.json ] || [ -L .codex-plugin/plugin.json ]; then
+  # -s 拒絕多個 JSON 值；-e 拒絕空值／錯誤型別。不能把兩個解析失敗當成版本相等。
+  version_query='if length == 1 then .[0] | select(type == "object") | .version | select(type == "string" and length > 0) else empty end'
+  claude_version="$("$JQ" -er -s "$version_query" .claude-plugin/plugin.json 2>/dev/null)" \
+    || die_env "[version-sync] 讀不到 .claude-plugin/plugin.json 的非空字串 version"
+  codex_version="$("$JQ" -er -s "$version_query" .codex-plugin/plugin.json 2>/dev/null)" \
+    || die_env "[version-sync] 讀不到 .codex-plugin/plugin.json 的非空字串 version"
+  [ "$claude_version" = "$codex_version" ] \
+    || bad .codex-plugin/plugin.json 1 version-sync "Claude 與 Codex manifest 的 version 必須相同"
+fi
+# ---------- version-sync 結束 ----------
 
 # 待掃描的文件：skills/ references/ agents/ 下的 .md（規則 1、2、4）；規則 4 另加 README.md。
 DOCS=()

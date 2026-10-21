@@ -139,6 +139,25 @@ check_out "真實 repo" 0 '^check-plugin: OK'
 T="$BASE"; fix "基底 fixture 通過（負控組的前提）" 0 '^check-plugin: OK'
 
 # =====================================================================
+echo "== version-sync：Claude / Codex 版本一致 =="
+new_tree vs_mismatch; mkdir -p "$T/.codex-plugin"
+printf '{"version":"1.0.1"}\n' > "$T/.codex-plugin/plugin.json"
+fix "version-sync：兩份 manifest 版本不一致 → 拒絕" 1 '^\.codex-plugin/plugin\.json:1: \[version-sync\]'
+
+new_tree vs_equal; mkdir -p "$T/.codex-plugin"
+printf '{"version":"1.0.0"}\n' > "$T/.codex-plugin/plugin.json"
+fix "version-sync：相同版本 → 放行" 0 '^check-plugin: OK'
+for invalid in '{ bad' '{}' '{"version":null}' '{"version":44}' '{"version":""}' '{"version":"1.0.0"} {"version":"1.0.0"}'; do
+  new_tree vs_invalid; mkdir -p "$T/.codex-plugin"
+  printf '%s\n' "$invalid" > "$T/.codex-plugin/plugin.json"
+  fix "version-sync：無法判讀 Codex 版本 → exit 2" 2 '\[version-sync\].*codex-plugin/plugin.json'
+done
+new_tree vs_missing_claude; mkdir -p "$T/.codex-plugin"
+printf '{"version":"1.0.0"}\n' > "$T/.codex-plugin/plugin.json"
+rm -f "$T/.claude-plugin/plugin.json"
+fix "version-sync：缺少 Claude manifest → exit 2" 2 '\[version-sync\].*claude-plugin/plugin.json'
+
+# =====================================================================
 echo "== 規則 1：tier 一致性 =="
 new_tree t1; sed -i '/^effort:/d' "$T/agents/tier-b2.md"
 fix "tier-frontmatter：缺 effort" 1 '^agents/tier-b2\.md:1: \[tier-frontmatter\].*effort'
@@ -382,7 +401,7 @@ for p in tests/x-probe.txt README.md .gitattributes githooks/x-probe.txt dist/x-
   pp "refs/heads/main $C refs/heads/main $REMOTE_TIP"
   check_out "只動 $p → 放行（不需要 bump）" 0 '^check-plugin: OK'
 done
-for p in skills/x-probe.txt hooks/x-probe.txt agents/x-probe.txt scripts/x-probe.txt references/x-probe.txt templates/x-probe.txt .claude-plugin/x-probe.txt; do
+for p in skills/x-probe.txt hooks/x-probe.txt agents/x-probe.txt scripts/x-probe.txt references/x-probe.txt templates/x-probe.txt .claude-plugin/x-probe.txt .codex-plugin/x-probe.txt .agents/x-probe.txt; do
   reset_to "$REMOTE_TIP"; edit_commit "$p"; C="$(head_sha)"
   pp "refs/heads/main $C refs/heads/main $REMOTE_TIP"
   check_out "動 $p 沒 bump → 拒絕" 1 "\\[version-bump\\].*${p//./\\.}"
@@ -539,6 +558,18 @@ printf '%s\n' "references/bad2.md export-ignore" >> "$W/.git/info/attributes"
 pp "refs/heads/main $CEXP2 refs/heads/main $REMOTE_TIP"
 check_out "本機 info/attributes 的 export-ignore 也不能藏壞檔案 → 拒絕" 1 "^${CEXP2:0:7}:references/bad2\\.md:[0-9]+: \\[prose-path\\].*ghost-info"
 : > "$W/.git/info/attributes"
+
+# version-sync 也必須看被推送的 commit，不能被工作樹的修正掩蓋。
+reset_to "$REMOTE_TIP"; mkdir -p "$W/.codex-plugin"
+printf '{"version":"1.0.2"}\n' > "$W/.codex-plugin/plugin.json"
+bump_commit 1.0.3; CVSYNC="$(head_sha)"
+printf '{"version":"1.0.3"}\n' > "$W/.codex-plugin/plugin.json"
+pp "refs/heads/main $CVSYNC refs/heads/main $REMOTE_TIP"
+check_out "version-sync：已提交不一致、工作樹已修正 → 仍拒絕" 1 "^${CVSYNC:0:7}:.*\[version-sync\]"
+git -C "$W" add -A; git -C "$W" commit -q -m "sync manifests"; CVSYNC_OK="$(head_sha)"
+pp "refs/heads/main $CVSYNC_OK refs/heads/main $REMOTE_TIP"
+check_out "version-sync：修正已提交 → 放行" 0 '^check-plugin: OK'
+reset_to "$REMOTE_TIP"
 
 # S5：fail-closed 分支的負控組。每一條都是「無法判斷 → exit 2，不放行」；
 # 每條都先有一個同形狀、但條件正常的輸入通過（前面的測試已涵蓋：改 skill 同時 bump → 放行），
