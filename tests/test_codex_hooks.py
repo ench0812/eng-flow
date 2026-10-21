@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import tempfile
 import unittest
 
 ROOT = Path(os.environ.get('CODEX_HOOK_TEST_ROOT', Path(__file__).resolve().parents[1]))
@@ -87,6 +88,27 @@ class CodexHooks(unittest.TestCase):
     def test_clean_shell_allowed(self):
         self.assertEqual(self.decision(self.call('iso-scan-bash', {
             'tool_name': 'Bash', 'tool_input': {'command': 'git status --short'}})), 'allow')
+
+    def test_total_scan_timeout_blocks(self):
+        # Simulate GNU timeout cancelling the entire multi-file check. The
+        # wrapper must convert this status to Codex's supported blocking exit.
+        with tempfile.TemporaryDirectory(prefix='codex-timeout-control-') as temp:
+            timeout = Path(temp) / 'timeout'
+            timeout.write_bytes(b'#!/usr/bin/env bash\nexit 124\n')
+            timeout.chmod(0o755)
+            # Git Bash prepends its own bin directories during startup. Apply
+            # the fixture PATH from BASH_ENV after that conversion instead.
+            startup = Path(temp) / 'env.sh'
+            directory = Path(temp).as_posix()
+            prefix = ('"$(cygpath -u \'' + directory + '\')"' if os.name == 'nt'
+                      else "'" + directory + "'")
+            startup.write_bytes(('export PATH=' + prefix + ':"$PATH"\n').encode())
+            env = dict(os.environ, BASH_ENV=startup.as_posix())
+            result = subprocess.run([shutil.which('bash'),
+                                     (ROOT / 'hooks/iso-scan-bash.sh').as_posix(), '--host', 'codex'],
+                                    input=json.dumps({'tool_input': {'command': 'git status'}}),
+                                    text=True, capture_output=True, timeout=10, env=env)
+            self.assertEqual(result.returncode, 2, result.stderr)
 
 
 if __name__ == '__main__':

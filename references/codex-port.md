@@ -7,7 +7,8 @@ Codex command 明確帶 `--host codex`，不可從 stdin 欄位猜宿主。
 
 透過官方 `codex plugin marketplace add` 與 `codex plugin add` 安裝，並在新 session
 用 `/hooks` 審查、信任當前 hook 定義。確認來源是 Codex manifest、7 個 handlers 都有
-Codex host 參數；安裝成功不等於 hooks 已執行。hook host 需要 Python、Git Bash 與 jq。
+Codex host 參數；安裝成功不等於 hooks 已執行。hook host 需要 Python、Bash、jq 與 GNU timeout
+（本機由 Git Bash 提供 Bash/timeout）。
 
 本機 0.163.0 實測：`--ignore-user-config` 會略過本次已安裝 hooks，即使另外用
 `-c` 啟用 plugin 也一樣。受 eng-flow 保護的編輯工作 session 必須正常載入設定；
@@ -17,6 +18,8 @@ Codex host 參數；安裝成功不等於 hooks 已執行。hook host 需要 Pyt
 未信任、停用 hooks/plugin、或 hook interpreter 本身無法啟動，都是宿主層限制；
 plugin 無法替宿主強制執行自己。轉接 wrapper 已將 Python 啟動失敗轉為 exit 2，
 adapter 內的依賴、解析、子程序錯誤則回支援的 deny，不輸出未受支援的 ask。
+整次 adapter（含多檔 patch）由 GNU timeout 限制為 24 秒，再留 1 秒強制終止寬限，
+早於宿主的 30 秒取消；缺 timeout 或逾時均回 exit 2，不把逐檔上限誤當總上限。
 
 ## 掃描與已知範圍
 

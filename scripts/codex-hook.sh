@@ -8,7 +8,15 @@ if ! command -v python >/dev/null 2>&1; then
   printf '%s\n' '[eng-flow Codex] 缺少 python，安全檢查未執行，已阻擋。' >&2
   exit 2
 fi
-PYTHONUTF8=1 python "$DIR/codex-hook.py" "$@"
+if ! command -v timeout >/dev/null 2>&1; then
+  cat >/dev/null
+  printf '%s\n' '[eng-flow Codex] 缺少 timeout，無法保證總檢查上限，已阻擋。' >&2
+  exit 2
+fi
+# Bound the whole scan, not each file separately: many individually bounded
+# scans can exceed Codex's 30s hook timeout and be cancelled by the host.
+# Reserve time for wrapper startup and the blocking exit after cancellation.
+PYTHONUTF8=1 timeout --kill-after=1s 24s python "$DIR/codex-hook.py" "$@"
 rc=$?
 if [ "$rc" -ne 0 ]; then
   printf '%s\n' '[eng-flow Codex] 轉接程式未正常完成，已阻擋；請修復，勿繞過。' >&2

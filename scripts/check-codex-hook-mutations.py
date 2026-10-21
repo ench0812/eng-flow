@@ -15,6 +15,7 @@ MUTANTS = {
     'file-boundary-removed': ('for _path, content in additions(patch):',
                             'for _path, content in [("all", "\\n".join(c for _, c in additions(patch))) ]:'),
     'validation-deny-removed': ('else deny(message))', 'else {})'),
+    'total-deadline-removed': ('timeout --kill-after=1s 24s python', 'python'),
 }
 
 
@@ -31,7 +32,8 @@ def main() -> int:
             for name in ('hooks', 'scripts', 'tests'):
                 shutil.copytree(ROOT / name, root / name, ignore=shutil.ignore_patterns('__pycache__'))
             if change:
-                path = root / 'scripts/codex-hook.py'
+                path = root / ('scripts/codex-hook.sh' if label == 'total-deadline-removed'
+                               else 'scripts/codex-hook.py')
                 old, new = change
             elif label == 'crypto-scan-removed':
                 path = root / 'hooks/iso-scan-write.sh'
@@ -47,14 +49,14 @@ def main() -> int:
             path.write_bytes(source.replace(old, new).encode())
             result = suite(root)
             output = result.stdout + result.stderr
-            completed = b'Ran 14 tests' in output and b'FAILED (' in output
+            completed = b'Ran 15 tests' in output and b'FAILED (' in output
             print(f'{label}: exit={result.returncode} completed={completed}', flush=True)
             if result.returncode != 1 or not completed:
                 sys.stderr.buffer.write(output)
                 return 1
     green = suite(ROOT)
     output = green.stdout + green.stderr
-    completed = b'Ran 14 tests' in output and b'OK' in output
+    completed = b'Ran 15 tests' in output and b'OK' in output
     print(f'restored: exit={green.returncode} completed={completed}', flush=True)
     return 0 if green.returncode == 0 and completed else 1
 
