@@ -3,6 +3,11 @@
 # ISO 27001 A.8.32 (change mgmt gates) + A.8.28/A.5.21 (secure coding / supply chain).
 set -uo pipefail
 
+# Host is explicit: absent flag retains the original Claude protocol/bytes.
+if [ "${1:-}" = --host ] && [ "${2:-}" = codex ]; then
+  exec bash "$(dirname "$0")/../scripts/codex-hook.sh" --host codex --hook iso-scan-bash
+fi
+
 input="$(cat)"
 JQ="$(command -v jq || true)"
 [ -z "$JQ" ] && exit 0

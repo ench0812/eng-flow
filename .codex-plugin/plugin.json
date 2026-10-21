@@ -1,0 +1,83 @@
+{
+  "name": "eng-flow",
+  "version": "1.44.0",
+  "description": "eng-flow engineering skills and explicit fail-closed Codex hook adapters",
+  "skills": "./skills/",
+  "hooks": {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Write|Edit",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"${PLUGIN_ROOT}/hooks/iso-scan-write.sh\" --host codex",
+              "timeout": 30
+            }
+          ]
+        },
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"${PLUGIN_ROOT}/hooks/iso-scan-bash.sh\" --host codex",
+              "timeout": 30
+            }
+          ]
+        },
+        {
+          "matcher": "Bash|PowerShell",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-blind-sleep",
+              "timeout": 30
+            }
+          ]
+        },
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-swallowed-exit-code",
+              "timeout": 30
+            }
+          ]
+        },
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-heredoc-backslashes",
+              "timeout": 30
+            }
+          ]
+        },
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook no-unbounded-wait",
+              "timeout": 30
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash \"${PLUGIN_ROOT}/scripts/codex-hook.sh\" --host codex --hook git-unpushed-check",
+              "timeout": 30
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -3,6 +3,11 @@
 # ISO 27001 A.8.24 (cryptography/secrets) + A.8.28 (secure coding).
 set -uo pipefail
 
+# Host is explicit: absent flag retains the original Claude protocol/bytes.
+if [ "${1:-}" = --host ] && [ "${2:-}" = codex ]; then
+  exec bash "$(dirname "$0")/../scripts/codex-hook.sh" --host codex --hook iso-scan-write
+fi
+
 DIR="$(cd "$(dirname "$0")" && pwd -P)"
 # shellcheck source=/dev/null
 . "$DIR/iso-secret-lib.sh"
