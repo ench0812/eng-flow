@@ -14,12 +14,17 @@ Codex host 參數；安裝成功不等於 hooks 已執行。hook host 需要 Pyt
 Windows 只從 Git 安裝位置尋找原生 `bin/bash.exe`，不使用 PATH 裡可能先出現的 WSL
 `bash.exe`；POSIX 仍使用原生 Bash。只在 hook 子程序的 PATH 前加所選 Bash 目錄，
 讓 adapter 內的 legacy 呼叫也使用同一套原生 Bash，不改使用者 PATH 或 config。
-launcher 會先讀完 stdin，缺 Git Bash、啟動失敗、子程序非零或超過 27 秒均回 exit 2，
-不把失敗當成正常放行；內層既有 24 秒 GNU timeout 不變。
+launcher 會先讀完 stdin，缺 Git Bash、啟動失敗、子程序非零或超過 27 秒均進入阻擋路徑；
+內層既有 24 秒 GNU timeout 不變。
 
 1.44.2 補上 launcher 的 R3 邊界：main 攔截 Exception，最外層再攔截
 BaseException（包括 KeyboardInterrupt、GeneratorExit 與非預期 SystemExit），
-都以 exit 2 結束；正常成功仍 exit 0，stderr 不含輸入或 traceback。
+main 內部回 2；入口把失敗轉成明確 JSON deny（Stop 為 decision:block），以 exit 0
+交給宿主解析。Windows PowerShell 的 -Command 會把原生程序 exit 2 正規化成 exit 1，
+在本機 0.163.0 真實 CLI 實測仍會漏擋，因此不能僅依靠 exit 2。此處使用
+[Codex hooks 文件](https://learn.chatgpt.com/docs/hooks)支援的 JSON 決策協議。
+正常成功仍 exit 0。子程序輸出先緩存；非零時丟棄，成功時須為 JSON object 才逐位元組
+轉送，避免半份輸出破壞阻擋回應或帶出輸入。非預期例外不輸出 traceback 或例外內容。
 型別註記延後求值，避免 Python 3.10 前在載入 Path 與 None 的聯集註記時失敗；
 路徑解析也放在受保護的 main 範圍內。
 
@@ -28,7 +33,8 @@ BaseException（包括 KeyboardInterrupt、GeneratorExit 與非預期 SystemExit
 本機目前的 python 是真實 Python311；換機器或改 PATH 後，必須從一般 PowerShell、
 未預加 Git Bash 的環境重跑健檢：乾淨指令須放行，無 remote 暫存 repo 的破壞性
 推送輸入須 deny，假金鑰 patch 須 deny，壞 JSON 須 deny。信任狀態正常也不能
-取代這些實際執行檢查。Stop 失敗 exit 2 的迴圈風險（O1）仍未變更。
+取代這些實際執行檢查。輸出通道失效也無法保證 JSON 決策送達。
+Stop 失敗仍要求續跑，迴圈風險（O1）未變更。
 
 1.44.0 在 Windows 的一般 PATH 可誤用 System32 的 WSL launcher，無法讀取 Windows
 plugin 路徑，造成 hook 啟動失敗。之前測試 helper 預先把 Git Bash 加到 PATH 前方，
@@ -42,8 +48,8 @@ plugin 路徑，造成 hook 啟動失敗。之前測試 helper 預先把 Git Bas
 關閉 code-mode host 不會修復這個問題，反而讓目前模型的工具無法執行。
 
 未信任、停用 hooks/plugin、或 hook interpreter 本身無法啟動，都是宿主層限制；
-plugin 無法替宿主強制執行自己。轉接 wrapper 已將 Python 啟動失敗轉為 exit 2，
-adapter 內的依賴、解析、子程序錯誤則回支援的 deny，不輸出未受支援的 ask。
+plugin 無法替宿主強制執行自己。launcher 已啟動時，內層 wrapper 的非零失敗會被
+轉為 JSON 阻擋；adapter 內的依賴、解析、子程序錯誤也回支援的 deny，不輸出 ask。
 整次 adapter（含多檔 patch）由 GNU timeout 限制為 24 秒，再留 1 秒強制終止寬限，
 早於宿主的 30 秒取消；缺 timeout 或逾時均回 exit 2，不把逐檔上限誤當總上限。
 

@@ -4,10 +4,12 @@ import importlib.util
 import io
 import os
 import runpy
+import shutil
 from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest import mock
 
@@ -39,8 +41,10 @@ class LauncherUnit(unittest.TestCase):
     def invoke(self, bash, result=None, error=None, finder_error=None):
         payload = b'{"tool_input":{"command":"fake private payload"}}'
         errors = io.StringIO()
+        errors.buffer = io.BytesIO()
         with mock.patch.object(self.launch, 'find_bash', return_value=bash, side_effect=finder_error), \
              mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(payload))), \
+             mock.patch.object(sys, 'stdout', SimpleNamespace(buffer=io.BytesIO())), \
              mock.patch.object(sys, 'stderr', errors), \
              mock.patch.object(sys, 'argv', ['launcher', '--host', 'codex', '--hook', 'iso-scan-write']), \
              mock.patch.object(self.launch.subprocess, 'run', return_value=result, side_effect=error) as run:
@@ -77,7 +81,7 @@ class LauncherUnit(unittest.TestCase):
     def test_input_arguments_and_process_local_path_preserved(self):
         original = os.environ.get('PATH')
         bash = Path('D:/Git/bin/bash.exe')
-        code, run, payload = self.invoke(bash, result=subprocess.CompletedProcess([], 0))
+        code, run, payload = self.invoke(bash, result=subprocess.CompletedProcess([], 0, b'{}', b''))
         self.assertEqual(code, 0)
         args, kwargs = run.call_args
         self.assertEqual(args[0], [str(bash), (ROOT/'scripts/codex-hook.sh').as_posix(),
@@ -91,8 +95,10 @@ class LauncherUnit(unittest.TestCase):
 class EntryBoundary(unittest.TestCase):
     def test_normal_completion_keeps_successful_exit(self):
         with mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
+             mock.patch.object(sys, 'stdout', SimpleNamespace(buffer=io.BytesIO())), \
+             mock.patch.object(sys, 'stderr', SimpleNamespace(buffer=io.BytesIO())), \
              mock.patch.object(sys, 'argv', ['launcher', '--host', 'codex', '--hook', 'iso-scan-bash']), \
-             mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+             mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, b'{}', b'')):
             with self.assertRaises(SystemExit) as result:
                 runpy.run_path(str(ROOT/'scripts/codex_hook_launch.py'), run_name='__main__')
         self.assertEqual(result.exception.code, 0)
@@ -102,7 +108,9 @@ class EntryBoundary(unittest.TestCase):
                       GeneratorExit('fake private payload'), SystemExit(0), SystemExit(1)):
             with self.subTest(error=type(error).__name__, args=error.args):
                 errors = io.StringIO()
+                output = io.StringIO()
                 with mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
+                     mock.patch.object(sys, 'stdout', output), \
                      mock.patch.object(sys, 'stderr', errors), \
                      mock.patch('shutil.which', side_effect=error):
                     try:
@@ -112,9 +120,75 @@ class EntryBoundary(unittest.TestCase):
                         actual = ('exit', result.code)
                     except BaseException as result:
                         actual = ('uncaught', type(result).__name__)
-                self.assertEqual(actual, ('exit', 2))
+                self.assertEqual(actual, ('exit', 0))
+                self.assertEqual(json.loads(output.getvalue())['hookSpecificOutput']['permissionDecision'], 'deny')
                 self.assertNotIn('fake private payload', errors.getvalue())
                 self.assertNotIn('Traceback', errors.getvalue())
+
+
+class HostProtocolBoundary(unittest.TestCase):
+    def test_failed_child_cannot_leak_partial_output(self):
+        with tempfile.TemporaryDirectory(prefix='r3-child-') as temp:
+            scripts = Path(temp)/'scripts'
+            scripts.mkdir()
+            (scripts/'codex-hook.sh').write_bytes(b'import sys\nprint("FAKE_PRIVATE_CHILD")\nprint("FAKE_PRIVATE_CHILD", file=sys.stderr)\nsys.exit(1)\n')
+            wrapper = Path(temp)/'probe.py'
+            wrapper.write_bytes(('import importlib.util, sys\nfrom pathlib import Path\n'
+                'spec = importlib.util.spec_from_file_location("launcher", '+repr(str(ROOT/'scripts/codex_hook_launch.py'))+')\n'
+                'launch = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(launch)\n'
+                'launch.__file__ = '+repr(str(scripts/'launcher.py'))+'\n'
+                'launch.find_bash = lambda: Path(sys.executable)\n'
+                'sys.exit(launch.main())\n').encode())
+            result = subprocess.run([sys.executable, str(wrapper)], input=b'{}', capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn(b'FAKE_PRIVATE_CHILD', result.stdout+result.stderr)
+            self.assertEqual(result.stdout, b'')
+
+    def test_successful_child_must_return_a_json_object(self):
+        spec = importlib.util.spec_from_file_location('launcher_output', ROOT/'scripts/codex_hook_launch.py')
+        launch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launch)
+        for output in (b'', b'partial {', b'null', b'[]'):
+            errors = io.StringIO()
+            errors.buffer = io.BytesIO()
+            with self.subTest(output=output), \
+                 mock.patch.object(launch, 'find_bash', return_value=Path(sys.executable)), \
+                 mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
+                 mock.patch.object(sys, 'stdout', SimpleNamespace(buffer=io.BytesIO())), \
+                 mock.patch.object(sys, 'stderr', errors), \
+                 mock.patch.object(launch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output, b'')):
+                self.assertEqual(launch.main(), 2)
+
+    def test_stop_failure_uses_stop_block_protocol(self):
+        output = io.StringIO()
+        with mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
+             mock.patch.object(sys, 'argv', ['launcher', '--host', 'codex', '--hook', 'git-unpushed-check']), \
+             mock.patch.object(sys, 'stdout', output), \
+             mock.patch.object(sys, 'stderr', io.StringIO()), \
+             mock.patch('shutil.which', side_effect=RuntimeError('fake private payload')):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(ROOT/'scripts/codex_hook_launch.py'), run_name='__main__')
+        self.assertEqual(result.exception.code, 0)
+        self.assertEqual(json.loads(output.getvalue())['decision'], 'block')
+
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell native exit status regression')
+    def test_powershell_receives_structured_deny_on_failure(self):
+        shell = shutil.which('pwsh') or shutil.which('powershell')
+        self.assertIsNotNone(shell)
+        with tempfile.TemporaryDirectory(prefix='r3-powershell-') as temp:
+            wrapper = Path(temp)/'inject.py'
+            wrapper.write_bytes(('import shutil, runpy\n'
+                'def fail(*args, **kwargs): raise RuntimeError("fake private payload")\n'
+                'shutil.which = fail\n'
+                'runpy.run_path('+repr(str(ROOT/'scripts/codex_hook_launch.py'))+', run_name="__main__")\n').encode())
+            command = '& '+"'"+sys.executable.replace("'", "''")+"' '"+str(wrapper).replace("'", "''")+"' --host codex --hook iso-scan-bash"
+            result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-Command', command],
+                                    input=b'{}', capture_output=True, timeout=15)
+            output = json.loads(result.stdout) if result.stdout.strip() else {}
+            actual = {'shell_exit': result.returncode,
+                      'decision': output.get('hookSpecificOutput', {}).get('permissionDecision')}
+            self.assertEqual(actual, {'shell_exit': 0, 'decision': 'deny'})
+            self.assertNotIn(b'fake private payload', result.stdout+result.stderr)
 
 
 class ManifestLaunch(unittest.TestCase):

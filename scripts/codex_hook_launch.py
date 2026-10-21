@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import os
 import shutil
 import subprocess
@@ -46,18 +47,43 @@ def main() -> int:
         # do not mutate the user's PATH or config.toml.
         env['PATH'] = str(bash.parent) + os.pathsep + env.get('PATH', '')
         result = subprocess.run([str(bash), (root/'scripts/codex-hook.sh').as_posix(), *sys.argv[1:]],
-                                input=payload, env=env, timeout=27)
-        return 0 if result.returncode == 0 else 2
+                                input=payload, env=env, timeout=27, capture_output=True)
+        # Do not let a failed child corrupt the fallback JSON or expose its input.
+        if result.returncode != 0:
+            return 2
+        if not isinstance(json.loads(result.stdout), dict):
+            return 2
+        sys.stdout.buffer.write(result.stdout)
+        sys.stderr.buffer.write(result.stderr)
+        return 0
     except Exception:
         print('[eng-flow Codex] 原生 Bash 啟動失敗或逾時，已阻擋；請修復執行環境。', file=sys.stderr)
         return 2
 
 
+def run() -> int:
+    try:
+        status = main()
+    except BaseException:
+        status = 2
+    if status != 0:
+        # PowerShell -Command normalizes native exit 2 to 1. Use the same JSON
+        # decision protocol as the adapter so the host sees an explicit block.
+        if 'git-unpushed-check' in sys.argv[1:]:
+            sys.stdout.write('{"decision":"block","reason":"[eng-flow Codex] launcher check failed; blocked."}\n')
+        else:
+            sys.stdout.write('{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
+                             '"permissionDecision":"deny","permissionDecisionReason":'
+                             '"[eng-flow Codex] launcher check failed; blocked."}}\n')
+        return 0
+    return status
+
+
 if __name__ == '__main__':
     try:
-        exit_code = main()
+        exit_code = run()
     except BaseException:
-        # Includes interruption and unexpected SystemExit from dependencies.
-        # Keep our intentional successful exit outside this catch-all boundary.
+        # If even the blocking output cannot be delivered, avoid a traceback.
+        # The host must still be able to launch us and receive our output.
         exit_code = 2
     sys.exit(exit_code)
