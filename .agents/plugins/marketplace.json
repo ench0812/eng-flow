@@ -1,0 +1,20 @@
+{
+  "name": "eng-flow",
+  "interface": {
+    "displayName": "eng-flow"
+  },
+  "plugins": [
+    {
+      "name": "eng-flow",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
