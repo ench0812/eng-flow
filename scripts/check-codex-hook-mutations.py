@@ -22,6 +22,8 @@ MUTANTS = {
     'launcher-deny-protocol-removed': ('if status != 0:', 'if False:'),
     'launcher-child-output-isolation-removed': ('capture_output=True', 'capture_output=False'),
     'launcher-child-validation-removed': ('if not isinstance(json.loads(result.stdout), dict):', 'if False:'),
+    'launcher-stop-failure-allow-removed': ("sys.stdout.write('{}\\n')",
+        'sys.stdout.write(\'{"decision":"block","reason":"fixture regression"}\\n\')'),
 }
 
 

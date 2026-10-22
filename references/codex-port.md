@@ -1,4 +1,4 @@
-# Codex 轉接（1.44.2）
+# Codex 轉接（1.44.3）
 
 Codex manifest 與 Claude manifest 分開；Claude hooks 沒有 host 參數時維持原協議。
 Codex command 明確帶 `--host codex`，不可從 stdin 欄位猜宿主。
@@ -14,12 +14,12 @@ Codex host 參數；安裝成功不等於 hooks 已執行。hook host 需要 Pyt
 Windows 只從 Git 安裝位置尋找原生 `bin/bash.exe`，不使用 PATH 裡可能先出現的 WSL
 `bash.exe`；POSIX 仍使用原生 Bash。只在 hook 子程序的 PATH 前加所選 Bash 目錄，
 讓 adapter 內的 legacy 呼叫也使用同一套原生 Bash，不改使用者 PATH 或 config。
-launcher 會先讀完 stdin，缺 Git Bash、啟動失敗、子程序非零或超過 27 秒均進入阻擋路徑；
+launcher 會先讀完 stdin，缺 Git Bash、啟動失敗、子程序非零或超過 27 秒均進入失敗處理；
 內層既有 24 秒 GNU timeout 不變。
 
 1.44.2 補上 launcher 的 R3 邊界：main 攔截 Exception，最外層再攔截
 BaseException（包括 KeyboardInterrupt、GeneratorExit 與非預期 SystemExit），
-main 內部回 2；入口把失敗轉成明確 JSON deny（Stop 為 decision:block），以 exit 0
+main 內部回 2；當時入口把失敗轉成明確 JSON deny（Stop 為 decision:block），以 exit 0
 交給宿主解析。Windows PowerShell 的 -Command 會把原生程序 exit 2 正規化成 exit 1，
 在本機 0.163.0 真實 CLI 實測仍會漏擋，因此不能僅依靠 exit 2。此處使用
 [Codex hooks 文件](https://learn.chatgpt.com/docs/hooks)支援的 JSON 決策協議。
@@ -28,13 +28,18 @@ main 內部回 2；入口把失敗轉成明確 JSON deny（Stop 為 decision:blo
 型別註記延後求值，避免 Python 3.10 前在載入 Path 與 None 的聯集註記時失敗；
 路徑解析也放在受保護的 main 範圍內。
 
+1.44.3 修正 Stop 提醒的 O1：launcher 在 git-unpushed-check 失敗時輸出 `{}`、
+exit 0，並在 stderr 提示 `reminder skipped`。提醒失敗不再要求模型續跑；
+不論 stop_hook_active 是 false 或 true，都套用相同處理。六支 PreToolUse 的
+失敗 deny 維持原樣；成功取得的 Stop 提醒仍照原協議續跑一次，內層防迴圈檢查不變。
+
 第一跳仍是宿主的限制：若 python 不在 PATH、只找到 WindowsApps stub，或宿主
 30 秒上限先到，plugin 可能根本未開始執行，自己的程式碼無法保證阻擋。
 本機目前的 python 是真實 Python311；換機器或改 PATH 後，必須從一般 PowerShell、
 未預加 Git Bash 的環境重跑健檢：乾淨指令須放行，無 remote 暫存 repo 的破壞性
 推送輸入須 deny，假金鑰 patch 須 deny，壞 JSON 須 deny。信任狀態正常也不能
 取代這些實際執行檢查。輸出通道失效也無法保證 JSON 決策送達。
-Stop 失敗仍要求續跑，迴圈風險（O1）未變更。
+launcher 已啟動且輸出通道可用時，Stop 的失敗只會略過該次提醒。
 
 1.44.0 在 Windows 的一般 PATH 可誤用 System32 的 WSL launcher，無法讀取 Windows
 plugin 路徑，造成 hook 啟動失敗。之前測試 helper 預先把 Git Bash 加到 PATH 前方，
@@ -48,8 +53,9 @@ plugin 路徑，造成 hook 啟動失敗。之前測試 helper 預先把 Git Bas
 關閉 code-mode host 不會修復這個問題，反而讓目前模型的工具無法執行。
 
 未信任、停用 hooks/plugin、或 hook interpreter 本身無法啟動，都是宿主層限制；
-plugin 無法替宿主強制執行自己。launcher 已啟動時，內層 wrapper 的非零失敗會被
-轉為 JSON 阻擋；adapter 內的依賴、解析、子程序錯誤也回支援的 deny，不輸出 ask。
+plugin 無法替宿主強制執行自己。launcher 已啟動時，內層 wrapper 的非零失敗在
+PreToolUse 會轉為 JSON 阻擋，在 Stop 則略過提醒。adapter 內的依賴、解析、子程序
+錯誤仍依原協議處理，不輸出 ask。
 整次 adapter（含多檔 patch）由 GNU timeout 限制為 24 秒，再留 1 秒強制終止寬限，
 早於宿主的 30 秒取消；缺 timeout 或逾時均回 exit 2，不把逐檔上限誤當總上限。
 
@@ -133,6 +139,6 @@ Stop 提醒會用 Codex 支援的 decision:block/reason 續一回合，stop_hook
 針對當次 memory search 逐次核准在 sandbox 外執行即可命中已知記憶，不需修改設定檔。
 Codex memories 維持啟用。詳細命令與原始輸出見本次 handoff 報告。
 
-Claude 與 Codex manifest 共用版本 1.44.2；本次審查 R2 只放寬 Claude manifest 的
+Claude 與 Codex manifest 共用版本 1.44.3；本次審查 R2 只放寬 Claude manifest 的
 version 欄位。`scripts/check-plugin.sh` 的 version-sync 規則會核對兩者相同，
 同時適用工作樹與 pre-push 指定的 main tip；無法讀取版本時拒絕判定通過。

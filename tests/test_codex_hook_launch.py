@@ -159,20 +159,37 @@ class HostProtocolBoundary(unittest.TestCase):
                  mock.patch.object(launch.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output, b'')):
                 self.assertEqual(launch.main(), 2)
 
-    def test_stop_failure_uses_stop_block_protocol(self):
-        output = io.StringIO()
-        with mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{}'))), \
-             mock.patch.object(sys, 'argv', ['launcher', '--host', 'codex', '--hook', 'git-unpushed-check']), \
-             mock.patch.object(sys, 'stdout', output), \
-             mock.patch.object(sys, 'stderr', io.StringIO()), \
-             mock.patch('shutil.which', side_effect=RuntimeError('fake private payload')):
-            with self.assertRaises(SystemExit) as result:
-                runpy.run_path(str(ROOT/'scripts/codex_hook_launch.py'), run_name='__main__')
-        self.assertEqual(result.exception.code, 0)
-        self.assertEqual(json.loads(output.getvalue())['decision'], 'block')
+    def test_stop_failure_allows_with_warning(self):
+        spec = importlib.util.spec_from_file_location('launcher_stop', ROOT/'scripts/codex_hook_launch.py')
+        launch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launch)
+        for active in (False, True):
+            for failure in ('missing-bash', 'timeout', 'child-exit', 'runtime', 'interrupt', 'early-exit'):
+                output, errors = io.StringIO(), io.StringIO()
+                finder_error = {'runtime': RuntimeError('fake private payload'),
+                                'interrupt': KeyboardInterrupt('fake private payload'),
+                                'early-exit': SystemExit(0)}.get(failure)
+                child_error = subprocess.TimeoutExpired('fixture', 27) if failure == 'timeout' else None
+                with self.subTest(active=active, failure=failure), \
+                     mock.patch.object(launch, 'find_bash', return_value=None if failure == 'missing-bash'
+                                       else Path('fixture-bash'), side_effect=finder_error), \
+                     mock.patch.object(launch.subprocess, 'run', side_effect=child_error,
+                                       return_value=subprocess.CompletedProcess([], 124)), \
+                     mock.patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps({'stop_hook_active': active}).encode()))), \
+                     mock.patch.object(sys, 'argv', ['launcher', '--host', 'codex', '--hook', 'git-unpushed-check']), \
+                     mock.patch.object(sys, 'stdout', output), mock.patch.object(sys, 'stderr', errors):
+                    try:
+                        status = launch.run()
+                    except BaseException as error:
+                        status = ('uncaught', type(error).__name__)
+                self.assertEqual(status, 0)
+                self.assertEqual(json.loads(output.getvalue()), {})
+                self.assertIn('git-unpushed-check', errors.getvalue())
+                self.assertIn('skipped', errors.getvalue())
+                self.assertNotIn('fake private payload', errors.getvalue())
 
     @unittest.skipUnless(os.name == 'nt', 'PowerShell native exit status regression')
-    def test_powershell_receives_structured_deny_on_failure(self):
+    def test_powershell_receives_failure_protocol_for_all_hooks(self):
         shell = shutil.which('pwsh') or shutil.which('powershell')
         self.assertIsNotNone(shell)
         with tempfile.TemporaryDirectory(prefix='r3-powershell-') as temp:
@@ -181,14 +198,24 @@ class HostProtocolBoundary(unittest.TestCase):
                 'def fail(*args, **kwargs): raise RuntimeError("fake private payload")\n'
                 'shutil.which = fail\n'
                 'runpy.run_path('+repr(str(ROOT/'scripts/codex_hook_launch.py'))+', run_name="__main__")\n').encode())
-            command = '& '+"'"+sys.executable.replace("'", "''")+"' '"+str(wrapper).replace("'", "''")+"' --host codex --hook iso-scan-bash"
-            result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-Command', command],
-                                    input=b'{}', capture_output=True, timeout=15)
-            output = json.loads(result.stdout) if result.stdout.strip() else {}
-            actual = {'shell_exit': result.returncode,
-                      'decision': output.get('hookSpecificOutput', {}).get('permissionDecision')}
-            self.assertEqual(actual, {'shell_exit': 0, 'decision': 'deny'})
-            self.assertNotIn(b'fake private payload', result.stdout+result.stderr)
+            manifest = json.loads((ROOT/'.codex-plugin/plugin.json').read_bytes())
+            hooks = [handler['command'].split('--hook ')[1]
+                     for groups in manifest['hooks']['hooks'].values()
+                     for group in groups for handler in group['hooks']]
+            self.assertEqual(len(hooks), 7)
+            for hook in hooks:
+                with self.subTest(hook=hook):
+                    command = '& '+"'"+sys.executable.replace("'", "''")+"' '"+str(wrapper).replace("'", "''")+"' --host codex --hook "+hook
+                    result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-Command', command],
+                                            input=b'{}', capture_output=True, timeout=15)
+                    output = json.loads(result.stdout) if result.stdout.strip() else {}
+                    self.assertEqual(result.returncode, 0)
+                    if hook == 'git-unpushed-check':
+                        self.assertEqual(output, {})
+                        self.assertIn(b'reminder skipped', result.stderr)
+                    else:
+                        self.assertEqual(output.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+                    self.assertNotIn(b'fake private payload', result.stdout+result.stderr)
 
 
 class ManifestLaunch(unittest.TestCase):

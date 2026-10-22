@@ -68,9 +68,10 @@ def run() -> int:
         status = 2
     if status != 0:
         # PowerShell -Command normalizes native exit 2 to 1. Use the same JSON
-        # decision protocol as the adapter so the host sees an explicit block.
+        # decision protocol for PreToolUse; a failed Stop reminder must not loop.
         if 'git-unpushed-check' in sys.argv[1:]:
-            sys.stdout.write('{"decision":"block","reason":"[eng-flow Codex] launcher check failed; blocked."}\n')
+            sys.stdout.write('{}\n')
+            print('[eng-flow Codex] git-unpushed-check launcher failed; reminder skipped.', file=sys.stderr)
         else:
             sys.stdout.write('{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
                              '"permissionDecision":"deny","permissionDecisionReason":'
