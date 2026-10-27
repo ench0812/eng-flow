@@ -27,7 +27,7 @@ B1 vs B2 的判準是**任務不確定性**，不是任務大小：要自己想�
 
 對應的設定與判準：
 
-- **compact 視窗**：tier-b1／b2 的 frontmatter 設 `autoCompactWindow: 300000`（試點）。選 300k 而不是 200k：模擬顯示 200k 的 compact 次數是 300k 的 2.7 倍，任務中途失去細節的風險較高。回退條件：一週後量測，若 B1 或 B2 的 `DONE_WITH_CONCERNS`／`BLOCKED` 比例或 review 打回率明顯上升，或每個完成 task 的總 token 沒有下降，就移除該 tier 的這一行。
+- **compact 視窗**：tier-b1 的 frontmatter 設 `autoCompactWindow: 300000`。選 300k 而不是 200k：模擬顯示 200k 的 compact 次數是 300k 的 2.7 倍，任務中途失去細節的風險較高。原本 b1／b2 一起試點，回退條件是：一週後量測，若 `DONE_WITH_CONCERNS`／`BLOCKED` 比例或 review 打回率明顯上升，或每個完成 task 的總 token 沒有下降，就移除該 tier 的這一行。2026-10-23 的量測結果：B1 每 agent 總 token p50 −15.7%，保留；B2 +9.0%（2.54M → 2.77M），命中回退條件，而且 B2 的 ctx p90 只有 227k、幾乎碰不到這個視窗，所以 2026-10-27 依使用者裁定從 tier-b2 移除。B2 的上升可能是 task 組成不同造成的雜訊，這次移除只是少一個沒有效益的變因，不代表 compact 視窗對 B2 有害。
 - **快取 TTL**：只有 tier-b1 設 `experimental.cacheTtl: 1h`。1h 的寫入單價是 2 倍（5m 是 1.25 倍），只有在長時間等待之後還要繼續的 agent 才划算：試算 10-05 起 tier-b1 開 1h 約省 $250，但 senior-reviewer 開 1h 反而多花約 $60，B2 也是淨增。所以不用全域的 `subagentPromptCacheTtl`。動用 usage credits 時，平台會忽略 frontmatter 的 1h。
 - **等待紀律**：優先用 `run_in_background` 加完成通知；需要輪詢時，所有 agent 單次阻塞等待都不超過 270 秒（回來一次只付一次快取讀取，約是重寫成本的 1/12）。tier-b1 也一樣，因為動用 usage credits 時平台會把它的 1h 降成 5m，而 agent 無從判斷；B1 的 1h 保護的是無法切段的單一長指令。完整 CI、mutation 與長實驗留給主線的整合節點，不寫進 implement brief。
 - **切片上限**：一個 task 要能在約 250k context 內做完（見 mao-plan 的 Size Tasks）。brief 用原文寫目標、驗收條件與約束，其他內容給指標，按需載入。
