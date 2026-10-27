@@ -179,7 +179,11 @@ plan_effort_for() {
 
 # 模型不可用類錯誤。刻意只收這幾種形態,不收泛用的 400/invalid_request——那會把 prompt 太長、
 # 參數錯誤之類的真失敗也吞進退回路徑,讓一個該修的呼叫端錯誤被舊模型掩蓋。
-MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access"
+# 2026-10-27 加「Selected model is at capacity」: gpt-6.1-terra 發布隔天,required 複查以
+# turn.failed「Selected model is at capacity. Please try a different model.」整輪 FAILED。
+# 伺服器明說要換模型,改用退路模型完成複查是實際發生的複查,不是把失敗偽裝成成功;
+# 額度用盡(RATE_LIMITED)是另一種訊息,不在此列。
+MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access|Selected model is at capacity"
 CONVERGE_WARN_ROUNDS=6         # doc 模式共議輪數警示線:達此輪數仍未收斂即印提醒(不阻斷)。
                                # 無硬上限——收斂由呼叫端依每輪「收斂問句」判斷,見 header。
 CONVERGE_WARN_ROUNDS_DIFF=3    # diff 模式警示線。比 doc 嚴,因為 diff 模式的協議是「一輪
@@ -1159,7 +1163,7 @@ if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ -n "$LEGACY_MODEL" ] && [ "$
   if [ "$SESSION_MODE" = "resume" ] && [ "${FULL_CHARS:-0}" -gt "$CODEX_SAFE_CHARS" ]; then
     echo "[codex-review] 注意: 伺服器不接受 $MODEL,但完整內容 ${FULL_CHARS} 字元超過安全上限,無法改用舊模型 fresh 重送。" >&2
   else
-    echo "[codex-review] 注意: 伺服器不接受 $MODEL(帳號尚未開通或 client 版本不足),本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重跑一次。" >&2
+    echo "[codex-review] 注意: 伺服器不接受 $MODEL(帳號尚未開通、client 版本不足或模型容量已滿),本輪改用舊模型 $LEGACY_MODEL/$LEGACY_EFFORT 重跑一次。" >&2
     echo "  判別: printf 'reply OK' | codex exec -m $MODEL --sandbox read-only --skip-git-repo-check -" >&2
     MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1; LEGACY_REASON="runtime"
     SESSION_MODE="fresh"; SEND_PAYLOAD="$PAYLOAD"; PAYLOAD_CHARS="$FULL_CHARS"

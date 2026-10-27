@@ -1102,6 +1102,11 @@ case "$1" in
       reject-new) if [ "$m" = "$FB_REJECT" ]; then
         echo '{"type":"error","status":400,"error":{"message":"The model is not supported when using Codex with a ChatGPT account."}}' >&2
         exit 1; fi ;;
+      # 2026-10-27 實際收到的形狀(gpt-6.1-terra 發布隔天): --json 事件流裡的 error + turn.failed
+      capacity) if [ "$m" = "$FB_REJECT" ]; then
+        echo '{"type":"error","message":"Selected model is at capacity. Please try a different model."}'
+        echo '{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}'
+        exit 1; fi ;;
       reject-all) echo 'ERROR: The model is not supported when using Codex with a ChatGPT account.' >&2; exit 1 ;;
       generic)    echo 'ERROR: stream disconnected before completion' >&2; exit 1 ;;
     esac
@@ -1132,6 +1137,12 @@ ok "退路/執行期: 先問新模型再問舊模型"          test "$FB_CALLS" 
 ok "退路/執行期: 有印出伺服器不接受的注意"       has "伺服器不接受 $REQ_NEW" "$FB_OUT"
 ok "退路/執行期: 完成行標出已退回"             has "已退回舊模型" "$FB_OUT"
 ok "退路/執行期: 退路 effort 是 medium"         has "模型=$REQ_OLD/medium" "$FB_OUT"
+
+FB_REJECT="$REQ_NEW" fb_run required 0.160.0 capacity
+ok "退路/容量已滿: rc 0"                        test "$FB_RC" -eq 0
+ok "退路/容量已滿: 先問新模型再問退路"          test "$FB_CALLS" = "$REQ_NEW $REQ_OLD"
+ok "退路/容量已滿: 完成行標出已退回"            has "已退回舊模型" "$FB_OUT"
+ok "退路/容量已滿: 不得被當成額度用盡"          hasnt "RATE_LIMITED" "$FB_OUT"
 
 FB_REJECT="$CRIT_NEW" fb_run critical 0.160.0 reject-new
 ok "退路/critical 檔: 退到 critical 自己的舊模型" test "$FB_CALLS" = "$CRIT_NEW $CRIT_OLD"
