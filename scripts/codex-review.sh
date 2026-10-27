@@ -25,13 +25,26 @@
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
-#   映射(嚴重度用語同 mao-review taxonomy;2026-10-05 使用者裁定 critical/required 改用
-#   gpt-6.1-sol;2026-10-08 依實測調整 effort,見下方【2026-10-08 實測】):
-#     critical          -> gpt-6.1-sol  / medium 退路 gpt-6-luna   / high
-#     required          -> gpt-6.1-sol  / medium 退路 gpt-6-luna   / high
-#     optional/nit/fyi  -> gpt-6-luna   / high   退路 gpt-6-astra  / low(2026-10-08 gpt-5.6 全面退出)
+#   映射(嚴重度用語同 mao-review taxonomy;2026-10-27 依實測改用 gpt-6.1-terra,見下方
+#   【2026-10-27 實測】):
+#     critical          -> gpt-6.1-sol   / medium 退路 gpt-6.1-terra / medium
+#     required          -> gpt-6.1-terra / medium 退路 gpt-6.1-sol   / medium
+#     optional/nit/fyi  -> gpt-6.1-terra / low    退路 gpt-6-luna    / high
 #     doc --kind plan   -> gpt-6-astra  / 依嚴重度 critical=high、required=medium、其餘=low
 #                          退路 gpt-6-luna / high(使用者裁定:astra 留給計畫階段補全面性)
+#
+#   【2026-10-27 實測】同一份 8 缺陷測資與凍結的 2026-10-08 S0 prompt(只換工作根路徑),
+#   codex 0.164.0、現行隔離旗標,每格 3 次、依序輪流、盲評(數據在
+#   C:/Users/markh/codex-effort-results/2026-10-27/;成本以 API 單價換算,本機走訂閱額度,只作相對比較):
+#     gpt-6.1-terra/low     recall 中位數 8 (8,8,8)  B6 3/3  未快取 20.3k  output 1.3k  44 秒  約 $0.030
+#     gpt-6.1-terra/medium            8 (8,8,8)     3/3          17.7k         1.3k  38 秒  約 $0.027
+#     gpt-6.1-terra/high              8 (7,8,8)     3/3          18.5k         1.4k  39 秒  約 $0.028
+#     gpt-6.1-sol/medium              7 (8,7,7)     1/3          20.2k         1.5k  59 秒  約 $0.065
+#     gpt-6-luna/high                 6 (6,6,6)     0/3          29.0k         3.5k  45 秒  約 $0.006
+#   → 依事先定的門檻:Terra 比 Luna 多 ≥1 且不更慢,optional 改 terra;Terra 也抓到 B6,required
+#     改 terra(約 sol 的一半成本、快約 20 秒)。critical 刻意維持 sol:這份測資 sol 已近天花板、
+#     只有 B6 有鑑別力,單一測資不足以讓最高風險檔降級。terra 的 effort 對 token 幾乎沒影響,
+#     optional 取 low、required 取 medium 留餘裕。限制:單一 Go 測資、n=3、植入缺陷集中在認證／契約。
 #
 #   【2026-10-08 實測】植入 8 缺陷測資(C:/Users/markh/codex-effort-fixture),每格 3 次、評分表
 #   事先預登錄(數據在 C:/Users/markh/codex-effort-results/2026-10-08/,記憶
@@ -49,9 +62,10 @@
 #   宣稱 6.1-sol 接近 astra 的能力、單價為 astra 的五分之一、cached input 比 6-sol 便宜一半。
 #   effort 各降一階(critical high→medium、required medium→low)同屬裁定;下方 8 缺陷測資
 #   當時尚未對 6.1-sol 重跑,所以下表的 recall 數字描述的是舊檔位(2026-10-08 已重跑,見上)。
-#   --severity 未傳/未知 -> fallback gpt-6-luna / high 退路 gpt-6.1-sol / low
+#   --severity 未傳/未知 -> fallback gpt-6.1-terra / low 退路 gpt-6.1-sol / low
 #                            (對齊最低一級:沒說嚴重度就不燒旗艦額度;腳本仍印警告要求呼叫端補傳,
-#                            別靠 fallback 過日子。退路 2026-10-08 使用者裁定由 astra/low 改 sol/low)。
+#                            別靠 fallback 過日子。退路 2026-10-08 使用者裁定由 astra/low 改 sol/low;
+#                            主模型 2026-10-27 隨 optional 改 terra/low)。
 #   「退路」= 伺服器以「模型不可用」拒絕主模型(帳號 rollout 未輪到、模型下架)時改用的模型,機制見映射表下方。
 #
 #   【2026-09-23 改用 gpt-6-sol 的依據】沿用下方 09-07 的同一份 8 缺陷測資,但這次 prompt 取自
@@ -125,10 +139,10 @@
 set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
-CRIT_MODEL="gpt-6.1-sol";      CRIT_EFFORT="medium"     # critical
-REQ_MODEL="gpt-6.1-sol";       REQ_EFFORT="medium"      # required(2026-10-08 由 low 升,見檔頭實測)
-LOW_MODEL="gpt-6-luna";        LOW_EFFORT="high"        # optional / nit / fyi(2026-10-08 由 max 降)
-FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="high"   # --severity 未傳/未知時的保底(對齊 optional)
+CRIT_MODEL="gpt-6.1-sol";      CRIT_EFFORT="medium"     # critical(2026-10-27 刻意不改,見檔頭實測)
+REQ_MODEL="gpt-6.1-terra";     REQ_EFFORT="medium"      # required(2026-10-27 由 sol 改,見檔頭實測)
+LOW_MODEL="gpt-6.1-terra";     LOW_EFFORT="low"         # optional / nit / fyi(2026-10-27 由 luna/high 改)
+FALLBACK_MODEL="gpt-6.1-terra"; FALLBACK_EFFORT="low"   # --severity 未傳/未知時的保底(對齊 optional)
 # 計畫文件(doc 模式 --kind plan)一律用 astra,不看嚴重度選模型——使用者 2026-09-23 裁定:
 # astra 留給計畫階段,輔助完善計畫的全面性。effort 仍隨嚴重度(見 plan_effort_for)。
 PLAN_MODEL="gpt-6-astra"
@@ -145,9 +159,11 @@ PLAN_MODEL="gpt-6-astra"
 # 裁定 gpt-5.6 全面退出(最低 gpt-6),optional 改退 gpt-6-astra/low(09-07 同一份測資 8/8)。
 # (被取代的舊安排: critical 退 astra/low——09-07 實測唯一抓到跨版本時序缺陷 B6 的檔位;
 #  required 退 5.6-terra/high;plan 退 5.6-sol 同 effort。)
-CRIT_LEGACY_MODEL="gpt-6-luna";    CRIT_LEGACY_EFFORT="high"
-REQ_LEGACY_MODEL="gpt-6-luna";     REQ_LEGACY_EFFORT="high"
-LOW_LEGACY_MODEL="gpt-6-astra";    LOW_LEGACY_EFFORT="low"
+# 2026-10-27(使用者授權依實測調整): critical 退 terra/medium(同測資 8 對 luna 6);required 主模型
+# 改 terra 後退回原主模型 sol/medium;optional 主模型改 terra 後退回原主模型 luna/high。
+CRIT_LEGACY_MODEL="gpt-6.1-terra"; CRIT_LEGACY_EFFORT="medium"
+REQ_LEGACY_MODEL="gpt-6.1-sol";    REQ_LEGACY_EFFORT="medium"
+LOW_LEGACY_MODEL="gpt-6-luna";     LOW_LEGACY_EFFORT="high"
 PLAN_LEGACY_MODEL="gpt-6-luna";    PLAN_LEGACY_EFFORT="high"  # 不再沿用 plan_effort_for 的值
 # 未傳/未知嚴重度的退路(2026-10-08 使用者裁定 gpt-6.1-sol/low,原與 optional 共用 astra/low)。
 FALLBACK_LEGACY_MODEL="gpt-6.1-sol"; FALLBACK_LEGACY_EFFORT="low"
