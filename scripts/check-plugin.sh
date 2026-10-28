@@ -334,7 +334,7 @@ END { printf "%s|%d|%s|%d|%d|%s|%s\n", model, ml, effort, el, dl, dmodel, deffor
 AWK
 
 # 規則 1（tier-line／tier-table／tier-unknown）與規則 2（dispatch-*）。
-# 變數：TIERS="tier-b1:sonnet:xhigh;tier-b2:sonnet:medium;..."  MARK=放行標記
+# 變數：TIERS="tier-b1:sonnet:xhigh;tier-b2:haiku:medium;..."  MARK=放行標記
 IFS= read -r -d '' AWK_DOCSCAN <<'AWK' || true
 function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
 function firstword(s) { if (match(s, /[a-z][a-z0-9]*/)) return substr(s, RSTART, RLENGTH); return "" }

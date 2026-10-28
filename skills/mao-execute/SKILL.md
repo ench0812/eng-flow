@@ -42,8 +42,8 @@ Model + effort routing (shared rules: `references/model-routing.md` — model an
 | Stage | Tier | Dispatch |
 |-------|------|----------|
 | implement — 複雜商業邏輯 / 演算法 / 跨模組互動 | **B1** | `agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'` |
-| implement — spec 明確、只是落地 | **B2** | `agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` |
-| spec-review / code-review | **B2** | `agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` |
+| implement — spec 明確、只是落地 | **B2** | `agentType:'eng-flow:tier-b2'` + `model:"haiku"` + `effort:'medium'` |
+| spec-review / code-review | **B2** | `agentType:'eng-flow:tier-b2'` + `model:"haiku"` + `effort:'medium'` |
 | 任何 architecture-level / high-uncertainty / 安全相關的 stage | **A** | omit `model`（inherits session）+ `effort:'high'` |
 | 樣板、config、migration、文件這類機械高量 stage | **C** | `agentType:'eng-flow:tier-c'` + `model:"haiku"` + `effort:'low'` |
 

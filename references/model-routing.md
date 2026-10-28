@@ -1,6 +1,6 @@
 # Model Routing (eng-flow shared rules)
 
-Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能力）與 **effort**（推理預算）。**兩者成對選定、一律明寫**（2026-08-06 校準）：挑 tier 就把該 tier 的 effort 一起帶上，不靠 omit 繼承 session。Sonnet 分兩檔，是這張表的重點——降成本先在 B1→B2 之間動，不是急著降到 haiku。
+Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能力）與 **effort**（推理預算）。**兩者成對選定、一律明寫**（2026-08-06 校準）：挑 tier 就把該 tier 的 effort 一起帶上，不靠 omit 繼承 session。B2 自 2026-10-28 起用 Haiku 5.5（見下方沿革），B1 維持 Sonnet 5.5。
 
 | Tier | Model | Effort | 用途 | How |
 |------|-------|--------|------|-----|
@@ -8,7 +8,7 @@ Two knobs per `agent()` / Agent-tool dispatch, not per skill — **model**（能
 | **D** | fable（`claude-fable-5-1`） | 繼承 session（見下） | **只有** mao-brainstorm 2.5 與 mao-plan Draft Stage 的起草 — 一次性，不參與後續 | `model:"fable"` |
 | **A** | opus（繼承主線） | `high` | 平行深度任務、跨模組驗證 — **節制使用** | Omit `model` + `effort:'high'` |
 | **B1** | sonnet | `xhigh` | 複雜商業邏輯、演算法 — 執行層首選工程師 | Workflow：`agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'`；Agent tool：`subagent_type:"eng-flow:tier-b1"` |
-| **B2** | sonnet | `medium` | Spec 明確的實作、標準重構 | Workflow：`agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"` |
+| **B2** | haiku（Haiku 5.5） | `medium` | Spec 明確的實作、標準重構 | Workflow：`agentType:'eng-flow:tier-b2'` + `model:"haiku"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"` |
 | **C** | haiku（Haiku 5.5） | low | 樣板、config、migration、文件 | Workflow：`agentType:'eng-flow:tier-c'` + `model:"haiku"` + `effort:'low'`；Agent tool 用 `eng-flow:tier-c` |
 
 **檔位名稱跨模型不等值**（2026-10-06，依官方 prompting 指南，未在本機 eval）：`opus` 解析為 Opus 5.5，其 API 預設是 `medium` 而非 `high`，官方量測 5.5 的 `medium` 在 coding／知識工作上已追平或超過 Opus 5 的 `high`，且同一檔位下 5.5 想得比 5 多——所以 Session／A 的 `high` 比 Opus 5 時代貴，這是刻意保留的（使用者 2026-10-06 裁定維持）。`sonnet` 解析為 Sonnet 5.5，官方對 agentic coding 的起點是 `medium`（spec 明確）／`high`（較難較長），`xhigh` 只給量測過有增益的工作；B1 維持 `xhigh` 是使用者裁定，副作用與對策見沿革。來源（2026-10-06 讀取）：`platform.claude.com/docs/en/build-with-claude/effort` 的各模型建議檔位，以及 `.../prompt-engineering/prompting-claude-opus-5-5`、`prompting-claude-opus-5`、`prompting-claude-sonnet-5-5`、`prompting-claude-sonnet-5`。
@@ -65,7 +65,8 @@ Fable 5.1 的官方指引明寫：**為舊模型寫的 prompt 往往過度規定
 |---|---|---|---|---|
 | `claude-fable-5-1` | D | 10.00 | 50.00 | 0.25 |
 | `claude-opus-5-5` | Session / A | 4.00 | 20.00 | 0.20 |
-| `claude-sonnet-5-5` | B1 / B2 | 2.00 | 10.00 | 0.20 |
+| `claude-sonnet-5-5` | B1 | 2.00 | 10.00 | 0.20 |
+| `claude-haiku-5-5` | B2 / C | （未查證，見 claude-api skill 的模型表） | （未查證） | （未查證） |
 
 （價格來源：claude-api skill 的模型表，cached 2026-09-25；Anthropic first-party API 牌價。`sonnet` 別名在 Anthropic API 上解析為 Sonnet 5.5。）
 
@@ -88,7 +89,7 @@ Fable 比 Opus 貴 2.5 倍且貴在 output。但**把這個當主判準會做出
 ## Rules
 
 - **mao-execute pipeline**: implement 依任務性質選 B1 或 B2（plan 標記 architecture-level / high-uncertainty 的升 A）；spec-review / code-review 走 B2，安全 / 認證 / 資料完整性相關的升 A。
-- **mao-review reviewer dispatch**: default B2（Workflow：`agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"`）。High-risk changes (security, auth, data integrity) → A（omit `model` + `effort:'high'`）。
+- **mao-review reviewer dispatch**: default B2（Workflow：`agentType:'eng-flow:tier-b2'` + `model:"haiku"` + `effort:'medium'`；Agent tool：`subagent_type:"eng-flow:tier-b2"`）。High-risk changes (security, auth, data integrity) → A（omit `model` + `effort:'high'`）。
 - **Plugin agents** (`agents/`, invoked as `eng-flow:<name>`): tier-b1=B1, tier-b2=B2, tier-c=C。B、C 層在 Agent tool 路徑上唯一能帶 effort 的方式；Workflow `agent()` 自 2026-10-16 起也用 `opts.agentType` 指名它們，讓 compact 視窗、快取 TTL 與本文的讀檔／等待紀律在兩條路徑都生效，同時照舊明寫 `model` + `effort`（tier 配對不依賴 agentType 怎麼解析）。
 - **Named user-level agents** (`~/.claude/agents/`): senior-reviewer=A, root-cause-debugger=A, implementer=B2（其定義就是「依明確 spec 落地」）, mechanical-scanner=C；另有同名覆蓋內建版的 `Explore`（Haiku 5.5／medium，2026-10-09）。These apply to Agent-tool dispatch only — Workflow `agent()` does NOT consult them; route Workflow stages explicitly with the table above.
 - **Effort 寫在哪**：Workflow `agent()` 用 `opts.effort`；agent 定義檔（plugin `agents/*.md` 或 `~/.claude/agents/*.md`）用 frontmatter `effort:`；Agent tool 本身帶不了。每一層都明寫（C 層自 Haiku 5.5 起也支援 effort）——session 有自己的 effortLevel，omit 會讓 stage 悄悄繼承它、失去分層的意義。
@@ -235,3 +236,4 @@ Taken together the operative rule is: **the same `prompt_cache_key` (i.e. the sa
 **Telemetry.** `codex exec --json` is used because human mode prints only `tokens used <total>` with no cached/input split — without the split there is no hit rate to speak of. Each call (including `FAILED` and `RATE_LIMITED`, which still burn input tokens) appends a row to `$CODEX_REVIEW_LOG` (default `~/.claude/cache/codex-review-usage.tsv`): `sent_chars, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, cache_hit_pct, session_mode, round, status, rc`. Read it with `bash scripts/codex-usage.sh [--since YYYY-MM-DD]`. **Track uncached input (`input − cached`), not total input** — that is the number that is actually billed at full rate.
 
 **Security note.** `codex exec resume` has no `-s/--sandbox` flag (0.148.0), so the resume branch passes `-c sandbox_mode="read-only"` explicitly. A user `config.toml` may carry e.g. `[windows] sandbox = "elevated"`; leaving the sandbox to the environment on an unattended review call is a fail-open. Verified by the header codex prints for that call: `sandbox: read-only`. (Note `--strict-config` does **not** validate `-c` overrides — it only rejects unknown fields in `config.toml`, so it is not evidence that the key took effect; the header is.)
+- **2026-10-28 B2 改用 Haiku 5.5（effort 仍為 `medium`）**：依 72 次重放實驗（D:/Data/b2-haiku-exp-preserved-2026-10-16，結論見其 STATUS.md）與 15 次派工的 Phase 4 試行；試行通過事先登記的驗收條件（phase4/CRITERIA.md）後才合併本變更。B1 維持 Sonnet 5.5／`xhigh`，C 維持 Haiku 5.5／`low`，A 不變。`tier-b2` 的 frontmatter、各 skill 的派工寫法與本檔表格同步改為 haiku。回退：把 `agents/tier-b2.md` 的 `model` 與上述派工寫法改回 `sonnet`，`scripts/check-plugin.sh` 會檢查文件與 frontmatter 一致。
