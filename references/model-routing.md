@@ -66,9 +66,9 @@ Fable 5.1 的官方指引明寫：**為舊模型寫的 prompt 往往過度規定
 | `claude-fable-5-1` | D | 10.00 | 50.00 | 0.25 |
 | `claude-opus-5-5` | Session / A | 4.00 | 20.00 | 0.20 |
 | `claude-sonnet-5-5` | B1 | 2.00 | 10.00 | 0.20 |
-| `claude-haiku-5-5` | B2 / C | （未查證，見 claude-api skill 的模型表） | （未查證） | （未查證） |
+| `claude-haiku-5-5` | B2 / C | 0.10（prompt > 100K：0.50） | 0.50（> 100K：2.50） | 0.01（> 100K：0.05） |
 
-（價格來源：claude-api skill 的模型表，cached 2026-09-25；Anthropic first-party API 牌價。`sonnet` 別名在 Anthropic API 上解析為 Sonnet 5.5。）
+（價格來源：claude-api skill 的模型表，cached 2026-09-25；Haiku 5.5 一列取自 2026-10-06 的同一張表（B2 Haiku 實驗 rubric M7 所用，cache read 為 input 的 0.1 倍），價格依 prompt 是否超過 100K tokens 分兩段；Anthropic first-party API 牌價。`sonnet` 別名在 Anthropic API 上解析為 Sonnet 5.5。）
 
 Fable 比 Opus 貴 2.5 倍且貴在 output。但**把這個當主判準會做出錯的決定**：一次 plan 起草約 200k input / 15k output，D 是 $2.75、主線是 $1.10，**差 $1.65**——對照一份要指導好幾天實作的 plan、以及切片錯誤造成的 48.5% 返工，這個價差不成比例。
 
