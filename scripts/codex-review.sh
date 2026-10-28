@@ -25,11 +25,23 @@
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
-#   映射(嚴重度用語同 mao-review taxonomy;2026-10-27 依實測改用 gpt-6.1-terra,見下方
-#   【2026-10-27 實測】):
+#   映射(嚴重度用語同 mao-review taxonomy;2026-10-27 依合成測資改用 gpt-6.1-terra,2026-10-28
+#   依真實 diff 重放改回,見下方【2026-10-28 真實 diff 重放】):
 #     critical          -> gpt-6.1-sol   / medium 退路 gpt-6.1-terra / medium
-#     required          -> gpt-6.1-terra / medium 退路 gpt-6.1-sol   / medium
-#     optional/nit/fyi  -> gpt-6.1-terra / low    退路 gpt-6-luna    / high
+#     required          -> gpt-6.1-sol   / medium 退路 gpt-6.1-terra / medium
+#     optional/nit/fyi  -> gpt-6-luna    / high   退路 gpt-6.1-terra / low
+#
+#   【2026-10-28 真實 diff 重放】(使用者原則:換不換以我們的實際應用場景實測為準,合成測資不算)
+#   10-08～10-26 間由 sol 完成、finding 後來被採納並修掉的 8 次真實複查(Go 2、TS 3、PHP、Python、
+#   shell 各 1;標準答案 15 條),在同一 head 狀態以同一份腳本、只差模型各重跑 1 次,盲評;
+#   門檻事先寫在 C:/Users/markh/codex-effort-results/2026-10-28-replay/PREREG.md:
+#     gpt-6.1-sol/medium    召回 11/15  額外 finding 成立 2   41～66 秒  input 約 21 萬～44 萬
+#     gpt-6.1-terra/medium  召回  8/15  額外 finding 成立 5   16～25 秒  input 約 14 萬～23 萬
+#   → T ≤ S−2,required 改回 sol;terra 召回 53% < 60%,optional 也改回 10-27 前的 luna/high。
+#     退路改用 terra(terra/medium 是唯一有真實場景數據的次選;optional 的 terra/low 與 luna/high
+#     都只有合成測資數據,真實 diff 上未測)。下方 10-27 合成測資的結論(terra 8 對 sol 7)
+#     在真實 diff 上沒有重現:terra 讀得少(input 約一半)、快 2.5 倍;漏判是否源於讀得少未分析。
+#     限制:每題 n=1;標準答案來自 sol 當時的輸出,天然偏向 sol(terra 額外成立的 5 條不計分)。
 #     doc --kind plan   -> gpt-6-astra  / 依嚴重度 critical=high、required=medium、其餘=low
 #                          退路 gpt-6-luna / high(使用者裁定:astra 留給計畫階段補全面性)
 #
@@ -41,6 +53,7 @@
 #     gpt-6.1-terra/high              8 (7,8,8)     3/3          18.5k         1.4k  39 秒  約 $0.028
 #     gpt-6.1-sol/medium              7 (8,7,7)     1/3          20.2k         1.5k  59 秒  約 $0.065
 #     gpt-6-luna/high                 6 (6,6,6)     0/3          29.0k         3.5k  45 秒  約 $0.006
+#   【以下結論已被 2026-10-28 真實 diff 重放推翻,映射已改回;保留作合成測資與真實場景落差的紀錄】
 #   → 依事先定的門檻:Terra 比 Luna 多 ≥1 且不更慢,optional 改 terra;Terra 也抓到 B6,required
 #     改 terra(約 sol 的一半成本、快約 20 秒)。critical 刻意維持 sol:這份測資 sol 已近天花板、
 #     只有 B6 有鑑別力,單一測資不足以讓最高風險檔降級。terra 的 effort 對 token 幾乎沒影響,
@@ -62,10 +75,10 @@
 #   宣稱 6.1-sol 接近 astra 的能力、單價為 astra 的五分之一、cached input 比 6-sol 便宜一半。
 #   effort 各降一階(critical high→medium、required medium→low)同屬裁定;下方 8 缺陷測資
 #   當時尚未對 6.1-sol 重跑,所以下表的 recall 數字描述的是舊檔位(2026-10-08 已重跑,見上)。
-#   --severity 未傳/未知 -> fallback gpt-6.1-terra / low 退路 gpt-6.1-sol / low
+#   --severity 未傳/未知 -> fallback gpt-6-luna / high 退路 gpt-6.1-sol / low
 #                            (對齊最低一級:沒說嚴重度就不燒旗艦額度;腳本仍印警告要求呼叫端補傳,
 #                            別靠 fallback 過日子。退路 2026-10-08 使用者裁定由 astra/low 改 sol/low;
-#                            主模型 2026-10-27 隨 optional 改 terra/low)。
+#                            主模型 2026-10-27 隨 optional 改 terra/low、10-28 隨 optional 改回 luna/high)。
 #   「退路」= 伺服器以「模型不可用」拒絕主模型(帳號 rollout 未輪到、模型下架)時改用的模型,機制見映射表下方。
 #
 #   【2026-09-23 改用 gpt-6-sol 的依據】沿用下方 09-07 的同一份 8 缺陷測資,但這次 prompt 取自
@@ -140,9 +153,9 @@ set -uo pipefail
 
 # --- 嚴重度 → 模型/effort 映射(集中一處,要調策略只改這裡) ---
 CRIT_MODEL="gpt-6.1-sol";      CRIT_EFFORT="medium"     # critical(2026-10-27 刻意不改,見檔頭實測)
-REQ_MODEL="gpt-6.1-terra";     REQ_EFFORT="medium"      # required(2026-10-27 由 sol 改,見檔頭實測)
-LOW_MODEL="gpt-6.1-terra";     LOW_EFFORT="low"         # optional / nit / fyi(2026-10-27 由 luna/high 改)
-FALLBACK_MODEL="gpt-6.1-terra"; FALLBACK_EFFORT="low"   # --severity 未傳/未知時的保底(對齊 optional)
+REQ_MODEL="gpt-6.1-sol";       REQ_EFFORT="medium"      # required(10-27 改 terra、10-28 真實 diff 重放後改回)
+LOW_MODEL="gpt-6-luna";        LOW_EFFORT="high"        # optional / nit / fyi(10-27 改 terra、10-28 改回)
+FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="high"   # --severity 未傳/未知時的保底(對齊 optional)
 # 計畫文件(doc 模式 --kind plan)一律用 astra,不看嚴重度選模型——使用者 2026-09-23 裁定:
 # astra 留給計畫階段,輔助完善計畫的全面性。effort 仍隨嚴重度(見 plan_effort_for)。
 PLAN_MODEL="gpt-6-astra"
@@ -161,9 +174,13 @@ PLAN_MODEL="gpt-6-astra"
 #  required 退 5.6-terra/high;plan 退 5.6-sol 同 effort。)
 # 2026-10-27(使用者授權依實測調整): critical 退 terra/medium(同測資 8 對 luna 6);required 主模型
 # 改 terra 後退回原主模型 sol/medium;optional 主模型改 terra 後退回原主模型 luna/high。
+# 2026-10-28 真實 diff 重放後主模型改回(見檔頭):required 退 terra/medium、optional 退 terra/low——
+# terra/medium 召回 8/15 不夠當主模型,但它是唯一有真實場景數據的次選。optional 退路取 low 是沿用
+# 10-27 合成測資「terra 的 effort 幾乎不影響召回」,terra/low 本身【未在真實 diff 驗證】;
+# optional 主模型 luna/high 也一樣只有合成測資數據(6/8),真實 diff 上未測。
 CRIT_LEGACY_MODEL="gpt-6.1-terra"; CRIT_LEGACY_EFFORT="medium"
-REQ_LEGACY_MODEL="gpt-6.1-sol";    REQ_LEGACY_EFFORT="medium"
-LOW_LEGACY_MODEL="gpt-6-luna";     LOW_LEGACY_EFFORT="high"
+REQ_LEGACY_MODEL="gpt-6.1-terra";  REQ_LEGACY_EFFORT="medium"
+LOW_LEGACY_MODEL="gpt-6.1-terra";  LOW_LEGACY_EFFORT="low"
 PLAN_LEGACY_MODEL="gpt-6-luna";    PLAN_LEGACY_EFFORT="high"  # 不再沿用 plan_effort_for 的值
 # 未傳/未知嚴重度的退路(2026-10-08 使用者裁定 gpt-6.1-sol/low,原與 optional 共用 astra/low)。
 FALLBACK_LEGACY_MODEL="gpt-6.1-sol"; FALLBACK_LEGACY_EFFORT="low"

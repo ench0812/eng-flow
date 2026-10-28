@@ -1098,7 +1098,7 @@ case "$1" in
     echo "$m" >> "$FB_LOG"
     case "$FB_MODE" in
       # 只拒絕呼叫端指名的那一個模型: 同一個模型在某檔是新模型、在另一檔是退路
-      # (gpt-6.1-terra 是 required/optional 的主模型,也是 critical 的退路),glob 表達不了。
+      # (2026-10-27～28 間 gpt-6.1-terra 曾同時是主模型與退路),glob 表達不了。
       reject-new) if [ "$m" = "$FB_REJECT" ]; then
         echo '{"type":"error","status":400,"error":{"message":"The model is not supported when using Codex with a ChatGPT account."}}' >&2
         exit 1; fi ;;
@@ -1167,20 +1167,20 @@ ok "退路/正常: 完成行不得標退回"                 hasnt "已退回舊
 
 FB_REJECT="$LOW_NEW" fb_run optional 0.160.0 reject-new
 ok "退路/optional 檔: 退到 optional 自己的舊模型" test "$FB_CALLS" = "$LOW_NEW $LOW_OLD"
-# 主模型 low、退路 high,所以這行分辨得出「固定值」與「沿用主模型 effort」
-ok "退路/optional 檔: 退路 effort 是 high"      has "模型=$LOW_OLD/high" "$FB_OUT"
+# 主模型 high、退路 low,所以這行分辨得出「固定值」與「沿用主模型 effort」
+ok "退路/optional 檔: 退路 effort 是 low"       has "模型=$LOW_OLD/low" "$FB_OUT"
 
-# 未傳/未知嚴重度: 主模型 terra/low(2026-10-27 隨 optional),退路 gpt-6.1-sol/low(2026-10-08 使用者
-# 裁定)。字面值斷言是刻意的: 只用 map 從腳本讀預期值的話,常數被改錯測試照樣綠。
+# 未傳/未知嚴重度: 主模型 luna/high(2026-10-28 隨 optional 改回),退路 gpt-6.1-sol/low(2026-10-08
+# 使用者裁定)。字面值斷言是刻意的: 只用 map 從腳本讀預期值的話,常數被改錯測試照樣綠。
 FBK_NEW="$(map FALLBACK_MODEL)"; FBK_OLD="$(map FALLBACK_LEGACY_MODEL)"
-ok "未指定/裁定值: 主模型 gpt-6.1-terra" test "$FBK_NEW" = "gpt-6.1-terra"
+ok "未指定/裁定值: 主模型 gpt-6-luna"    test "$FBK_NEW" = "gpt-6-luna"
 ok "未指定/裁定值: 退路 gpt-6.1-sol"     test "$FBK_OLD" = "gpt-6.1-sol"
 fb_run "" 0.160.0 ok
 ok "未指定: 用 fallback 主模型、只問一次"  test "$FB_CALLS" = "$FBK_NEW"
-ok "未指定: effort 是 low"                has "模型=$FBK_NEW/low" "$FB_OUT"
+ok "未指定: effort 是 high"               has "模型=$FBK_NEW/high" "$FB_OUT"
 ok "未指定: 照樣警告呼叫端補傳"           has "未傳 --severity" "$FB_OUT"
 FB_REJECT="$FBK_NEW" fb_run "" 0.160.0 reject-new
-ok "未指定/退路: 先問 terra 再問 sol"     test "$FB_CALLS" = "$FBK_NEW $FBK_OLD"
+ok "未指定/退路: 先問 luna 再問 sol"      test "$FB_CALLS" = "$FBK_NEW $FBK_OLD"
 ok "未指定/退路: 退路 effort 是 low"       has "模型=$FBK_OLD/low" "$FB_OUT"
 fb_run bogus 0.160.0 ok
 ok "未知嚴重度: 同 fallback 主模型"        test "$FB_CALLS" = "$FBK_NEW"

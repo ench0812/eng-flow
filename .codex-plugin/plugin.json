@@ -1,6 +1,6 @@
 {
   "name": "eng-flow",
-  "version": "1.44.6",
+  "version": "1.44.7",
   "description": "eng-flow engineering skills and explicit fail-closed Codex hook adapters",
   "skills": "./skills/",
   "hooks": {
