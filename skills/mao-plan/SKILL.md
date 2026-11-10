@@ -53,9 +53,9 @@ Expected: FAIL with "specific message"
 
 Names and signatures introduced by one task must match verbatim in every later task that consumes them.
 
-## Draft Stage — Fable 5.1 起草骨架
+## Draft Stage — Fable 起草骨架
 
-**第一輪的結構由 Fable 5.1 起草，之後它就退出。** 後續的補完、codex 共議、收斂與交付一律由主線模型（Opus）負責——Fable **只在這一步出現一次**，不參與任何後續輪次，也不看 codex 的回覆。
+**第一輪的結構由 Fable（目前 `fable` 別名解析為 Fable 5.2）起草，之後它就退出。** 後續的補完、codex 共議、收斂與交付一律由主線模型（Opus）負責——Fable **只在這一步出現一次**，不參與任何後續輪次，也不看 codex 的回覆。
 
 **為什麼是這一步**：切片邊界與依賴順序**沒有快速的驗證迴路**——錯了不會當場報錯，要等實作到一半、或跨服務兩側都蓋完才浮現，而那時的返工成本是本 skill 記錄的 48.5%。判準與成本說明的完整版在 `references/model-routing.md` 的 D 層段落，此處不重述。
 
@@ -63,14 +63,13 @@ Names and signatures introduced by one task must match verbatim in every later t
 
 ```
 Agent(
-  subagent_type: "general-purpose",
-  model: "fable",
+  subagent_type: "eng-flow:tier-d",
   description: "Draft plan skeleton",
   prompt: <見下方 brief 規格>
 )
 ```
 
-**Brief 給目標，不要給模板。** D 層的 brief 規則與其他 tier 相反——Fable 5.1 對過度規定的 prompt 反而產出更差，所以**不要**寫欄位模板、逐步指示或行數上限（其他 tier 的 150 行限制是為了壓冷啟成本，這裡不適用）。給它：
+**Brief 給目標，不要給模板。** D 層的 brief 規則與其他 tier 相反——Fable 對過度規定的 prompt 反而產出更差，所以**不要**寫欄位模板、逐步指示或行數上限（其他 tier 的 150 行限制是為了壓冷啟成本，這裡不適用）。給它：
 
 - spec 的**路徑**（讓它自己讀，不要貼內容）、要動的模組路徑、已定案的約束、明確的 out-of-scope
 - 目標一句話：**把這份 spec 拆成一組任務與它們的依賴關係，讓零上下文的執行者不必回頭問就能開工、也讓接手的主線一眼看得出哪一片切錯了**
@@ -92,9 +91,9 @@ Agent(
 2. **補完每個 task 的關鍵程式碼與驗收條件**（介面、簽章、非顯而易見的邏輯與測試斷言寫成程式碼，其餘寫成精確的行為描述、驗證指令與預期結果），遵守 `## No Placeholders — Ever`。骨架裡的檔案路徑與簽章是你的起點，不是不可改的定案——發現它引用了不存在的檔或簽章就改掉並記一句。
 3. **存檔後才進 Codex Co-Design Loop**。那個 loop 是 Opus 與 codex 兩方，Fable 不在裡面。
 
-**兩個硬限制**（詳見 `references/model-routing.md`）：Agent tool 沒有 `effort` 參數，所以這次派工的 effort 繼承 session；Fable 5.1 在 ZDR 組織不可用，會回 400。
+**派工一律走 `eng-flow:tier-d`**，不要寫 `general-purpose` 加 `model` 的裸寫法：依 Claude Code 文件，subagent 跑在和主線不同的模型時，session 選的 effort 不套用，裸寫很可能落到 Fable 5.2 在 Claude Code 的預設 `medium`；tier-d 的 frontmatter 固定 `high`，並拿掉 Agent tool，讓它無法再派 subagent。詳見 `references/model-routing.md`。
 
-**Fable 不可用時**（未開通、ZDR、派工失敗、使用者不要）：直接由 Opus 自己走完 `## Planning Process`，在交付時講一句「本次未經 Fable 起草」。這一步是加速器，不是必要條件——不要因為它不可用就停下來問。
+**Fable 不可用時**（未開通、ZDR 回 400、派工失敗、使用者不要）：直接由 Opus 自己走完 `## Planning Process`，在交付時講一句「本次未經 Fable 起草」。這一步是加速器，不是必要條件——不要因為它不可用就停下來問。**被換掉時**：題材涉及資安或生物時，安全分類器可能讓 subagent 靜默改跑 Opus 4.8／Opus 5，主線不會看到提示；交付時註明「Fable 起草可能經過 fallback」，需要確認時看該 subagent transcript 的 `model` 欄位。
 
 ## Planning Process
 

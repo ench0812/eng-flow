@@ -86,6 +86,7 @@ build_base() {
   mk_agent "$d" tier-b1 sonnet xhigh
   mk_agent "$d" tier-b2 sonnet medium
   mk_agent "$d" tier-c haiku low
+  mk_agent "$d" tier-d fable high
   cat > "$d/skills/demo/SKILL.md" <<'EOF'
 # demo skill
 Workflow: `agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'`; Agent tool: `subagent_type:"eng-flow:tier-b2"`.
@@ -94,7 +95,8 @@ Reversed order: { effort: 'medium', model: 'sonnet', agentType: 'eng-flow:tier-b
 JSON keys: {"subagent_type": "eng-flow:tier-b1", "model": "sonnet", "effort": "xhigh"} and {"effort": "medium", "model": "sonnet", "subagent_type": "eng-flow:tier-b2"}
 Counter-example: writing `model:"sonnet"` directly inherits the session effort. <!-- check-plugin: allow dispatch -->
 Mixed line: `agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` in Workflow; for high risk use A = omit `model` + `effort:'high'`
-Other model: Agent(subagent_type: "general-purpose", model: "fable")
+Other model: Agent(subagent_type: "general-purpose", model: "opus")
+Draft: Agent(subagent_type: "eng-flow:tier-d", description: "Draft", prompt: x)
 Prose paths: `references/demo.md`, `bash scripts/foo.sh --x`, `agents/tier-*.md`, `skills/<name>/SKILL.md`, `~/.claude/scripts/user-only.sh`, `scripts/foo.sh:12`, `references/demo.md#section`
 User project path: `tests/some/where.ts` <!-- check-plugin: allow path -->
 
@@ -110,6 +112,7 @@ EOF
 | **B1** | Sonnet | `xhigh` | `agentType:'eng-flow:tier-b1'` + `model:"sonnet"` + `effort:'xhigh'` |
 | **B2** | sonnet | `Medium` |`agentType:'eng-flow:tier-b2'` + `model:"sonnet"` + `effort:'medium'` |
 | **C** | haiku（Haiku 5.5） | low | `agentType:'eng-flow:tier-c'` + `model:"haiku"` + `effort:'low'` |
+| **D** | fable（目前解析為 `claude-fable-5-2`） | `high` | Agent tool：`subagent_type:"eng-flow:tier-d"` |
 EOF
   printf '# fx\n\nSee `scripts/foo.sh`.\n' > "$d/README.md"
   printf '#!/bin/sh\n' > "$d/scripts/foo.sh"
@@ -194,9 +197,12 @@ fix "tier-table：大小寫不同但值也不同（Opus）→ 拒絕，並以小
 new_tree t4d; printf '%s\n' '| **B1** | SONNET | `High` | x |' >> "$T/references/demo.md"
 fix "tier-table：model 大寫相符、effort 值不符（High）→ 只報 effort" 1 '^references/demo\.md:[0-9]+: \[tier-table\].*B1.*effort 欄是「high」'
 check_absent "tier-table：大寫的 SONNET 不被誤報成 model 不符" 'B1.*model 欄是'
+# D 列的標籤由 agents/tier-d.md 檔名推得（不是寫死的 B1/B2/C 清單）；effort 寫成 medium（Fable 5.2 的 Claude Code 預設）要擋
+new_tree t4e; sed -i 's/| fable（目前解析為 `claude-fable-5-2`） | `high` |/| fable（目前解析為 `claude-fable-5-2`） | `medium` |/' "$T/references/demo.md"
+fix "tier-table：D 列的 effort 欄不符" 1 '^references/demo\.md:8: \[tier-table\].*D.*effort 欄是「medium」'
 
-new_tree t5; printf '%s\n' "Stale: \`agentType:'eng-flow:tier-d'\`" >> "$T/skills/demo/SKILL.md"
-fix "tier-unknown：引用不存在的 tier agent" 1 '^skills/demo/SKILL\.md:[0-9]+: \[tier-unknown\].*tier-d'
+new_tree t5; printf '%s\n' "Stale: \`agentType:'eng-flow:tier-z'\`" >> "$T/skills/demo/SKILL.md"
+fix "tier-unknown：引用不存在的 tier agent" 1 '^skills/demo/SKILL\.md:[0-9]+: \[tier-unknown\].*tier-z'
 
 # =====================================================================
 echo "== 規則 2：派工寫法 lint =="
@@ -204,6 +210,9 @@ new_tree d1; printf '%s\n' "Dispatch with \`model:\"haiku\"\` for scanning." >> 
 fix "dispatch-model：haiku 同一行沒有 eng-flow:tier-" 1 '^skills/demo/SKILL\.md:[0-9]+: \[dispatch-model\].*haiku'
 new_tree d1b; printf '%s\n' "Use model: sonnet here." >> "$T/references/demo.md"
 fix "dispatch-model：references/ 也要掃、無引號寫法" 1 '^references/demo\.md:[0-9]+: \[dispatch-model\].*sonnet'
+# 裸寫 fable：subagent 跑在不同模型時 session 的 effort 不套用，會落到 Fable 的預設檔位，所以和 sonnet／haiku 一樣要走 tier agent
+new_tree d1e; printf '%s\n' 'Agent(subagent_type: "general-purpose", model: "fable", prompt: x)' >> "$T/skills/demo/SKILL.md"
+fix "dispatch-model：裸寫 fable（沒走 eng-flow:tier-d）" 1 '^skills/demo/SKILL\.md:[0-9]+: \[dispatch-model\].*fable'
 new_tree d1c; printf '%s\n' "Dispatch with \`model:\"haiku\"\` for scanning. <!-- check-plugin: allow dispatch -->" >> "$T/skills/demo/SKILL.md"
 fix "dispatch-model：同行放行標記有效" 0 '^check-plugin: OK'
 new_tree d1d; printf '%s\n' "Dispatch with \`model:\"haiku\"\`. <!-- check-plugin: allow path -->" >> "$T/skills/demo/SKILL.md"

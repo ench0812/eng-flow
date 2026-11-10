@@ -6,7 +6,8 @@
 # model/effort 同時出現在 agent frontmatter、description、三份文件的表格與派工範例；
 # hooks.json、hooks/*.sh、tests/ 三者要互相對得上；文件裡指向檔案的路徑會隨檔案搬動
 # 而過時。這些在改的當下都看起來「只是改一個地方」，漏掉的那一處不會報錯，只會讓某天的
-# 派工悄悄走錯檔位（Agent tool 沒有 effort 參數，寫錯的下場是繼承 session 的 high）。
+# 派工悄悄走錯檔位（Agent tool 沒有 effort 參數，寫錯的下場是檔位不受 tier 控制：
+# 同模型繼承 session，不同模型落到該模型的預設）。
 # 一條什麼都沒比對到的檢查和「通過」外表一模一樣，所以每條檢查在 tests/check-plugin.test.sh
 # 都有一個會讓它失敗的 fixture。
 #
@@ -29,10 +30,13 @@
 #      (tier-desc)        同檔 description 括號裡的「（sonnet + effort xhigh）」與 frontmatter 不符
 #      (tier-line)        skills/ references/ agents/ 裡，同一組寫法（以 + 或 , 相連的
 #                         eng-flow:tier-X / model:V / effort:V，順序不限）的值與該 tier 不符
-#      (tier-table)       表格列首格為 **B1**／**B2**／**C** 時，第 2、3 格要等於該 tier 的 model、effort
+#      (tier-table)       表格列首格為 tier 標籤（**B1**／**B2**／**C**／**D**，由 agents/tier-*.md 檔名推得）時，
+#                         第 2、3 格要等於該 tier 的 model、effort
 #      (tier-unknown)     引用了不存在的 eng-flow:tier-X
 #   2. 派工寫法 lint（skills/ references/ agents/）：
-#      (dispatch-model)   model 值為 sonnet／haiku 時，同一行必須有 eng-flow:tier-
+#      (dispatch-model)   model 值為 sonnet／haiku／fable 時，同一行必須有 eng-flow:tier-
+#                         （fable 也算：依 Claude Code 文件，subagent 跑在和主線不同的模型時
+#                         session 選的 effort 不套用，裸寫 model:"fable" 會落到 Fable 在 Claude Code 的預設檔位）
 #      (dispatch-prefix)  subagent_type／agentType 的值是 tier 名稱時必須帶 eng-flow: 前綴
 #      文件刻意舉的反例，在同一行行尾加放行標記：<!-- check-plugin: allow dispatch -->
 #   3. hooks：(hooks-json) (hooks-missing) (hooks-unregistered) (hooks-no-test)
@@ -436,8 +440,8 @@ BEGIN {
   if (index(line, MARK) == 0) {
     if (!(infm && line ~ /^model:/)) {
       for (i = 1; i <= nt; i++) {
-        if (tt[i] == "M" && (tv[i] == "sonnet" || tv[i] == "haiku") && index(line, "eng-flow:tier-") == 0) {
-          bad("dispatch-model", "model 值為 " tv[i] " 的派工寫法同一行沒有 eng-flow:tier-*（Agent tool 不能帶 effort，會繼承 session 的檔位）；若是刻意舉的反例，行尾加 " MARK)
+        if (tt[i] == "M" && (tv[i] == "sonnet" || tv[i] == "haiku" || tv[i] == "fable") && index(line, "eng-flow:tier-") == 0) {
+          bad("dispatch-model", "model 值為 " tv[i] " 的派工寫法同一行沒有 eng-flow:tier-*（Agent tool 不能帶 effort，檔位不受 tier 控制：同模型繼承 session，不同模型落到該模型的預設）；若是刻意舉的反例，行尾加 " MARK)
           break
         }
       }
