@@ -45,7 +45,7 @@ bash <plugin>/scripts/codex-review.sh --severity required --doc <scratchpad>/iss
 ### 3. 處置
 
 未決技術問題依 `references/decision-consensus.md` 先共議；有證據、在原授權內的具體共識
-直接落地並驗證；無法收斂（或 codex 沒問成）時先交 Fable 仲裁，仍不成立才交使用者裁決。不可因使用者十分鐘未答就採用推薦選項、
+直接落地並驗證；無法收斂（或 codex 沒問成）的技術分歧，以及有使用者判例可循的需求題，先交 Fable 仲裁，仍不成立才交使用者裁決。把工作移出本 issue 範圍（另開 issue）屬範圍類，不經仲裁、直接交使用者。不可因使用者十分鐘未答就採用推薦選項、
 跳到下一張卡或發送留言。以下 issue 寫回只在原任務已授權或明確調用本流程時執行；
 若只是請求評估，先留本機紀錄。
 

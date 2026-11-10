@@ -20,6 +20,7 @@ Once this skill applies, write no code, scaffold, or other implementation until 
 ### 2. Clarify (Batch by Dependency, Not One at a Time)
 - Build a dependency tree of open questions. Each round, ask via AskUserQuestion every question whose prerequisites are already resolved (in chunks of ≤4 per call — the tool's limit), each with a suggested default. Questions depending on an unresolved answer wait for the next round.
 - Facts you can check yourself (codebase/tools) — check them; only ask the user about decisions. Dispatch a subagent for lookups only when the volume is large.
+- A decision the user's past rulings already cover (memory precedent) goes to Fable arbitration first (`references/decision-consensus.md`); only genuinely new requirements, and the reserved classes, reach the user. A critical requirement boundary (next bullet) still goes to the user unless precedent answers that very question. Arbitrate only questions that would really interrupt the user — each costs a question file, precedent searches and a Fable run against the shared weekly limit. List any arbitrated answers when you present the design.
 - For critical requirement boundaries, construct a concrete edge-case scenario and let the user resolve it — don't self-select an interpretation.
 - Focus on: purpose, constraints, success criteria
 - Surface your assumptions before writing anything
@@ -102,7 +103,7 @@ If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) �
 ### 7. User Review Gate
 > "Spec written to `<path>` — co-designed with Codex over N round(s): X adopted, Y rejected (reasons in Cross-Check Log), A settled by Fable arbitration (listed below), Z for your call. Please review."
 
-Before presenting, send each *user call* item that is a technical disagreement between you and Codex to Fable arbitration (`references/decision-consensus.md`); items it settles become decisions you list in the summary (positions, ruling, reason) and log in the `## Cross-Check Log`. Present the rest — and every item that needs requirements, authorization or scope only the user has — with all positions; the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — it counts as a Critical/Required-level change Codex hasn't seen, and the same continue/stop rules govern any rounds after it.
+Before presenting, send each *user call* item that is a technical disagreement between you and Codex, or an intent question the user's precedent covers, to Fable arbitration (`references/decision-consensus.md`); items it settles become decisions you list in the summary (positions, ruling, reason) and log in the `## Cross-Check Log`. Present the rest — and every item that needs requirements, authorization or scope only the user has — with all positions; the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — it counts as a Critical/Required-level change Codex hasn't seen, and the same continue/stop rules govern any rounds after it.
 
 ### 8. Transition
 After user approves → invoke `eng-flow:mao-plan` to create implementation plan.
