@@ -46,7 +46,7 @@ Agent(subagent_type: "eng-flow:tier-d",
 
 不要求它寫成 spec 文字——成文是第 5 步的事，由主線做。
 
-**你（Opus）接手**：先自己審一遍（不是照抄——它沒參與 Clarify 的對話，可能誤解了某個約束），再進第 3 步向使用者呈現。第 4、5 步的成文與逐節確認由你做，第 6 步的 codex 共議是你與 codex 兩方，**Fable 不參與後續任何一輪**，也不看 codex 的回覆。
+**你（Opus）接手**：先自己審一遍（不是照抄——它沒參與 Clarify 的對話，可能誤解了某個約束），再進第 3 步向使用者呈現。第 4、5 步的成文與逐節確認由你做，第 6 步的 codex 共議是你與 codex 兩方，**起草的 Fable 不參與後續任何一輪**，也不看 codex 的回覆。（共議結束仍有分歧時的 Fable 仲裁是另一個獨立派工，見 `references/decision-consensus.md`。）
 
 **派工一律走 `eng-flow:tier-d`**，不要寫 `general-purpose` 加 `model` 的裸寫法：依 Claude Code 文件，subagent 跑在和主線不同的模型時，session 選的 effort 不套用，裸寫很可能落到 Fable 5.2 在 Claude Code 的預設 `medium`；tier-d 的 frontmatter 固定 `high`，並拿掉 Agent tool，讓它無法再派 subagent。
 
@@ -100,9 +100,9 @@ If the script answers `[codex-review] RATE_LIMITED:` the consultation did not ha
 If codex is absent/unauthorized the script self-skips (`[codex-review] SKIP:`) — relay in one line and go to the Gate with the solo spec.
 
 ### 7. User Review Gate
-> "Spec written to `<path>` — co-designed with Codex over N round(s): X adopted, Y rejected (reasons in Cross-Check Log), Z for your call. Please review."
+> "Spec written to `<path>` — co-designed with Codex over N round(s): X adopted, Y rejected (reasons in Cross-Check Log), A settled by Fable arbitration (listed below), Z for your call. Please review."
 
-Present each *user call* item with both positions — the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — it counts as a Critical/Required-level change Codex hasn't seen, and the same continue/stop rules govern any rounds after it.
+Before presenting, send each *user call* item that is a technical disagreement between you and Codex to Fable arbitration (`references/decision-consensus.md`); items it settles become decisions you list in the summary (positions, ruling, reason) and log in the `## Cross-Check Log`. Present the rest — and every item that needs requirements, authorization or scope only the user has — with all positions; the user is the final arbiter. Wait for approval. If changes requested, fix and re-review; a substantive redesign takes one more co-design round before re-presenting — it counts as a Critical/Required-level change Codex hasn't seen, and the same continue/stop rules govern any rounds after it.
 
 ### 8. Transition
 After user approves → invoke `eng-flow:mao-plan` to create implementation plan.

@@ -55,7 +55,7 @@ Names and signatures introduced by one task must match verbatim in every later t
 
 ## Draft Stage — Fable 起草骨架
 
-**第一輪的結構由 Fable（目前 `fable` 別名解析為 Fable 5.2）起草，之後它就退出。** 後續的補完、codex 共議、收斂與交付一律由主線模型（Opus）負責——Fable **只在這一步出現一次**，不參與任何後續輪次，也不看 codex 的回覆。
+**第一輪的結構由 Fable（目前 `fable` 別名解析為 Fable 5.2）起草，之後它就退出。** 後續的補完、codex 共議、收斂與交付一律由主線模型（Opus）負責——起草的 Fable **只在這一步出現一次**，不參與任何後續輪次，也不看 codex 的回覆。（共議結束仍有分歧時的 Fable 仲裁是另一個獨立派工，見 `references/decision-consensus.md`。）
 
 **為什麼是這一步**：切片邊界與依賴順序**沒有快速的驗證迴路**——錯了不會當場報錯，要等實作到一半、或跨服務兩側都蓋完才浮現，而那時的返工成本是本 skill 記錄的 48.5%。判準與成本說明的完整版在 `references/model-routing.md` 的 D 層段落，此處不重述。
 
@@ -89,7 +89,7 @@ Agent(
 **你（Opus）接手後做三件事，順序不可調**：
 1. **先審骨架再補程式碼**——切片邊界錯了的話，補進去的程式碼全部要重寫。用 `## Planning Process` 的判準檢查：每一片寫不寫得出「誰送什麼 → 誰收到什麼 → 哪裡看得到結果」？有沒有哪片要等另一片才驗得起來（那條界線就切錯了）？
 2. **補完每個 task 的關鍵程式碼與驗收條件**（介面、簽章、非顯而易見的邏輯與測試斷言寫成程式碼，其餘寫成精確的行為描述、驗證指令與預期結果），遵守 `## No Placeholders — Ever`。骨架裡的檔案路徑與簽章是你的起點，不是不可改的定案——發現它引用了不存在的檔或簽章就改掉並記一句。
-3. **存檔後才進 Codex Co-Design Loop**。那個 loop 是 Opus 與 codex 兩方，Fable 不在裡面。
+3. **存檔後才進 Codex Co-Design Loop**。那個 loop 是 Opus 與 codex 兩方，起草的 Fable 不在裡面；loop 結束仍有分歧時才另派 Fable 仲裁。
 
 **派工一律走 `eng-flow:tier-d`**，不要寫 `general-purpose` 加 `model` 的裸寫法：依 Claude Code 文件，subagent 跑在和主線不同的模型時，session 選的 effort 不套用，裸寫很可能落到 Fable 5.2 在 Claude Code 的預設 `medium`；tier-d 的 frontmatter 固定 `high`，並拿掉 Agent tool，讓它無法再派 subagent。詳見 `references/model-routing.md`。
 
@@ -180,7 +180,7 @@ The plan handed off must be the **converged result of Claude and Codex co-planni
    bash ${CLAUDE_PLUGIN_ROOT}/scripts/codex-review.sh --doc docs/plans/YYYY-MM-DD-<feature>.md --kind plan --severity <level>
    ```
    `<level>` = your risk assessment of what this plan implements, set once for all rounds (cross-system / security-sensitive / data migration / irreversible → `critical`; normal feature → `required`; small local change → `optional`) — your input, never re-triaged; over-estimate when unsure. The plan prompt directs Codex to follow the leading `Spec:` line and cross-check coverage against the design doc — keep that line accurate.
-2. **Triage** each item: adopt (revise the plan) / reject (record why) / user call. Never silently drop.
+2. **Triage** each item: adopt (revise the plan) / reject (record why) / user call. Never silently drop. At handoff, a *user call* that is a technical disagreement with Codex goes to Fable arbitration first (`references/decision-consensus.md`); only what it does not settle, and anything needing requirements, authorization or scope, is presented to the user.
 3. **Log** the round in `## Cross-Check Log` at the very end of the plan, after `## Not yet specified` if present (same table format as brainstorm). The log is process record — mao-execute ignores it.
 4. **Converge**: **no consultation cap** — same continue/stop rules as mao-brainstorm's Converge step. Codex ends each reply with `收斂問句:<one question>` (or `無`); record it plus your 續輪/收斂 call under the round's table. Continue only on an adopted Critical/Required change Codex hasn't seen, or a 收斂問句 that is substantive (answering it would change this plan), in scope, and not already dispositioned. Everything else stops the loop — scope-expanding questions become *user call* at handoff, and every extra round must shrink the open-question set (the script prints a non-blocking `警示` once the log holds ≥6 `### Round` entries: force-converge).
 
@@ -194,7 +194,7 @@ If codex is absent/unauthorized the script self-skips — relay in one line and 
 
 ## Execution Handoff
 
-After the co-design loop converges — summarize it first (rounds, adopted/rejected counts, each *user call* item with both positions; the user arbitrates) — then offer:
+After the co-design loop converges — summarize it first (rounds, adopted/rejected counts, each item decided through Fable arbitration with all positions, the ruling and its reason — also logged in the `## Cross-Check Log` — and each remaining *user call* item with all positions; the user arbitrates those) — then offer:
 1. **Subagent-Driven** (recommended) — `eng-flow:mao-execute`, fresh subagent per task. It authors a Workflow to orchestrate the tasks whenever the Workflow tool is available — review the generated script before approving on large plans.
    - To run the whole plan unattended, hand the user a `/goal` condition to paste. `/goal` is user-invocable only (Claude cannot set it), and needs auto mode to actually run without interruption. The condition must be **provable from the transcript** — the evaluator does not read files or run commands — and must keep an escape hatch and a turn cap. Template:
      `/goal 依 docs/plans/<file>.md 的依賴關係實作每個 task（彼此無依賴的可並行），每完成一個就貼出該 task 驗收指令的實際輸出；全部驗收指令都 exit 0、且最終整合 review 貼出 full test suite 通過的輸出，才算達成。遇到 BLOCKED、「## Not yet specified」、或需要我裁決的項目，先派完不受影響的 task 再問我，或跑滿 30 turns 停。`

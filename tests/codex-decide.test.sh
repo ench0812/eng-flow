@@ -108,16 +108,18 @@ if [ -n "\${EVENTS:-}" ]; then
     exit 1
   fi
   if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
+    # STUB_STOP_ON_REJECT=1 → 被拒前已寫出「裁定:停下」(驗證退回舊模型不會蓋掉安全旗標)
+    if [ -n "\${STUB_STOP_ON_REJECT:-}" ] && [ -n "\$o" ]; then printf '裁定:停下\n信心:高\n依據:已讀\n理由:x\n異議:無\n' > "\$o"; fi
     if [ -n "\${TURN_FAILED:-}" ]; then printf '{"type":"turn.failed","error":{"message":"model_not_found: %s"}}\n' "\$model"
     else printf '{"type":"error","message":"model_not_found: %s"}\n' "\$model"; fi
     exit 1
   fi
   # 真 codex 的 -o 檔最後沒有結尾換行(NO_EOL=1 時照做);NO_O=1 → 完全不寫 -o 檔(exit 0 但沒有最終訊息)
   if [ -n "\$o" ] && [ -z "\${NO_O:-}" ]; then
-    if [ -n "\${NO_EOL:-}" ]; then printf '裁定:A\n信心:高\n依據:%s\n理由:x\n異議:無' "\${STUB_BASIS:-已讀}" > "\$o"
-    else printf '裁定:A\n信心:高\n依據:%s\n理由:x\n異議:無\n' "\${STUB_BASIS:-已讀}" > "\$o"; fi
+    if [ -n "\${NO_EOL:-}" ]; then printf '裁定:%s\n信心:高\n依據:%s\n理由:x\n異議:無' "\${STUB_VERDICT:-A}" "\${STUB_BASIS:-已讀}" > "\$o"
+    else printf '裁定:%s\n信心:高\n依據:%s\n理由:x\n異議:無\n' "\${STUB_VERDICT:-A}" "\${STUB_BASIS:-已讀}" > "\$o"; fi
   fi
-  cat "\$EVENTS"; exit 0
+  cat "\$EVENTS"; exit \${STUB_RC:-0}
 fi
 # 純文字模式(舊行為): 裁定印在 stdout,不寫 -o 檔 —— 腳本須退回 stdout
 if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
@@ -264,6 +266,8 @@ lf_types() { grep -E '^    [0-9]+ (Failed to create unified exec process|CreateP
 # 基準: 全部 shell 呼叫正常 → 共識成立。同時鎖住 JSON 模式的呼叫形狀(--json 與 -o 各一次)
 lf_item "PROBE-OK" 0 completed | lf_events; lf_run
 ok "基準: shell 正常 → 共識成立 rc=0"          lf_agreed
+# 契約行合法時印「codex 立場」行,供呼叫端轉述 codex 立場給 Fable 仲裁者,不參與任何判定(decision-consensus.md)
+ok "基準: 印出 codex 立場行(含四個欄位)"        lf_out_has 'codex 立場: 裁定=A 信心=高 依據=已讀 異議=無'
 ok "基準: 呼叫帶 --json"                       test "$(grep -cx -- '--json' "$T/calls.log")" -eq 1
 ok "基準: 呼叫帶 -o"                           test "$(grep -cx -- '-o' "$T/calls.log")" -eq 1
 # 事件流裡的 JSONL 不得被當成裁定印出來(最終訊息來自 -o 檔)
@@ -274,11 +278,83 @@ ok "基準: stdout 不含 JSONL 事件"              lf_out_lacks '"type":"threa
 ok "基準: -o 檔缺結尾換行 → stdout 補上"         test "$(tail -c1 "$T/stdout-only.txt" | od -An -c | tr -d ' ')" = '\n'
 ok "基準: 補換行後內容完整(五行契約都在)"        test "$(grep -c '^異議:無$' "$T/stdout-only.txt")" -eq 1
 
+# codex 裁定「停下」(判定屬安全鐵律或不可逆)→ 專用 exit 5,直接交使用者、不經 Fable 仲裁;對照是基準的 exit 0
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=停下 lf_run
+ok "停下 → exit 5(不是可仲裁的 3)"              test "$lf_rc" -eq 5
+ok "停下 → 訊息寫明直接交使用者"                 lf_out_has '直接交使用者(不經 Fable 仲裁)'
+ok "停下 → 不印共識成立"                         lf_out_lacks '共識成立'
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT='停下(屬不可逆)' lf_run
+ok "停下帶附註 → 仍是 exit 5"                    test "$lf_rc" -eq 5
+# 附註帶引號: 經 xargs 解析時單引號未配對會得到空值,停下就掉回可仲裁的分支
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT="停下(owner's approval required)" lf_run
+ok "停下帶單引號附註 → 仍是 exit 5"              test "$lf_rc" -eq 5
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT='停下("irreversible")' lf_run
+ok "停下帶雙引號附註 → 仍是 exit 5"              test "$lf_rc" -eq 5
+# 停下優先於 shell 啟動失敗: 否則先回可仲裁的 3,安全旗標會被送去 Fable 仲裁
+lf_item "$LF_ERR" -1 failed | lf_events; STUB_VERDICT=停下 lf_run
+ok "停下＋shell 啟動失敗 → 仍是 exit 5"          test "$lf_rc" -eq 5
+ok "停下＋shell 啟動失敗 → 不走啟動失敗的 3"     lf_out_lacks 'shell 啟動失敗'
+# 停下優先於 codex 程序非零結束: 否則先回可仲裁的 1(FAILED)
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=停下 STUB_RC=1 lf_run
+ok "停下＋codex 非零結束 → 仍是 exit 5"          test "$lf_rc" -eq 5
+ok "停下＋codex 非零結束 → 不走 FAILED"          lf_out_lacks 'FAILED'
+# 回覆先同意、後更正為停下: 只看第一個裁定行會漏掉安全旗標
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n裁定:停下' lf_run
+ok "先同意後改停下 → 仍是 exit 5"                test "$lf_rc" -eq 5
+# 多個裁定行、都不是停下 → 自相矛盾,無共識(3),不能取第一行當共識
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n裁定:B' lf_run
+ok "兩個裁定行(A、B) → exit 3"                  test "$lf_rc" -eq 3
+ok "兩個裁定行 → 不印共識成立"                   lf_out_lacks '共識成立'
+# 實際會發生的退回路徑: 主模型被拒(不寫輸出)→ 退回舊模型重問 → 舊模型回停下。守的是退回後的那次檢查
+lf_item "PROBE-OK" 0 completed | lf_events; REJECT=gpt-6.1-sol STUB_VERDICT=停下 lf_run
+ok "退回舊模型後回停下 → exit 5"                 test "$lf_rc" -eq 5
+ok "退回舊模型後回停下 → 確實重問過舊模型"       test "$(models)" = "gpt-6.1-sol gpt-6-luna"
+ok "退回舊模型後回停下 → 不是無共識"             lf_out_lacks '無共識'
+# 格式偏差的停下(粗體、清單符號)也要攔下: 漏判會讓安全旗標進仲裁,誤判只會更保守
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n**裁定:停下**' lf_run
+ok "粗體的停下 → exit 5"                         test "$lf_rc" -eq 5
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n- 裁定 :停下' lf_run
+ok "清單符號＋冒號前空白的停下 → exit 5"         test "$lf_rc" -eq 5
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n**裁定**:停下' lf_run
+ok "欄名粗體(**裁定**:停下) → exit 5"            test "$lf_rc" -eq 5
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n**裁定:** 停下' lf_run
+ok "欄名含冒號粗體(**裁定:** 停下) → exit 5"     test "$lf_rc" -eq 5
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n> `裁定`　:　停下' lf_run
+ok "引用＋反引號＋全形空白的停下 → exit 5"        test "$lf_rc" -eq 5
+# 停下外面包引號或括號: field() 會把半形引號剝掉、訊息寫「codex 裁定停下」,卻回 3 是自相矛盾
+for v in '"停下"' '「停下」' '（停下）' "'停下'"; do
+  lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT="$v" lf_run
+  ok "裁定:$v → exit 5"                         test "$lf_rc" -eq 5
+done
+# 少見的清單／表格格式(第一行先放正常的 A,沒攔下就會是共識 0)
+for v in $'A\n1. 裁定:停下' $'A\n1) 裁定:停下' $'A\n+ 裁定:停下' $'A\n• 裁定:停下' $'A\n| 裁定 | 停下 |'; do
+  lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT="$v" lf_run
+  ok "清單／表格格式 ${v#A$'\n'} → exit 5"      test "$lf_rc" -eq 5
+done
+# 範本被照抄(含「停下」字樣但不是裁定)不得被當成停下;照舊是 3(兩個裁定行／缺契約都不是 5)
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT='<選項代號,或 其他,或 停下>' lf_run
+ok "照抄範本的裁定行 → 不是 exit 5"              test "$lf_rc" -ne 5
+# 長回覆、停下在最前面: grep -q 提早結束會讓 sed 吃 SIGPIPE,pipefail 下管線回 141 而漏判
+LONG_TAIL="$(printf '\nfiller line %d' $(seq 1 20000))"
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT="停下${LONG_TAIL}" lf_run
+ok "長回覆、停下在最前面 → exit 5"               test "$lf_rc" -eq 5
+# C locale 下全形冒號的停下: [:：] 會逐 byte 比對而失效,(:|：) 不會
+lf_item "PROBE-OK" 0 completed | lf_events; LC_ALL=C STUB_VERDICT=$'A\n裁定：停下' lf_run
+ok "C locale＋全形冒號的停下 → exit 5"           test "$lf_rc" -eq 5
+# 防禦性情境(真 codex 被 model_not_found 拒絕時通常不會寫出輸出): 被拒前已寫出停下 → 不得退回重問把它蓋掉
+lf_item "PROBE-OK" 0 completed | lf_events; REJECT=gpt-6.1-sol STUB_STOP_ON_REJECT=1 lf_run
+ok "停下＋模型不可用 → 仍是 exit 5"              test "$lf_rc" -eq 5
+ok "停下＋模型不可用 → 不退回舊模型重問"         test "$(models)" = "gpt-6.1-sol"
+# 對照: 同樣非零結束、裁定不是停下 → 照舊 FAILED(1),證明 STUB_RC 確實讓 codex 非零結束
+lf_item "PROBE-OK" 0 completed | lf_events; STUB_RC=1 lf_run
+ok "對照: 非零結束＋裁定 A → exit 1"             test "$lf_rc" -eq 1
+
 # (a) 真實形狀的失敗 item → 無共識 exit 3,理由行帶錯誤類型
 lf_item "$LF_ERR" -1 failed | lf_events; lf_run
 ok "(a) 啟動失敗 → exit 3 且理由是 shell 啟動失敗" lf_blocked
 ok "(a) 理由行帶錯誤類型"                       lf_out_has 'helper_unknown_error: setup refresh had errors'
 ok "(a) 不印共識成立"                           lf_out_lacks '共識成立'
+ok "(a) 不印 codex 立場行(沒查證就不算給出立場)" lf_out_lacks 'codex 立場:'
 # (a2) 部分失敗也一律無共識(沒有查證的裁定不能當共識,哪怕還有指令起來了)
 { lf_item "$LF_ERR" -1 failed; lf_item "PROBE-OK" 0 completed; } | lf_events; lf_run
 ok "(a2) 部分失敗 → 仍 exit 3"                  lf_blocked

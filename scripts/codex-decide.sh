@@ -9,7 +9,8 @@
 #
 # 用在哪: 需要使用者裁決但使用者未回應時,先問 codex。
 #   與呼叫端的傾向一致 → 共識,可逕行(exit 0)
-#   不一致 / 沒問成 / codex 信心低 → 停下交使用者裁決(非 0)
+#   不一致 / 沒問成 / codex 信心低 → 不得逕行(非 0)。呼叫端先依 references/decision-consensus.md
+#   交 Fable 仲裁(eng-flow:tier-d-arbiter),仍不成立才交使用者;裁定「停下」另回 exit 5,直接交使用者、不仲裁
 #   安全鐵律與不可逆操作【不適用本流程】,那五類一律停下等使用者,呼叫端自己把關,
 #   不要送進來——本腳本只驗證呼叫端有沒有聲明,無法代替判斷。
 #
@@ -18,14 +19,16 @@
 #
 # 【離開碼是唯一可靠的判定管道】,呼叫端不得改用解析 stdout 字串來決定要不要逕行:
 #   0 = 共識成立,可依共識進行
-#   3 = 無共識(codex 選了別的,或信心不足,或它的 shell 啟動失敗而沒有查證) → 必須停下交使用者
+#   3 = 無共識(codex 選了別的,或信心不足,或它的 shell 啟動失敗而沒有查證) → 不得逕行(先交 Fable 仲裁,仍不成立再交使用者)
 #       【shell 啟動失敗即使帶 --allow-inference 也是 3】: --allow-inference 只放行「這個決定本來就沒有
 #       程式碼可讀」,不放行「讀了但讀失敗」——後者的回覆格式仍可能完整、甚至把依據標成已讀。
 #       代價: 計的是「啟動失敗過幾次」,codex 自己重試成功的間歇性失敗也會判 3、打斷使用者;
 #       處置是排除成因後重跑,不是放寬這條檢查(成因與診斷見 codex-review.sh)。
-#   4 = 沒問成(RATE_LIMITED) → 必須停下交使用者。【不得因為問不到就自己走】,
+#   4 = 沒問成(RATE_LIMITED) → 必須停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。【不得因為問不到就自己走】,
 #       那會讓整條機制在額度用盡時靜默退化成「照自己的傾向做」——正是它要防的事。
 #   1 = FAILED(諮詢根本沒發生)   2 = 呼叫端合約錯誤
+#   5 = codex 裁定「停下」(它判定這個決定屬安全鐵律或不可逆操作) → 直接交使用者,【不經 Fable 仲裁】:
+#       「屬不屬於排除類」本身就是不得仲裁的問題,不能讓兩個 Claude 家族模型推翻 codex 的安全旗標。
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,11 +87,11 @@ fi
 # 【環境缺失也要停下】,不同於 codex-review.sh 的自我略過(那裡 review 只是加值,
 # 這裡 codex 的意見是「可不可以逕行」的唯一依據,缺了就沒有共識可言)。
 if [ -z "$CODEX_BIN" ]; then
-  echo "[codex-decide] SKIP: 未偵測到 codex CLI —— 沒有第二意見就沒有共識,停下交使用者。" >&2
+  echo "[codex-decide] SKIP: 未偵測到 codex CLI —— 沒有第二意見就沒有共識,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   exit 3
 fi
 if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
-  echo "[codex-decide] SKIP: codex 未授權 —— 停下交使用者。" >&2
+  echo "[codex-decide] SKIP: codex 未授權 —— 停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   exit 3
 fi
 
@@ -189,7 +192,31 @@ run_codex() {
   # (模型回覆內容不能帶進判定: agent_message 可能引用這些字樣)。
   grep -oE '"type":"(error|turn\.failed)"[^}]*}' "$JSONL" 2>/dev/null >> "$ERR" || true
 }
+# --- 明確的「裁定:停下」優先於其他所有判定(模型退回、額度、非零結束、shell 啟動失敗、契約不完整) → exit 5 ---
+# codex 判定這件事屬安全鐵律或不可逆。就算它的查證不完整或程序沒有正常結束,直接交使用者也只會更保守;
+# 若讓後面的處理先回 1／3,或退回舊模型時清空輸出重問,這個安全旗標就會被送去 Fable 仲裁或被蓋掉。
+# 所以每次 run_codex 之後、任何清空或判定之前都先檢查。
+# 不經 xargs: xargs 會解析引號,「停下(owner's approval required)」這種帶單引號的附註會變成空值而
+# 掉回可仲裁的分支。前綴比對也涵蓋「停下(屬不可逆)」這類帶附註的寫法。
+# 正規化: 依序去掉所有空白(含全形)、markdown 與表格符號(* _ ` > # | +)、行首的 - 與編號(1. 1)),
+# 最後才去掉引號與括號(半形/全形)——順序不能反: 先刪 ) 會讓「1) 裁定」變成「1裁定」而漏判。
+# 再比 `^裁定(:|：)?停下`(表格寫法會讓冒號消失,所以冒號可有可無)。
+# 全形字元一律用交替 (a|b) 而不放進 [...]: C locale 下字元類逐 byte 比對,（ 的前兩個 byte 會連帶刪掉
+# ： 的前兩個 byte。範本行「裁定:<選項代號,或 其他,或 停下>」正規化後以 < 開頭,不會命中。
+STOP_NORM_SED='s/[[:space:]]+//g; s/　//g; s/[*_`>#|+]//g; s/^-+//; s/^[0-9]+[.)]//; s/("|「|」|『|』|（|）|\(|\)|•|'"'"')//g'
+exit_if_stop() {
+  # 掃【所有】裁定行: 先列同意、最後更正為停下的回覆,只看第一行就會漏掉安全旗標。
+  # 比契約行寬鬆是刻意的: 誤判只會更保守,漏判會讓安全旗標進仲裁。
+  # 不用 grep -q: 它一命中就結束,仍在輸出的 sed 會吃 SIGPIPE,在 pipefail 下整條管線回 141 而漏判;
+  # 導向 /dev/null 讓 grep 讀完全部輸入。
+  if sed -E "$STOP_NORM_SED" "$OUT" 2>/dev/null | grep -E '^裁定(:|：)?停下' >/dev/null; then
+    cat "$OUT"; [ -n "$(tail -c1 "$OUT")" ] && echo
+    echo "[codex-decide] 停下: codex 判定此決定屬安全鐵律或不可逆操作,直接交使用者(不經 Fable 仲裁)。" >&2
+    exit 5
+  fi
+}
 run_codex
+exit_if_stop
 # 伺服器以「模型不可用」拒絕時用舊模型重問【一次】;其他錯誤照原路徑走 FAILED/RATE_LIMITED,
 # 不被退回機制吞掉——那會把「沒問成」偽裝成「用舊模型問過了」,而這裡的離開碼決定能不能逕行。
 if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ "$LEGACY_MODEL" != "$MODEL" ] \
@@ -198,6 +225,7 @@ if [ "$RC" -ne 0 ] && [ "$USED_LEGACY" -eq 0 ] && [ "$LEGACY_MODEL" != "$MODEL" 
   MODEL="$LEGACY_MODEL"; EFFORT="$LEGACY_EFFORT"; USED_LEGACY=1
   : > "$OUT"; : > "$ERR"; : > "$JSONL"
   run_codex
+  exit_if_stop
 fi
 
 cat "$OUT"
@@ -207,7 +235,7 @@ cat "$OUT"
 
 RATE_PAT="you'?ve (hit|reached) your usage limit|you have (hit|reached) your usage limit|reached your workspace credit limit|out of credits|quota exceeded|rate limit reached"
 if grep -qiE "$RATE_PAT" "$ERR" "$OUT" 2>/dev/null && ! grep -qE '^裁定[:：]' "$OUT" 2>/dev/null; then
-  echo "[codex-decide] RATE_LIMITED: 諮詢沒有取得結果。沒有第二意見就沒有共識——停下交使用者。" >&2
+  echo "[codex-decide] RATE_LIMITED: 諮詢沒有取得結果。沒有第二意見就沒有共識——停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   exit 4
 fi
 if [ "$RC" -ne 0 ] || [ ! -s "$OUT" ]; then
@@ -246,7 +274,7 @@ case "$LAUNCH_FAIL_N" in ''|*[!0-9]*) LAUNCH_FAIL_N=0 ;; esac
 case "$SHELL_CMD_N" in ''|*[!0-9]*) SHELL_CMD_N=0 ;; esac
 if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
   SHELL_RAN_N=$((SHELL_CMD_N - LAUNCH_FAIL_N)); [ "$SHELL_RAN_N" -ge 0 ] || SHELL_RAN_N=0
-  echo "[codex-decide] 無共識: codex 的 shell 啟動失敗 ${LAUNCH_FAIL_N} 次(另有 ${SHELL_RAN_N} 次正常啟動)——它沒有(完整)讀到相關檔案,這份裁定的「依據」不可信,停下交使用者。" >&2
+  echo "[codex-decide] 無共識: codex 的 shell 啟動失敗 ${LAUNCH_FAIL_N} 次(另有 ${SHELL_RAN_N} 次正常啟動)——它沒有(完整)讀到相關檔案,這份裁定的「依據」不可信,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   echo "  錯誤類型(不含 cwd／命令列):" >&2
   printf '%s\n' "$LAUNCH_FAIL_TYPES" | sort | uniq -c | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
   echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\";" >&2
@@ -254,7 +282,14 @@ if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
   exit 3
 fi
 
-field() { grep -m1 -E "^$1[:：]" "$OUT" | sed -E "s/^$1[:：][[:space:]]*//" | tr -d '\r' | xargs; }
+# 裁定行不只一行 = 回覆自相矛盾(例如先同意後改口),field() 只取第一行會誤判成共識 → 無共識
+VERDICT_LINES="$(grep -cE '^裁定(:|：)' "$OUT" 2>/dev/null)"
+case "$VERDICT_LINES" in ''|*[!0-9]*) VERDICT_LINES=0 ;; esac
+if [ "$VERDICT_LINES" -gt 1 ]; then
+  echo "[codex-decide] 無共識: 回覆有 ${VERDICT_LINES} 個裁定行,無法判定採哪一個,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
+  exit 3
+fi
+field() { grep -m1 -E "^$1(:|：)" "$OUT" | sed -E "s/^$1(:|：)[[:space:]]*//" | tr -d '\r' | xargs; }  # (:|：) 與 locale 無關
 VERDICT="$(field 裁定)"; CONF="$(field 信心)"; BASIS="$(field 依據)"
 REASON="$(field 理由)"; DISSENT="$(field 異議)"
 
@@ -268,28 +303,32 @@ for f in 裁定:VERDICT 信心:CONF 依據:BASIS 理由:REASON 異議:DISSENT; d
   [ -n "$v" ] || MISSING="$MISSING ${f%%:*}"
 done
 if [ -n "$MISSING" ]; then
-  echo "[codex-decide] 無共識: 回覆缺少契約行:$MISSING。格式不完整無法判定,停下交使用者。" >&2
+  echo "[codex-decide] 無共識: 回覆缺少契約行:$MISSING。格式不完整無法判定,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   exit 3
 fi
 case "$CONF" in 高|中|低) ;; *)
-  echo "[codex-decide] 無共識: 信心值「$CONF」不在 高|中|低 之內,停下交使用者。" >&2; exit 3 ;;
+  echo "[codex-decide] 無共識: 信心值「$CONF」不在 高|中|低 之內,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2; exit 3 ;;
 esac
 case "$BASIS" in 已讀|推論) ;; *)
-  echo "[codex-decide] 無共識: 依據值「$BASIS」不在 已讀|推論 之內,停下交使用者。" >&2; exit 3 ;;
+  echo "[codex-decide] 無共識: 依據值「$BASIS」不在 已讀|推論 之內,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2; exit 3 ;;
 esac
+# 契約行完整且值域合法時才印這一行,摘要 codex 的立場,供呼叫端在 Fable 仲裁時轉述給仲裁者
+# (references/decision-consensus.md)。【它不參與任何判定】: 要不要逕行仍只看離開碼,
+# 呼叫端不得依這一行決定放行或選擇處理方式。
+echo "[codex-decide] codex 立場: 裁定=$VERDICT 信心=$CONF 依據=$BASIS 異議=$DISSENT" >&2
 
 if [ "$VERDICT" != "$PREFER" ]; then
-  echo "[codex-decide] 無共識: codex 裁定「$VERDICT」,我方傾向「$PREFER」。停下交使用者。" >&2
+  echo "[codex-decide] 無共識: codex 裁定「$VERDICT」,我方傾向「$PREFER」。停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   [ "$DISSENT" != "無" ] && echo "  codex 異議: $DISSENT" >&2
   exit 3
 fi
 # 選了同一個但信心低 = 兩邊都不確定,不該當成可以逕行的依據。
 if [ "$CONF" = "低" ]; then
-  echo "[codex-decide] 無共識: codex 同選「$VERDICT」但信心低——兩邊都不確定,停下交使用者。" >&2
+  echo "[codex-decide] 無共識: codex 同選「$VERDICT」但信心低——兩邊都不確定,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   exit 3
 fi
 if [ "$DISSENT" != "無" ]; then
-  echo "[codex-decide] 無共識: codex 雖同選「$VERDICT」但提出異議,停下交使用者。" >&2
+  echo "[codex-decide] 無共識: codex 雖同選「$VERDICT」但提出異議,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   echo "  codex 異議: $DISSENT" >&2
   exit 3
 fi
@@ -300,7 +339,7 @@ fi
 if [ "$BASIS" = "推論" ] && [ "$ALLOW_INFERENCE" != "1" ]; then
   echo "[codex-decide] 無共識: codex 標【推論】(未查證任何檔案),依預設不構成共識。" >&2
   echo "  這個決定若本來就不需要讀程式碼(例如純優先序),呼叫端加 --allow-inference 重跑;" >&2
-  echo "  若它其實需要查證,那就是該停下交使用者的情況。" >&2
+  echo "  若它其實需要查證,那就是不得逕行的情況(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   exit 3
 fi
 
