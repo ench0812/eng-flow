@@ -78,6 +78,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -542,6 +543,24 @@ def _drain(proc: subprocess.Popen) -> bytes:
         return b""
 
 
+_PYTHON_EXE = re.compile(r"(?:python|pythonw|py)[\d.]*(?:\.exe)?", re.I)
+_PY_ENV_BLIND_FLAG = re.compile(r"-[A-Za-z]*[EI][A-Za-z]*")
+
+
+def python_ignores_env(cmd: str) -> bool:
+    """True when --cmd starts a Python with -E or -I (it then ignores PYTHON* environment variables)."""
+    tokens = cmd.replace('"', " ").replace("'", " ").split()
+    for i, tok in enumerate(tokens):
+        if not _PYTHON_EXE.fullmatch(os.path.basename(tok.replace("\\", "/"))):
+            continue
+        j = i + 1
+        while j < len(tokens) and tokens[j].startswith("-") and tokens[j] not in ("-m", "-c"):
+            if _PY_ENV_BLIND_FLAG.fullmatch(tokens[j]):
+                return True
+            j += 2 if tokens[j] in ("-W", "-X") else 1      # these two take a separate argument
+    return False
+
+
 def run_tests(cmd: str, cwd: str, timeout: float) -> Outcome:
     pyc_dir = tempfile.mkdtemp(prefix="mutate-pyc-")
     env = dict(os.environ)
@@ -587,6 +606,38 @@ class Applied:
     mutated: bytes
     backup: str | None = None
     foreign: bool = False
+    orig_times: tuple | None = None        # (atime_ns, mtime_ns) before the first write
+
+
+_USED_MTIMES: set = set()
+
+
+def shift_mtime(ap: Applied) -> None:
+    """Give the mutated file an mtime in a different whole second than the original's.
+
+    CPython trusts a .pyc when the source's mtime (whole seconds) and size equal what the pyc
+    recorded; an edit within the same second of the same size is invisible to it. The env vars set
+    for the test process cannot help when Python is started with -E or -I, but a different mtime
+    does, for every pyc that checks timestamps. The shift is random (and never reused in this run)
+    so it cannot equal the mtime recorded by an earlier mutation of the same size either.
+    """
+    if ap.orig_times is None:
+        return
+    atime, mtime = ap.orig_times
+    new = mtime
+    for _ in range(16):
+        new = mtime + random.randrange(2 * 3600, 30 * 86400) * 1_000_000_000      # 2 hours .. 30 days
+        if new not in _USED_MTIMES:
+            break
+    _USED_MTIMES.add(new)
+    with contextlib.suppress(OSError):          # best effort: the env protection still applies
+        os.utime(ap.mut.path, ns=(atime, new))
+
+
+def restore_mtime(ap: Applied) -> None:
+    if ap.orig_times is not None and not ap.foreign:
+        with contextlib.suppress(OSError):
+            os.utime(ap.mut.path, ns=ap.orig_times)
 
 
 def reverse_segment(cur: bytes, ap: Applied) -> bytes | None:
@@ -727,6 +778,7 @@ def restore(ap: Applied) -> None:
     except OSError as exc:
         raise _restore_failure(ap, None, "cannot read the file back (%s)" % exc)
     if cur == ap.orig:
+        restore_mtime(ap)
         return
     if cur == ap.mutated:
         target = ap.orig
@@ -743,6 +795,7 @@ def restore(ap: Applied) -> None:
         raise _restore_failure(ap, cur, "writing the restore failed (%s)" % exc)
     if back != target or (not ap.foreign and sha256(back) != ap.orig_sha):
         raise _restore_failure(ap, back, "restore verification failed (SHA-256 differs from the original)")
+    restore_mtime(ap)
 
 
 def _restore_failure(ap: Applied, cur: bytes | None, why: str) -> RestoreFailure:
@@ -796,13 +849,16 @@ def _verdict_core(mut: Mutation, outcome: Outcome):
 def apply_and_test(mut: Mutation, cwd: str):
     orig = read_bytes(mut.path)
     index = locate(mut.path, orig, mut.find)      # re-checked: the file may have changed since parsing
+    st = os.stat(mut.path)
     ap = Applied(mut, orig, sha256(orig), index,
-                 orig[:index] + mut.replace + orig[index + len(mut.find):])
+                 orig[:index] + mut.replace + orig[index + len(mut.find):],
+                 orig_times=(st.st_atime_ns, st.st_mtime_ns))
     outcome = None
     try:
         with critical():
             ap.backup = save_backup(ap)
             write_in_place(mut.path, ap.mutated)
+            shift_mtime(ap)
         outcome = run_tests(mut.cmd, cwd, mut.timeout)
     finally:
         with critical():
@@ -890,6 +946,12 @@ def main(argv: list[str]) -> int:
 
     if refuse_on_stale_backups({mut.path for mut in muts}):
         return EXIT_RESTORE
+    for cmd in sorted({mut.cmd for mut in muts}):
+        if python_ignores_env(cmd):
+            print("mutate: warning: this command starts Python with -E or -I, which ignores "
+                  "PYTHONPYCACHEPREFIX and PYTHONDONTWRITEBYTECODE; a stale .pyc is still defeated when it checks "
+                  "timestamps (the mutated file gets a different mtime), but a hash-based .pyc (unchecked-hash) "
+                  "would still be read: %s" % cmd, file=sys.stderr)
 
     results: list[Result] = []
     originals: dict[str, str] = {}

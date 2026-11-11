@@ -18,6 +18,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -49,6 +50,15 @@ RAN = ['--runner', 'none', '--ran-pattern', 'RAN OK']
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def same_second_write(real_write):
+    """What an edit within the same second looks like to a pyc check: the bytes change, the mtime does not."""
+    def write(path, data):
+        st = os.stat(path)
+        real_write(path, data)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    return write
 
 
 def pid_alive(pid: int) -> bool:
@@ -246,6 +256,59 @@ class BytecodeCacheTests(Base):
             self.assertFalse(os.path.exists(prefix), 'prefix removed after the run')
         self.assertFalse((self.dir / '__pycache__').exists())
         self.assertEqual(r.verdicts(), ['GREEN', 'GREEN'])
+
+    def timestamp_pyc_of_the_original(self):
+        import py_compile
+        cfile = importlib.util.cache_from_source(str(self.dir / 'app.py'))
+        py_compile.compile(str(self.dir / 'app.py'), cfile=cfile, doraise=True)    # TIMESTAMP mode: mtime seconds + size
+        return cfile
+
+    def test_premise_python_dash_E_ignores_the_environment_and_reads_a_same_second_pyc(self):
+        self.unit_project()
+        self.timestamp_pyc_of_the_original()
+        same_second_write(M.write_in_place)(str(self.dir / 'app.py'), APP.replace(b'a + b', b'a - b'))
+        out = subprocess.run([PY, '-E', '-c', 'import app; print(app.add(2, 3))'], cwd=self.dir, capture_output=True,
+                             env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPYCACHEPREFIX=str(self.tmp))).stdout
+        self.assertEqual(out.strip(), b'5', 'premise: the stale pyc was used although the source says a - b')
+
+    def test_a_timestamp_pyc_cannot_hide_a_same_second_mutation_even_under_python_dash_E(self):
+        self.unit_project()
+        self.timestamp_pyc_of_the_original()
+        cmd = '"%s" -E -m unittest test_app' % PY
+        mut = M.Mutation('x', 'app.py', str(self.dir / 'app.py'), b'a + b', b'a - b', cmd, 'unittest', None,
+                         re.compile('test_add'), 60)
+        with mock.patch.object(M, 'write_in_place', same_second_write(M.write_in_place)):
+            res = M.apply_and_test(mut, str(self.dir))[0]
+        self.assertEqual((res.verdict, res.failed), ('RED', ['test_add (test_app.T.test_add)']), res)
+        self.assertEqual((self.dir / 'app.py').read_bytes(), APP)
+
+    def test_the_mutated_file_gets_its_own_mtime_second_and_the_original_mtime_comes_back(self):
+        old = 1_000_000_000_500_000_000                              # 2001-09-09, with a fractional second
+        self.scripted('open("m.log", "a").write(str(os.stat("app.py").st_mtime_ns) + " " + str(mutated) + "\\n")\n'
+                      'print("RAN OK")\n', app=b'VALUE = 0\nOTHER = 0\n')
+        os.utime(self.dir / 'app.py', ns=(old, old))
+        self.write('m.json', json.dumps([{'file': 'app.py', 'find': 'VALUE = 0', 'replace': 'VALUE = 1'},
+                                         {'file': 'app.py', 'find': 'OTHER = 0', 'replace': 'VALUE = 1\nOTHER = 5'}]))
+        r = self.mutate('--spec', 'm.json', '--cmd', CHECK_CMD, *RAN)
+        self.assertEqual(r.verdicts(), ['GREEN', 'GREEN'], r.out + r.err)
+        rows = [ln.split() for ln in self.read('m.log').decode().splitlines()]
+        self.assertEqual([row[1] for row in rows], ['False', 'True', 'True'])
+        self.assertEqual(int(rows[0][0]), old)
+        during = [int(row[0]) for row in rows[1:]]
+        for ns in during:
+            self.assertNotEqual(ns // 10 ** 9, old // 10 ** 9, 'a pyc recorded for the original must not match')
+        self.assertNotEqual(during[0] // 10 ** 9, during[1] // 10 ** 9, 'nor one recorded for the previous mutation')
+        self.assertEqual(os.stat(self.dir / 'app.py').st_mtime_ns, old, 'the restore puts the original mtime back')
+
+    def test_a_cmd_that_runs_python_with_E_or_I_gets_a_warning_others_do_not(self):
+        self.unit_project()
+        args = ['--file', 'app.py', '--find', 'return 1', '--replace', 'return 2']
+        for flags in ('-E', '-I', '-Es', '-W ignore -E', '-B -I'):
+            r = self.mutate(*args, '--cmd', '"%s" %s -m unittest test_app' % (PY, flags))
+            self.assertIn('warning', r.err, flags)
+            self.assertIn('PYTHONPYCACHEPREFIX', r.err)
+        for cmd in (UT_CMD, '"%s" -m unittest -v test_app' % PY, '"%s" -c "import sys" && echo -E -I' % PY):
+            self.assertNotIn('warning', self.mutate(*args, '--cmd', cmd, '--runner', 'unittest').err, cmd)
 
     def test_same_size_mutations_run_back_to_back_each_report_their_own_failure(self):
         self.unit_project()
@@ -1052,12 +1115,20 @@ class RealPytestTests(Base):
                         '--runner', 'pytest')
         self.assertEqual((r.rc, r.verdicts()), (1, ['RED_NONTEST']), r.out)
 
-    def test_pyc_staleness_from_a_prior_pytest_run_cannot_flip_the_result(self):
-        # Reproduces the original trap: pytest has just imported calc.py (pyc written), and a
-        # same-size edit lands within the same second.
-        subprocess.run([self.py, '-m', 'pytest', '-q'], cwd=self.dir, capture_output=True)
-        r = self.mutate_calc('a + b', 'a - b')
-        self.assertEqual(r.verdicts(), ['RED'], r.out)
+    def test_a_pyc_written_by_a_prior_pytest_run_cannot_hide_a_same_second_mutation(self):
+        # The original trap with the real runner: pytest has just imported calc.py (pyc written by
+        # that run) and a same-size edit lands within the same second. Python runs with -E, so the
+        # environment protection cannot apply and only the mtime shift stands between the stale pyc
+        # and a false GREEN. The same-second write is forced, so the trap is deterministic.
+        cmd = '"%s" -E -m pytest -q -p no:cacheprovider' % self.py
+        subprocess.run(cmd, shell=True, cwd=self.dir, capture_output=True)
+        pyc = list((self.dir / '__pycache__').glob('calc.*.pyc'))
+        self.assertEqual(len(pyc), 1, 'premise: the prior run left a pyc of calc.py')
+        mut = M.Mutation('x', 'calc.py', str(self.dir / 'calc.py'), b'a + b', b'a - b', cmd, 'pytest', None,
+                         re.compile(r'::test_add$'), 120)
+        with mock.patch.object(M, 'write_in_place', same_second_write(M.write_in_place)):
+            res = M.apply_and_test(mut, str(self.dir))[0]
+        self.assertEqual((res.verdict, res.failed), ('RED', ['test_calc.py::test_add']), res)
 
 
 @unittest.skipUnless(shutil.which('go'), 'go not installed')
