@@ -613,6 +613,55 @@ class WriteFailureTests(Base):
             M.write_in_place(str(self.dir / 'missing' / 'f.bin'), b'new\n')
         self.assertFalse(getattr(cm.exception, 'mutate_wrote', False))
 
+    def test_write_in_place_marks_a_failure_while_closing(self):
+        class ClosesBadly:
+            def __enter__(self): return self
+            def __exit__(self, *a): raise OSError(5, 'flush on close failed')
+            def seek(self, *a): pass
+            def write(self, *a): pass
+            def truncate(self, *a): pass
+            def flush(self): pass
+            def fileno(self): return 0
+        with mock.patch('builtins.open', return_value=ClosesBadly()), mock.patch.object(M.os, 'fsync'):
+            with self.assertRaises(OSError) as cm:
+                M.write_in_place('whatever', b'new\n')
+        self.assertTrue(getattr(cm.exception, 'mutate_wrote', False))
+
+    def test_write_with_retry_keeps_the_mark_of_an_earlier_attempt(self):
+        calls = []
+
+        def first_wrote_then_locked(path, data):
+            calls.append(1)
+            if len(calls) == 1:
+                exc = OSError(28, 'No space left on device')
+                exc.mutate_wrote = True
+                raise exc
+            raise PermissionError(13, 'locked')            # later attempts fail at the open
+        with mock.patch.object(M, 'write_in_place', first_wrote_then_locked), mock.patch.object(M.time, 'sleep'):
+            with self.assertRaises(OSError) as cm:
+                M.write_with_retry('whatever', b'x')
+        self.assertEqual(len(calls), M.RETRIES)
+        self.assertTrue(getattr(cm.exception, 'mutate_wrote', False))
+
+    def test_a_partial_write_followed_by_failed_opens_restores_the_whole_original(self):
+        app = b'VALUE = 0\nTAIL = "' + b'x' * 64 + b'"\n'
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n', app=app)
+        calls = []
+
+        def partial_then_locked(path, data):
+            calls.append(1)
+            if len(calls) == 1:
+                with open(path, 'r+b') as fh:
+                    fh.write(data[:14])
+                exc = OSError(28, 'No space left on device')
+                exc.mutate_wrote = True
+                raise exc
+            raise PermissionError(13, 'locked')
+        rc, out = self.run_with_mutation_write(partial_then_locked, replace='VALUE = 100')
+        self.assertEqual(rc, M.EXIT_IO, out)
+        self.assertEqual(self.read('app.py'), app)
+        self.assertEqual(self.backups(), [])
+
     def test_a_mutation_write_that_fails_part_way_restores_the_whole_original(self):
         # the shape a real interrupted r+b write leaves: our first k bytes, then the original's tail.
         # Without recognising it, the segment-only reversal would keep a corrupt middle and the

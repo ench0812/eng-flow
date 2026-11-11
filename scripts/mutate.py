@@ -344,27 +344,31 @@ def read_bytes(path: str) -> bytes:
 def write_in_place(path: str, data: bytes) -> None:
     # r+b keeps the inode, mode and every byte we do not touch; write_text/newline
     # translation (CRLF on Windows) never gets a chance to run.
-    with open(path, "r+b") as fh:
-        try:
+    fh = open(path, "r+b")                  # a failed open wrote nothing and carries no mark
+    try:
+        with fh:                            # close/flush failures on the way out are covered too
             fh.seek(0)
             fh.write(data)
             fh.truncate()
             fh.flush()
             os.fsync(fh.fileno())
-        except OSError as exc:
-            # The open succeeded, so some of our bytes may be on disk. A failed open wrote nothing and
-            # carries no mark: restore must then treat any difference as someone else's.
-            exc.mutate_wrote = True
-            raise
+    except OSError as exc:
+        # The open succeeded, so some of our bytes may be on disk; restore may then recognise them.
+        exc.mutate_wrote = True
+        raise
 
 
 def write_with_retry(path: str, data: bytes) -> None:
+    wrote = False                           # any attempt that got past the open may have left bytes
     for attempt in range(RETRIES):
         try:
             write_in_place(path, data)
             return
-        except OSError:
+        except OSError as exc:
+            wrote = wrote or bool(getattr(exc, "mutate_wrote", False))
             if attempt == RETRIES - 1:
+                if wrote:
+                    exc.mutate_wrote = True
                 raise
             time.sleep(RETRY_WAIT)
 
@@ -950,8 +954,7 @@ def apply_and_test(mut: Mutation, cwd: str):
                 write_with_retry(mut.path, ap.mutated)
             except OSError as exc:
                 ap.write_incomplete = bool(getattr(exc, "mutate_wrote", False))
-                raise WriteFailure("cannot write %s (%s); the original bytes were written back and no test ran for %s"
-                                   % (mut.path, exc, mut.label))
+                raise WriteFailure("cannot write %s (%s); no test ran for %s" % (mut.path, exc, mut.label))
             shift_mtime(ap)
         outcome = run_tests(mut.cmd, cwd, mut.timeout)
     finally:
@@ -965,6 +968,9 @@ def apply_and_test(mut: Mutation, cwd: str):
                 whole = False
             if whole:
                 discard_backup(ap)
+            else:
+                sys.stderr.write("mutate: %s is not byte-identical to its original after the run; the original "
+                                 "is kept at %s\n" % (mut.path, ap.backup))
     verdict, names, note = verdict_for(mut, outcome)
     if ap.foreign:
         verdict = "NOT_RUN"
