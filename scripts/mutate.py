@@ -585,15 +585,37 @@ def reverse_segment(cur: bytes, ap: Applied) -> bytes | None:
     return None
 
 
+BACKUP_PREFIX = "mutate-backup-"
+
+
 def save_backup(ap: Applied) -> str:
-    folder = os.path.join(tempfile.gettempdir(), "mutate-backup-%d" % os.getpid())
-    os.makedirs(folder, exist_ok=True)
+    # A unique folder per mutation (mkdtemp): a pid alone is not unique, Windows reuses them, and a
+    # folder left by a hard-killed run may hold the only good copy of somebody's file.
+    folder = tempfile.mkdtemp(prefix="%s%d-" % (BACKUP_PREFIX, os.getpid()))
     stem = os.path.join(folder, "%s-%s" % (os.path.basename(ap.mut.path), ap.orig_sha[:12]))
-    with open(stem + ".orig", "wb") as fh:
-        fh.write(ap.orig)
-    with open(stem + ".path.txt", "w", encoding="utf-8") as fh:
-        fh.write(ap.mut.path + "\n" + ap.orig_sha + "\n")
+    try:
+        with open(stem + ".orig", "wb") as fh:
+            fh.write(ap.orig)
+            fh.flush()
+            os.fsync(fh.fileno())
+        with open(stem + ".path.txt", "w", encoding="utf-8") as fh:
+            fh.write(ap.mut.path + "\n" + ap.orig_sha + "\n")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)     # our own, brand-new folder: safe to drop
+        raise
     return stem + ".orig"
+
+
+def discard_backup(ap: Applied) -> None:
+    """After a verified restore: delete the files this run wrote, and the folder only if it is empty."""
+    if not ap.backup:
+        return
+    stem = ap.backup[:-len(".orig")]
+    for suffix in (".orig", ".path.txt"):
+        with contextlib.suppress(OSError):
+            os.remove(stem + suffix)
+    with contextlib.suppress(OSError):
+        os.rmdir(os.path.dirname(ap.backup))          # fails (and is ignored) when anything else is inside
 
 
 def restore(ap: Applied) -> None:
@@ -666,8 +688,7 @@ def apply_and_test(mut: Mutation, cwd: str):
     finally:
         with critical():
             restore(ap)
-            if ap.backup:                       # only reached when the restore was verified
-                shutil.rmtree(os.path.dirname(ap.backup), ignore_errors=True)
+            discard_backup(ap)                  # only reached when the restore was verified
     verdict, names, note = verdict_for(mut, outcome)
     if ap.foreign:
         verdict = "NOT_RUN"

@@ -437,6 +437,47 @@ class RestoreTests(Base):
                 shutil.rmtree(Path(ln.split(': ', 1)[1].strip()).parent, ignore_errors=True)
 
 
+class BackupFolderTests(Base):
+    """The backup is a unique folder per mutation; only files this run wrote are ever deleted."""
+
+    def mutation(self):
+        return M.Mutation('x', 'app.py', str(self.dir / 'app.py'), b'return 1', b'return 2', UT_CMD, 'unittest',
+                          None, None, 60)
+
+    def test_a_leftover_backup_folder_carrying_my_pid_survives_a_clean_run(self):
+        # Windows reuses PIDs: the folder of a hard-killed earlier run can carry exactly this pid.
+        # Both the old fixed name and a unique name must keep their only copy of someone's file.
+        self.unit_project()
+        leftovers = [self.tmp / ('mutate-backup-%d' % os.getpid()), self.tmp / ('mutate-backup-%d-left' % os.getpid())]
+        for folder in leftovers:
+            folder.mkdir()
+            (folder / 'other.py-deadbeef.orig').write_bytes(b'ONLY COPY')
+        with mock.patch.object(tempfile, 'tempdir', str(self.tmp)):
+            res = M.apply_and_test(self.mutation(), str(self.dir))
+        self.assertEqual(res[0].verdict, 'GREEN')
+        for folder in leftovers:
+            self.assertEqual((folder / 'other.py-deadbeef.orig').read_bytes(), b'ONLY COPY')
+        self.assertEqual(self.backups(), sorted(f.name for f in leftovers), 'its own folder is gone after a verified restore')
+
+    def test_discard_removes_only_its_own_files_and_the_folder_only_when_empty(self):
+        self.unit_project()
+        orig = (self.dir / 'app.py').read_bytes()
+        ap = M.Applied(self.mutation(), orig, sha(orig), 0, orig)
+        with mock.patch.object(tempfile, 'tempdir', str(self.tmp)):
+            ap.backup = M.save_backup(ap)
+        folder = Path(ap.backup).parent
+        self.assertEqual(Path(ap.backup).read_bytes(), orig)
+        (folder / 'not-ours.txt').write_bytes(b'keep me')
+        M.discard_backup(ap)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ['not-ours.txt'])
+        (folder / 'not-ours.txt').unlink()
+        ap2 = M.Applied(self.mutation(), orig, sha(orig), 0, orig)
+        with mock.patch.object(tempfile, 'tempdir', str(self.tmp)):
+            ap2.backup = M.save_backup(ap2)
+        M.discard_backup(ap2)
+        self.assertFalse(Path(ap2.backup).parent.exists(), 'an emptied folder is removed')
+
+
 # --------------------------------------------------------------------------- 8. interrupts
 
 class InterruptTests(Base):
