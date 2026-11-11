@@ -18,7 +18,8 @@ Options:
   --cwd DIR            run the test command here; relative --file is resolved here
   --timeout SEC        per test-command run, default 600 (a timeout is NOT_RUN)
   --allow-test-file    allow --file to be something that looks like a test file
-  -v, --verbose        also print the tail of the test output for GREEN/RED_WRONG
+  -v, --verbose        also print the tail of the test output for every verdict (RED too, so
+                       the failing assertion's expected/actual can be quoted as evidence)
 
 --spec JSON: {"cmd": "...", "runner": "...", "ran_pattern": "...", "timeout": 300,
               "mutations": [{"label","file","find","replace","cmd","runner",
@@ -29,28 +30,55 @@ JSON are the safest way to pass backslashes, newlines, or text starting with "/"
 (Git Bash rewrites arguments that look like Unix paths before Python sees them).
 
 Verdicts, one line per mutation: <VERDICT> exit=<test exit code> <label> failed=<names>
-  RED            tests ran and failed (and, with --expect-fail, the expected test failed)
+  RED            tests ran and failed (and, with --expect-fail, the expected test failed).
+                 When the output names no failing test and gives no failure count the line
+                 says "not confirmed as a test failure"
   GREEN          tests ran and passed: nothing noticed the mutation
   RED_WRONG      tests ran and failed, but not the expected test (or no names extractable)
+  RED_NONTEST    the command exited non-zero but the runner's own summary reports 0 failed
+                 tests (coverage gate, lint, a second command in --cmd): not a red
   NOT_RUN        the tests did not run to completion (collect/build error, timeout, no
-                 summary, or the file changed under us); the exit code is NOT trusted
+                 summary, every test skipped, or the file changed under us); the exit code
+                 is NOT trusted
   BASELINE_RED / BASELINE_NOT_RUN
                  the UNMUTATED run was not green-and-ran; that mutation is skipped
-Exit code: 0 every mutation RED; 1 any other verdict (or interrupted: 130/143);
-           2 usage or spec error (nothing was run); 3 restore failed (loud, see message).
+  A line judged by the vitest or jest parser ends with "(unverified parser)".
+Exit code: 0 every mutation RED; 1 any other verdict;
+           2 usage or spec error (nothing was run);
+           3 restore failed, or an earlier hard-killed run's backup still points at the file
+             (loud, see message);
+           4 the target cannot be written (read-only, locked): nothing was mutated;
+           128+signal after an interrupt (SIGINT 130, SIGTERM 143, Windows Ctrl+Break 149).
 
 Safeguards:
   * --find must match exactly once as raw bytes (overlapping matches count); 0 or >1 -> exit 2.
   * Files are read and written as bytes; line endings are never touched, restore is
-    verified with SHA-256 against the pre-mutation bytes.
-  * The test process gets PYTHONDONTWRITEBYTECODE=1 and a fresh PYTHONPYCACHEPREFIX
-    directory per run, so no stale .pyc (written earlier or lying around) can be read.
+    verified with SHA-256 against the pre-mutation bytes (the original mtime is put back too).
+  * Stale Python bytecode: the test process gets PYTHONDONTWRITEBYTECODE=1 and a fresh
+    PYTHONPYCACHEPREFIX directory per run. That reaches only a Python that inherits the
+    environment and is not started with -E or -I (a warning is printed for those). For
+    those, the mutated file additionally gets an mtime a random number of whole seconds
+    away from the original's and from every earlier mutation's, which defeats any .pyc that
+    checks timestamps (CPython compares whole seconds and size). NOT covered: a hash-based
+    .pyc with unchecked-hash invalidation read by a Python started with -E or -I, and
+    caches of other tools.
   * The restore never uses git. It reverses only the mutated segment; if someone else
     edited the file meanwhile and the segment cannot be located safely, the original
-    and current bytes are saved under the temp dir and the exit code is 3.
-  * Ctrl+C / SIGTERM / SIGHUP (Windows: Ctrl+Break and Ctrl+C) restore before exiting.
-    Hard kills (kill -9, TerminateProcess) cannot be caught: a backup of the original
-    bytes stays in <tmp>/mutate-backup-<pid>/ until the restore has been verified.
+    and current bytes are saved under the temp dir and the exit code is 3. A transient
+    lock on the restore write is retried 3 times (0.5 s apart).
+  * Ctrl+C / SIGTERM / SIGHUP (Windows: Ctrl+Break and Ctrl+C) restore before exiting; a
+    second signal during that cleanup is ignored, and the files are re-checked by SHA-256
+    before the "restored" message (a mismatch exits 3 instead). Hard kills (taskkill /F,
+    TerminateProcess, kill -9) cannot be caught: the file stays mutated and a backup of the
+    original bytes stays in <tmp>/mutate-backup-<pid>-<random>/ (deleted only after a
+    verified restore, and only the files this run wrote). The next run that is about to
+    mutate the same file refuses to start (exit 3) while such a backup exists, its writer
+    process is gone and the file differs from it, and prints the .orig path and how to
+    compare. Caveat: if the dead run's pid has been reused by a live process, the backup
+    looks owned and is not reported.
+  * A run can take (1 + N) x --timeout at worst (a baseline plus N mutations). Start it in the
+    background, or keep the caller's own timeout above that: a hard kill of the script
+    mid-mutation (e.g. a tool timeout that uses taskkill /F) is the one thing it cannot undo.
   * The test command runs through the platform shell (cmd.exe on Windows). Its process
     tree is killed on timeout or interrupt.
   * Nothing but --file is written. A --file that looks like a test file is refused: a
@@ -62,13 +90,17 @@ Runner output rules (what counts as "the tests ran", what a failing name is):
   go       an "ok pkg T" or "FAIL pkg T" package line, no "[build failed]" /
            "[setup failed]" and not "[no tests to run]"; names from "--- FAIL: Name"
            (subtests included).  [verified, go 1.26; use text mode, not -json]
-  unittest "Ran N tests" (N > 0) without unittest.loader._FailedTest; names from
-           "FAIL: / ERROR: name (path)".  [verified, python 3.11]
+  unittest "Ran N tests" with N greater than the skipped count, without
+           unittest.loader._FailedTest; names from "FAIL: / ERROR: name (path)".
+           [verified, python 3.11]
   vitest   "Tests  ... (T)" line with passed+failed > 0; names from "FAIL  path > name".
            [NOT verified against real output: written from the documented format]
   jest     "Tests:  ... total" line with passed+failed > 0; names from "● suite › name".
            [NOT verified against real output: written from the documented format]
   none     only --ran-pattern decides; failing names are unavailable (no --expect-fail).
+  Failure count (what separates RED from RED_NONTEST): pytest failed + errors in the
+  summary; go named failures + failed packages; unittest failures + errors + unexpected
+  successes; vitest / jest the "failed" figure of the Tests line. Unreadable = unknown, not 0.
 """
 from __future__ import annotations
 
@@ -1014,7 +1046,7 @@ def main(argv: list[str]) -> int:
                 foreign_paths.add(mut.path)
             results.append(res)
             show(fmt(res))
-            if res.verdict in ("NOT_RUN", "RED_NONTEST") or (args.verbose and res.verdict != "RED"):
+            if res.verdict in ("NOT_RUN", "RED_NONTEST") or args.verbose:
                 tail(outcome)
     except RestoreFailure as exc:
         print("mutate: " + str(exc), file=sys.stderr)

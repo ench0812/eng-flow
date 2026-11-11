@@ -389,6 +389,14 @@ class VerdictTests(Base):
         self.assertNotIn('not confirmed', r.out)
         self.assertNotIn('unverified', r.out)
 
+    def test_verbose_shows_the_output_tail_for_a_red_too_so_the_assertion_can_be_quoted(self):
+        self.unit_project()
+        args = ['--file', 'app.py', '--find', 'a + b', '--replace', 'a - b', '--cmd', UT_CMD]
+        self.assertNotIn('AssertionError', self.mutate(*args).out, 'quiet by default')
+        r = self.mutate(*args, '-v')
+        self.assertEqual(r.verdicts(), ['RED'])
+        self.assertIn('    | AssertionError: -1 != 5', r.out)               # expected and actual, as the runner printed them
+
     def test_a_red_the_output_cannot_confirm_is_kept_but_marked_on_the_line(self):
         self.scripted('print("RAN OK")\nsys.exit(1 if mutated else 0)\n')      # no runner: names and counts unknowable
         r = self.single()
