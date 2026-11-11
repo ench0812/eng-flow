@@ -849,7 +849,7 @@ def restore(ap: Applied) -> None:
     if cur == ap.orig:
         restore_mtime(ap)
         return
-    if cur == ap.mutated or ap.write_incomplete:
+    if cur == ap.mutated or (ap.write_incomplete and _our_partial_write(cur, ap)):
         # a half-written mutation is our own partial bytes, not someone else's edit: put the original back whole
         target = ap.orig
     else:
@@ -866,6 +866,19 @@ def restore(ap: Applied) -> None:
     if back != target or (not ap.foreign and sha256(back) != ap.orig_sha):
         raise _restore_failure(ap, back, "restore verification failed (SHA-256 differs from the original)")
     restore_mtime(ap)
+
+
+def _our_partial_write(cur: bytes, ap: Applied) -> bool:
+    """True only when the bytes on disk are what an interrupted in-place write of ap.mutated leaves:
+    a prefix of the mutated bytes followed either by nothing (truncated) or by the original's own
+    tail from that offset (the write stopped before truncate). Anything else may be someone else's
+    save during the failed write (an open that failed has written nothing) and must not be overwritten."""
+    m, o = ap.mutated, ap.orig
+    k, n = 0, min(len(cur), len(m))
+    while k < n and cur[k] == m[k]:
+        k += 1
+    rest = cur[k:]
+    return rest == b"" or rest == o[k:]
 
 
 def _restore_failure(ap: Applied, cur: bytes | None, why: str) -> RestoreFailure:

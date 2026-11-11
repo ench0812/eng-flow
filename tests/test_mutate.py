@@ -612,6 +612,31 @@ class WriteFailureTests(Base):
         self.assertEqual(self.read('app.py'), app, 'the original comes back whole, truncated tail included')
         self.assertEqual(self.backups(), [], 'dropped only because the file is byte-identical to the original')
 
+    def test_an_editor_saving_while_the_open_keeps_failing_is_not_overwritten(self):
+        # the open fails every time, so nothing of ours was written; meanwhile an editor saves the file.
+        # Writing the original back would destroy that save: refuse (exit 3), touch nothing, keep the backup.
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n')
+        real, saved = M.write_in_place, []
+
+        def locked(path, data):
+            if b'VALUE = 1' in data:
+                if not saved:
+                    with open(path, 'ab') as fh:
+                        fh.write(b'# saved by an editor\n')
+                    saved.append(1)
+                raise PermissionError(13, 'locked by another program')
+            real(path, data)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(M, 'write_in_place', locked), mock.patch.object(M.time, 'sleep'), \
+                mock.patch.object(tempfile, 'tempdir', str(self.tmp)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = M.main(['--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1', '--cmd', CHECK_CMD,
+                         *RAN, '--cwd', str(self.dir)])
+        self.assertEqual(rc, M.EXIT_RESTORE, out.getvalue() + err.getvalue())
+        self.assertEqual(self.read('app.py'), VALUE_APP + b'# saved by an editor\n')
+        kept = list(self.tmp.glob('mutate-backup-*/*.orig'))
+        self.assertEqual([p.read_bytes() for p in kept], [VALUE_APP])
+
     def test_a_foreign_edit_keeps_the_backup_of_the_original(self):
         self.scripted('print("RAN OK")\nif mutated:\n    open("app.py", "ab").write(b"# someone else\\n")\n')
         r = self.single()
