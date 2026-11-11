@@ -67,6 +67,26 @@ If you are a subagent executing a specific task dispatched by mao-execute (via A
 
 This guarantees the bug is actually fixed and won't recur.
 
+## Negative Controls (Mutation Checks)
+
+A green test proves nothing about a guard until you have seen it go red when the guard is broken. For a bug-fix regression test, a security/validation gate, a checker or gate tool, or a refactor you claim is covered, break the **code under test** on purpose and confirm the right test goes red. Not for every test: each mutation costs one test run, so spend them where "this test guards X" will be reported as evidence.
+
+```
+python ${CLAUDE_PLUGIN_ROOT}/scripts/mutate.py --file src/guard.py --find "if age < 18:" --replace "if age < 0:" \
+  --cmd "python -m pytest -q" --expect-fail test_rejects_minors
+python ${CLAUDE_PLUGIN_ROOT}/scripts/mutate.py --spec mutations.json --cmd "go test -count=1 ./..."   # several mutations, each from the original
+```
+
+Verdict per mutation (exit 0 only if all are `RED`): `RED` ran and failed (the expected test, if `--expect-fail`); `GREEN` ran and passed — nothing noticed; `RED_WRONG` failed, but not the test you meant to prove; `NOT_RUN` the tests did not run to completion (syntax or build error, timeout, no summary) so the exit code is ignored; `BASELINE_*` the unmutated run was not green-and-ran, so no mutation was applied. Built-in runner rules: pytest, go, unittest (checked against real output); vitest, jest (written from the documented format, not checked against real output — pass `--ran-pattern` if they misread). Any other runner needs `--ran-pattern`.
+
+What the script already does, so do not redo it by hand: demands exactly one byte-exact match; edits bytes only (a `write_text` round trip flips LF files to CRLF on Windows while a `read_text` comparison still passes); gives every run a fresh `PYTHONPYCACHEPREFIX` (a pyc that matches on mtime-in-seconds and size silently runs the previous mutation); restores only the mutated segment and verifies SHA-256 (never `git checkout <file>`, which also discards uncommitted real fixes); restores on Ctrl+C / SIGTERM and kills the test process tree.
+
+What stays on you:
+- **Mutate only the code under test.** Never the test file or the probe/hook the test observes: that proves the instrument sees a difference, not that a broken implementation is caught (the script refuses test-looking paths unless `--allow-test-file`).
+- **One mutation per claim, designed to change behavior on the existing test data** (flip a boundary, drop a branch, reverse a direction). On `GREEN`, first hand-check that the mutation really changes behavior for these inputs (a no-op-equivalent mutation means fix the mutation, not the test); only then suspect the test. On `RED_WRONG` or many unrelated reds, the mutation was too coarse: split it so exactly the intended test goes red.
+- **A negative control cannot see a test that is broken by itself** (an assertion that compares a value to itself, a baseline captured after the state change). Read the test, not just the colors.
+- Git Bash rewrites arguments that look like Unix paths and the Bash tool halves backslashes: pass strings with `/`, `\`, newlines or a leading `-` through `--spec` JSON.
+
 ## When Stuck
 
 | Situation | Action |

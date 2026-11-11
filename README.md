@@ -90,6 +90,10 @@ Reads sizes as *what the model actually received*, which is the definition of co
 
 Use it to decide *before* adding any lossy compression layer whether one is worth it — and note that the most actionable output is usually the per-command table, since changing the command itself is lossless.
 
+## Negative controls
+
+`scripts/mutate.py` — runs one byte-exact mutation of the code under test at a time against your test command and reports `RED` / `GREEN` / `RED_WRONG` / `NOT_RUN`, then restores the file byte for byte (SHA-256 verified, never `git checkout`). It encodes the ways hand-rolled mutation loops lie: an ambiguous `--find`, line endings rewritten by a text-mode write, a stale `.pyc` replaying the previous mutation (fresh `PYTHONPYCACHEPREFIX` per run), a red that is really "the tests never ran", a red from the wrong test (`--expect-fail`), and a file left broken after Ctrl+C. Exit `0` only when every mutation is `RED`; `2` usage error; `3` restore failed. Usage and runner rules: `python scripts/mutate.py --help`; when to use it: the *Negative Controls* section of `skills/mao-tdd/SKILL.md`. Tests: `python tests/test_mutate.py` (real pytest/go end-to-end cases skip when the tool is absent).
+
 ## Self-check
 
 `scripts/check-plugin.sh` — read-only consistency check of the plugin itself: tier model/effort across `agents/` and the docs that repeat them, dispatch wording, `hooks/hooks.json` against `hooks/` and `tests/`, and plugin-relative paths in prose. Exit `0` clean, `1` problems found (`file:line` plus rule id), `2` environment insufficient (fail-closed, never a skip). Every rule has a failing fixture in `tests/check-plugin.test.sh`.
