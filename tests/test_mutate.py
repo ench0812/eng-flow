@@ -80,7 +80,7 @@ class Run:
     def verdicts(self):
         return [ln.split()[0] for ln in self.out.splitlines()
                 if ln.split() and ln.split()[0] in ('RED', 'GREEN', 'RED_WRONG', 'NOT_RUN',
-                                                    'BASELINE_RED', 'BASELINE_NOT_RUN')]
+                                                    'RED_NONTEST', 'BASELINE_RED', 'BASELINE_NOT_RUN')]
 
 
 class Base(unittest.TestCase):
@@ -308,6 +308,49 @@ class VerdictTests(Base):
         self.scripted('print("RAN OK" if not mutated else "silent")\n')
         r = self.single()
         self.assertEqual((r.rc, r.verdicts()), (1, ['NOT_RUN']))
+
+    def test_nonzero_exit_without_any_failing_test_is_red_nontest_not_red(self):
+        # a second command in --cmd (coverage threshold, lint, go vet) fails while every test passes
+        self.unit_project()
+        cmd = UT_CMD + ' && "%s" -c "import app, sys; sys.exit(app.unused() != 1)"' % PY
+        r = self.mutate('--file', 'app.py', '--find', 'return 1', '--replace', 'return 2', '--cmd', cmd)
+        self.assertEqual((r.rc, r.verdicts()), (1, ['RED_NONTEST']), r.out + r.err)
+        self.assertIn('exit=1', r.out)
+        self.assertIn('summary: RED_NONTEST=1', r.out)
+
+    def test_a_real_failing_test_is_still_red_and_carries_no_warning_note(self):
+        self.unit_project()
+        r = self.mutate('--file', 'app.py', '--find', 'a + b', '--replace', 'a - b', '--cmd', UT_CMD)
+        self.assertEqual((r.rc, r.verdicts()), (0, ['RED']))
+        self.assertNotIn('not confirmed', r.out)
+        self.assertNotIn('unverified', r.out)
+
+    def test_a_red_the_output_cannot_confirm_is_kept_but_marked_on_the_line(self):
+        self.scripted('print("RAN OK")\nsys.exit(1 if mutated else 0)\n')      # no runner: names and counts unknowable
+        r = self.single()
+        self.assertEqual((r.rc, r.verdicts()), (0, ['RED']))
+        self.assertIn('not confirmed as a test failure', r.out)
+
+    def test_unittest_where_every_test_is_skipped_makes_the_baseline_not_run(self):
+        self.write('app.py', APP)
+        self.write('test_app.py', b'import unittest\nimport app\n\n\nclass T(unittest.TestCase):\n'
+                                  b'    @unittest.skip("x")\n    def test_add(self):\n        self.assertEqual(app.add(2, 3), 5)\n')
+        r = self.mutate('--file', 'app.py', '--find', 'a + b', '--replace', 'a - b', '--cmd', UT_CMD)
+        self.assertEqual((r.rc, r.verdicts()), (1, ['BASELINE_NOT_RUN']), r.out)
+
+    def test_lines_judged_by_a_parser_that_was_never_checked_say_so(self):
+        cases = {'vitest': ('    print(" Test Files  1 failed (1)")\n    print("      Tests  1 failed | 2 passed (3)")\n',
+                            'print(" Test Files  1 passed (1)")\nprint("      Tests  3 passed (3)")\n'),
+                 'jest': ('    print("Tests:       1 failed, 2 passed, 3 total")\n',
+                          'print("Tests:       3 passed, 3 total")\n')}
+        for name, (red, green) in cases.items():
+            self.scripted('if mutated:\n' + red + '    sys.exit(1)\n' + green)
+            r = self.single(cmd=CHECK_CMD + ' ' + name, runner=[])
+            self.assertEqual((r.rc, r.verdicts()), (0, ['RED']), r.out + r.err)
+            lines = [ln for ln in r.out.splitlines() if ln.startswith(('baseline-', 'RED'))]
+            self.assertEqual(len(lines), 2, r.out)
+            for ln in lines:
+                self.assertIn('(unverified parser)', ln, name)
 
     def test_ran_pattern_replaces_the_runner_check(self):
         self.unit_project()
@@ -869,6 +912,23 @@ Ran 1 test in 0.000s
 FAILED (errors=1)
 '''
 UT_CRASH = 'Traceback (most recent call last):\n  File "app.py", line 2\n    return a +\nSyntaxError: invalid syntax\n'
+UT_ALL_SKIPPED = 's\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK (skipped=1)\n'
+UT_SOME_SKIPPED = 's.s\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nOK (skipped=2)\n'
+UT_UNEXPECTED_SUCCESS = '''\
+uF
+======================================================================
+FAIL: test_b (t_unexp.T.test_b)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+AssertionError: boom
+
+======================================================================
+UNEXPECTED SUCCESS: test_a (t_unexp.T.test_a)
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+FAILED (failures=1, unexpected successes=1)
+'''
 
 # Synthetic (NOT real output): written from the documented default-reporter format.
 VITEST_RED = ' FAIL  src/a.test.ts > math > adds\nAssertionError\n\n Test Files  1 failed | 1 passed (2)\n      Tests  2 failed | 3 passed (5)\n'
@@ -879,7 +939,30 @@ JEST_NOT_RUN = 'FAIL src/a.test.js\n  \u25cf Test suite failed to run\n\nTests: 
 
 class RunnerParsingTests(unittest.TestCase):
     def check(self, parser, text, ran, names):
-        self.assertEqual(parser(text), (ran, names))
+        self.assertEqual(parser(text)[:2], (ran, names))
+
+    def test_failure_counts_come_from_the_runners_own_summary(self):
+        count = lambda parser, text: parser(text)[2]
+        self.assertEqual(count(M.parse_pytest, PYTEST_RED_Q), 3)
+        self.assertEqual(count(M.parse_pytest, PYTEST_GREEN), 0)
+        self.assertEqual(count(M.parse_pytest, '2 passed, 1 error in 0.10s\n'), 1)      # a fixture error is a failing test
+        self.assertEqual(count(M.parse_go, GO_RED), 4)                                    # 3 names + 1 failing package
+        self.assertEqual(count(M.parse_go, GO_GREEN), 0)
+        self.assertEqual(count(M.parse_unittest, UT_RED), 1)
+        self.assertEqual(count(M.parse_unittest, UT_GREEN), 0)
+        self.assertEqual(count(M.parse_unittest, UT_UNEXPECTED_SUCCESS), 2)               # failures + unexpected successes
+        self.assertEqual(count(M.parse_vitest, VITEST_RED), 2)
+        self.assertEqual(count(M.parse_jest, JEST_RED), 1)
+
+    def test_a_missing_summary_means_the_count_is_unknown_not_zero(self):
+        for parser, text in ((M.parse_pytest, 'no summary here\n'), (M.parse_unittest, UT_CRASH),
+                             (M.parse_vitest, VITEST_NO_TESTS_LINE), (M.parse_jest, 'nothing\n')):
+            self.assertIsNone(parser(text)[2], parser.__name__)
+
+    def test_unittest_run_where_every_test_was_skipped_is_not_a_run(self):
+        self.check(M.parse_unittest, UT_ALL_SKIPPED, False, [])
+        self.check(M.parse_unittest, UT_SOME_SKIPPED, True, [])                   # one test really executed
+        self.check(M.parse_unittest, UT_UNEXPECTED_SUCCESS, True, ['test_b (t_unexp.T.test_b)'])
 
     def test_pytest_real_output(self):
         p = M.parse_pytest
@@ -962,6 +1045,12 @@ class RealPytestTests(Base):
         self.assertEqual((broken.rc, broken.verdicts()), (1, ['NOT_RUN']), broken.out)
         self.assertIn('exit=2', broken.out)                 # pytest exit 2 = interrupted by the collection error
         self.assertTrue((self.dir / 'calc.py').read_bytes().startswith(b'def add'))
+
+    def test_a_failing_second_command_with_all_tests_passing_is_red_nontest_with_real_pytest(self):
+        cmd = self.cmd + ' && "%s" -c "import calc, sys; sys.exit(calc.idle() != 0)"' % self.py
+        r = self.mutate('--file', 'calc.py', '--find', 'return 0', '--replace', 'return 9', '--cmd', cmd,
+                        '--runner', 'pytest')
+        self.assertEqual((r.rc, r.verdicts()), (1, ['RED_NONTEST']), r.out)
 
     def test_pyc_staleness_from_a_prior_pytest_run_cannot_flip_the_result(self):
         # Reproduces the original trap: pytest has just imported calc.py (pyc written), and a

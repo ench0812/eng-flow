@@ -167,23 +167,27 @@ _PYTEST_SUMMARY = re.compile(
     r"^\W*(?P<body>\d+ [a-z][a-z ]*(?:, \d+ [a-z][a-z ]*)*) in [\d.]+s(?: \(\d+:\d\d:\d\d\))?\W*$", re.M)
 
 
+# Every parser returns (ran, failing names, failure count). The count is the runner's own summary
+# of how many tests failed, or None when no summary could be read: "None" means unknown, never zero.
+
 def parse_pytest(text: str):
     summaries = list(_PYTEST_SUMMARY.finditer(text))
-    ran = False
+    ran, nfail = False, None
     if summaries:
         body = summaries[-1].group("body")
         ran = _count(body, "passed") + _count(body, "failed") > 0
+        nfail = _count(body, "failed") + _count(body, "errors?")
     names = []
     for line in text.split("\n"):
         m = re.match(r"^FAILED (.+?)(?: - .*)?$", line) or re.match(r"^(\S+::.+?) FAILED\b", line)
         if m and m.group(1) not in names:
             names.append(m.group(1))
-    return ran, names
+    return ran, names, nfail
 
 
 def parse_go(text: str):
     ran = bad = False
-    names = []
+    names, failed_packages = [], 0
     for line in text.split("\n"):
         if re.match(r"^FAIL\s+\S+\s+\[(?:build|setup) failed\]", line):
             bad = True
@@ -191,22 +195,32 @@ def parse_go(text: str):
             ran = True
         elif re.match(r"^FAIL\s+\S+\s+\d+(?:\.\d+)?s", line):
             ran = True
+            failed_packages += 1                    # a test binary that failed, named test or not
         m = re.match(r"^\s*--- FAIL: (\S+)", line)
         if m and m.group(1) not in names:
             names.append(m.group(1))
-    return ran and not bad, names
+    return ran and not bad, names, len(names) + failed_packages
 
 
 def parse_unittest(text: str):
     m = None
     for m in re.finditer(r"^Ran (\d+) tests? in ", text, re.M):
         pass
-    ran = bool(m) and int(m.group(1)) > 0 and "unittest.loader._FailedTest" not in text
+    status = None
+    for status in re.finditer(r"^(?:OK|FAILED)(?: \((?P<detail>.*)\))?\s*$", text, re.M):
+        pass
+    detail = (status.group("detail") or "") if status else ""
+    skipped = sum(int(n) for n in re.findall(r"skipped=(\d+)", detail))
+    # "Ran 3 tests ... OK (skipped=3)": nothing was executed, whatever the exit code says
+    ran = bool(m) and int(m.group(1)) - skipped > 0 and "unittest.loader._FailedTest" not in text
     names = []
     for mm in re.finditer(r"^(?:FAIL|ERROR): (.+)$", text, re.M):
         if mm.group(1) not in names:
             names.append(mm.group(1))
-    return ran, names
+    nfail = None
+    if m:
+        nfail = sum(int(n) for n in re.findall(r"(?:failures|errors|unexpected successes)=(\d+)", detail))
+    return ran, names, nfail
 
 
 def parse_vitest(text: str):
@@ -220,7 +234,7 @@ def parse_vitest(text: str):
         name = re.sub(r"\s+\[.*\]$", "", mm.group(1))
         if name not in names:
             names.append(name)
-    return ran, names
+    return ran, names, (_count(m.group("body"), "failed") if m else None)
 
 
 def parse_jest(text: str):
@@ -236,7 +250,7 @@ def parse_jest(text: str):
             continue
         if name not in names:
             names.append(name)
-    return ran, names
+    return ran, names, (_count(m.group("body"), "failed") if m else None)
 
 
 PARSERS = {"pytest": parse_pytest, "go": parse_go, "unittest": parse_unittest,
@@ -258,12 +272,15 @@ def detect_runner(cmd: str) -> str | None:
     return hits[0] if hits else None
 
 
+UNVERIFIED_PARSERS = ("vitest", "jest")     # written from the documented format, never run against the real tool
+
+
 def judge_output(runner: str | None, ran_pattern, text: str):
-    """Stage 1 of the verdict: did the tests really run?  Returns (ran, failed_names)."""
-    ran_r, names = PARSERS[runner](text) if runner else (False, [])
+    """Stage 1 of the verdict: did the tests really run?  Returns (ran, failed_names, failure_count)."""
+    ran_r, names, nfail = PARSERS[runner](text) if runner else (False, [], None)
     if ran_pattern is not None:
-        return bool(ran_pattern.search(text)), names
-    return ran_r, names
+        return bool(ran_pattern.search(text)), names, nfail
+    return ran_r, names, nfail
 
 
 # --------------------------------------------------------------------------- bytes + locate
@@ -744,18 +761,35 @@ def _restore_failure(ap: Applied, cur: bytes | None, why: str) -> RestoreFailure
 # --------------------------------------------------------------------------- one mutation
 
 def verdict_for(mut: Mutation, outcome: Outcome):
+    verdict, names, note = _verdict_core(mut, outcome)
+    if mut.runner in UNVERIFIED_PARSERS:
+        note = (note + " (unverified parser)").strip()
+    return verdict, names, note
+
+
+def _verdict_core(mut: Mutation, outcome: Outcome):
     if outcome.timed_out:
         return "NOT_RUN", [], "timed out after %gs (process tree killed)" % mut.timeout
-    ran, names = judge_output(mut.runner, mut.ran_pattern, outcome.text)
+    ran, names, nfail = judge_output(mut.runner, mut.ran_pattern, outcome.text)
     if not ran:
         return "NOT_RUN", names, "no sign the tests ran to completion (exit code ignored)"
     if outcome.rc == 0:
         return "GREEN", [], "tests passed: nothing noticed this mutation"
+    confirmed = bool(names) or bool(nfail)         # a failing name, or a runner count above zero
+    if not confirmed and nfail == 0:
+        # the runner's own summary says nothing failed, so this non-zero exit came from something else in
+        # the command (coverage threshold, lint, a second command): not evidence that a test noticed
+        return ("RED_NONTEST", names,
+                "the runner reports 0 failed tests but the command exited %s (coverage gate, lint, a second "
+                "command in --cmd?): not counted as red" % outcome.rc)
     if mut.expect_fail is not None:
         if any(mut.expect_fail.search(n) for n in names):
             return "RED", names, ""
         why = "expected %r among failures" % mut.expect_fail.pattern
         return "RED_WRONG", names, why if names else why + "; no failing names extracted (is -rN/-q hiding them?)"
+    if not confirmed:
+        return "RED", names, ("non-zero exit, but the output names no failing test and gives no failure count: "
+                              "not confirmed as a test failure")
     return "RED", names, ""
 
 
@@ -790,7 +824,7 @@ def run_baseline(mut: Mutation, cwd: str):
     outcome = run_tests(mut.cmd, cwd, mut.timeout)
     if outcome.timed_out:
         return "BASELINE_NOT_RUN", outcome, "timed out"
-    ran, _ = judge_output(mut.runner, mut.ran_pattern, outcome.text)
+    ran, _, _ = judge_output(mut.runner, mut.ran_pattern, outcome.text)
     if not ran:
         return "BASELINE_NOT_RUN", outcome, "unmutated run shows no sign the tests ran"
     if outcome.rc != 0:
@@ -869,8 +903,9 @@ def main(argv: list[str]) -> int:
             if key not in bases:
                 verdict, outcome, why = run_baseline(mut, cwd)
                 bases[key] = (verdict, why)
-                show("%-16s exit=%-4s %s" % ("baseline-" + ("ok" if verdict == "OK" else verdict.lower()),
-                                              "-" if outcome.rc is None else outcome.rc, mut.cmd))
+                show("%-16s exit=%-4s %s%s" % ("baseline-" + ("ok" if verdict == "OK" else verdict.lower()),
+                                                "-" if outcome.rc is None else outcome.rc, mut.cmd,
+                                                "  (unverified parser)" if mut.runner in UNVERIFIED_PARSERS else ""))
                 if verdict != "OK":
                     show("    baseline: " + why)
                     tail(outcome)
@@ -885,7 +920,7 @@ def main(argv: list[str]) -> int:
                 foreign_paths.add(mut.path)
             results.append(res)
             show(fmt(res))
-            if res.verdict in ("NOT_RUN",) or (args.verbose and res.verdict != "RED"):
+            if res.verdict in ("NOT_RUN", "RED_NONTEST") or (args.verbose and res.verdict != "RED"):
                 tail(outcome)
     except RestoreFailure as exc:
         print("mutate: " + str(exc), file=sys.stderr)
