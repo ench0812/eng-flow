@@ -87,7 +87,8 @@ import sys
 import tempfile
 import time
 
-EXIT_OK, EXIT_NOT_PROVEN, EXIT_USAGE, EXIT_RESTORE = 0, 1, 2, 3
+EXIT_OK, EXIT_NOT_PROVEN, EXIT_USAGE, EXIT_RESTORE, EXIT_IO = 0, 1, 2, 3, 4
+RETRIES, RETRY_WAIT = 3, 0.5      # a transient lock (antivirus, indexer) gets a few short waits, never a long one
 RUNNERS = ("pytest", "go", "vitest", "jest", "unittest")
 CONTEXT_LADDER = (32, 8)          # bytes of surrounding text used to re-locate a mutated segment
 TAIL_LINES = 25
@@ -100,6 +101,10 @@ class UsageError(Exception):
 
 class RestoreFailure(Exception):
     pass
+
+
+class WriteFailure(Exception):
+    """The target cannot be opened for writing (read-only, locked, disk full): nothing was mutated."""
 
 
 class Interrupted(BaseException):
@@ -304,6 +309,28 @@ def write_in_place(path: str, data: bytes) -> None:
         fh.truncate()
         fh.flush()
         os.fsync(fh.fileno())
+
+
+def write_with_retry(path: str, data: bytes) -> None:
+    for attempt in range(RETRIES):
+        try:
+            write_in_place(path, data)
+            return
+        except OSError:
+            if attempt == RETRIES - 1:
+                raise
+            time.sleep(RETRY_WAIT)
+
+
+def preflight_writable(paths) -> None:
+    """Open every target for writing (without writing) so a read-only file fails before any test run."""
+    for path in sorted(set(paths)):
+        try:
+            with open(path, "r+b"):
+                pass
+        except OSError as exc:
+            raise WriteFailure("cannot write %s (%s); nothing was run. Make it writable (read-only flag, a program "
+                               "holding a lock) and run again" % (path, exc))
 
 
 def positions(data: bytes, needle: bytes, limit: int = 50) -> list[int]:
@@ -789,7 +816,7 @@ def restore(ap: Applied) -> None:
             raise _restore_failure(ap, cur, "the file was edited during the run and the mutated segment "
                                             "cannot be located unambiguously")
     try:
-        write_in_place(path, target)
+        write_with_retry(path, target)
         back = read_bytes(path)
     except OSError as exc:
         raise _restore_failure(ap, cur, "writing the restore failed (%s)" % exc)
@@ -857,7 +884,11 @@ def apply_and_test(mut: Mutation, cwd: str):
     try:
         with critical():
             ap.backup = save_backup(ap)
-            write_in_place(mut.path, ap.mutated)
+            try:
+                write_with_retry(mut.path, ap.mutated)
+            except OSError as exc:
+                raise WriteFailure("cannot write %s (%s); the file was not mutated and no test ran for %s"
+                                   % (mut.path, exc, mut.label))
             shift_mtime(ap)
         outcome = run_tests(mut.cmd, cwd, mut.timeout)
     finally:
@@ -957,6 +988,7 @@ def main(argv: list[str]) -> int:
     originals: dict[str, str] = {}
     foreign_paths: set = set()
     try:
+        preflight_writable(mut.path for mut in muts)
         # Stage 0: the unmutated tests must be green AND must have run (once per distinct command).
         bases: dict = {}
         for mut in muts:
@@ -1000,16 +1032,31 @@ def main(argv: list[str]) -> int:
     except UsageError as exc:
         print("mutate: usage error: %s" % exc, file=sys.stderr)
         return EXIT_USAGE
-
-    for path, digest in originals.items():
-        now = sha256(read_bytes(path))
-        if path in foreign_paths:
-            show("not comparable %s (edited by someone else during the run) sha256=%s" % (os.path.relpath(path, cwd), now))
-        elif now != digest:
-            print("mutate: RESTORE FAILED: %s differs from its pre-run bytes after all mutations" % path, file=sys.stderr)
+    except (WriteFailure, OSError) as exc:          # not a verdict and not a usage error: its own exit code
+        label = "mutate: " + str(exc) if isinstance(exc, WriteFailure) else "mutate: unexpected I/O error: %s" % exc
+        bad = unrestored(originals, foreign_paths)
+        if bad:
+            print(label + "\nmutate: AND these files do not match their pre-run bytes:\n  %s\n"
+                  "  look for the backup under %s (mutate-backup-*) before trusting them"
+                  % ("\n  ".join(bad), tempfile.gettempdir()), file=sys.stderr)
             return EXIT_RESTORE
+        print(label, file=sys.stderr)
+        return EXIT_IO
+
+    bad = unrestored(originals, foreign_paths)
+    if bad:
+        print("mutate: RESTORE FAILED: differs from its pre-run bytes after all mutations:\n  %s"
+              % "\n  ".join(bad), file=sys.stderr)
+        return EXIT_RESTORE
+    for path, digest in originals.items():
+        if path in foreign_paths:
+            try:
+                now = sha256(read_bytes(path))
+            except OSError as exc:
+                now = "unreadable (%s)" % exc
+            show("not comparable %s (edited by someone else during the run) sha256=%s" % (os.path.relpath(path, cwd), now))
         else:
-            show("restored %s sha256=%s" % (os.path.relpath(path, cwd), now))
+            show("restored %s sha256=%s" % (os.path.relpath(path, cwd), digest))
     counts: dict = {}
     for r in results:
         counts[r.verdict] = counts.get(r.verdict, 0) + 1

@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -541,6 +542,74 @@ class RestoreTests(Base):
         for ln in r.err.splitlines():
             if 'saved at' in ln:
                 shutil.rmtree(Path(ln.split(': ', 1)[1].strip()).parent, ignore_errors=True)
+
+
+class WriteFailureTests(Base):
+    """A target that cannot be opened for writing is a clear, separate outcome, not a traceback in exit 1."""
+
+    def mutation(self):
+        return M.Mutation('x', 'app.py', str(self.dir / 'app.py'), b'a + b', b'a - b', UT_CMD, 'unittest', None, None, 60)
+
+    def test_read_only_target_exit_4_with_a_message_before_anything_runs(self):
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n')
+        app = self.dir / 'app.py'
+        os.chmod(app, stat.S_IREAD)
+        self.addCleanup(os.chmod, app, stat.S_IREAD | stat.S_IWRITE)
+        if os.access(app, os.W_OK):
+            self.skipTest('this user bypasses file modes (root)')
+        r = self.single()
+        self.assertEqual(r.rc, M.EXIT_IO, r.out + r.err)
+        self.assertIn('cannot write', r.err)
+        self.assertIn('app.py', r.err)
+        self.assertNotIn('Traceback', r.err)
+        self.assertFalse((self.dir / 'runs.log').exists(), 'no baseline run is wasted on a file we cannot mutate')
+
+    def test_a_write_that_fails_later_is_exit_4_and_leaves_no_backup_behind(self):
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n')
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(M, 'write_in_place', side_effect=PermissionError(13, 'locked by another program')), \
+                mock.patch.object(tempfile, 'tempdir', str(self.tmp)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = M.main(['--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1', '--cmd', CHECK_CMD,
+                         *RAN, '--cwd', str(self.dir)])
+        self.assertEqual(rc, M.EXIT_IO, err.getvalue())
+        self.assertIn('cannot write', err.getvalue())
+        self.assertIn('locked by another program', err.getvalue())
+        self.assertEqual(self.read('app.py'), VALUE_APP)
+        self.assertEqual(self.read('runs.log'), b'x', 'only the baseline ran')
+        self.assertEqual(self.backups(), [])
+
+    def test_restore_retries_a_transient_lock_a_few_times_and_then_succeeds(self):
+        self.unit_project()
+        orig = APP
+        mutated = APP.replace(b'a + b', b'a - b')
+        (self.dir / 'app.py').write_bytes(mutated)
+        ap = M.Applied(self.mutation(), orig, sha(orig), orig.index(b'a + b'), mutated)
+        calls, real = [], M.write_in_place
+
+        def flaky(path, data):
+            calls.append(path)
+            if len(calls) < 3:
+                raise PermissionError(13, 'locked')
+            real(path, data)
+        with mock.patch.object(M, 'write_in_place', flaky), mock.patch.object(M.time, 'sleep') as slept:
+            M.restore(ap)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual((self.dir / 'app.py').read_bytes(), orig)
+        self.assertTrue(slept.called and all(c.args[0] <= 1 for c in slept.call_args_list), 'short waits only')
+
+    def test_restore_that_stays_locked_is_a_restore_failure_with_the_original_saved(self):
+        self.unit_project()
+        mutated = APP.replace(b'a + b', b'a - b')
+        (self.dir / 'app.py').write_bytes(mutated)
+        ap = M.Applied(self.mutation(), APP, sha(APP), APP.index(b'a + b'), mutated)
+        with mock.patch.object(M, 'write_in_place', side_effect=PermissionError(13, 'locked')), \
+                mock.patch.object(M.time, 'sleep'), mock.patch.object(tempfile, 'tempdir', str(self.tmp)):
+            with self.assertRaises(M.RestoreFailure) as cm:
+                M.restore(ap)
+        self.assertIn('locked', str(cm.exception))
+        saved = [ln.split(': ', 1)[1].strip() for ln in str(cm.exception).splitlines() if 'original bytes' in ln]
+        self.assertEqual(Path(saved[0]).read_bytes(), APP)
 
 
 class BackupFolderTests(Base):
