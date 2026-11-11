@@ -345,11 +345,17 @@ def write_in_place(path: str, data: bytes) -> None:
     # r+b keeps the inode, mode and every byte we do not touch; write_text/newline
     # translation (CRLF on Windows) never gets a chance to run.
     with open(path, "r+b") as fh:
-        fh.seek(0)
-        fh.write(data)
-        fh.truncate()
-        fh.flush()
-        os.fsync(fh.fileno())
+        try:
+            fh.seek(0)
+            fh.write(data)
+            fh.truncate()
+            fh.flush()
+            os.fsync(fh.fileno())
+        except OSError as exc:
+            # The open succeeded, so some of our bytes may be on disk. A failed open wrote nothing and
+            # carries no mark: restore must then treat any difference as someone else's.
+            exc.mutate_wrote = True
+            raise
 
 
 def write_with_retry(path: str, data: bytes) -> None:
@@ -870,15 +876,15 @@ def restore(ap: Applied) -> None:
 
 def _our_partial_write(cur: bytes, ap: Applied) -> bool:
     """True only when the bytes on disk are what an interrupted in-place write of ap.mutated leaves:
-    a prefix of the mutated bytes followed either by nothing (truncated) or by the original's own
-    tail from that offset (the write stopped before truncate). Anything else may be someone else's
-    save during the failed write (an open that failed has written nothing) and must not be overwritten."""
+    a prefix of the mutated bytes followed by the original's own tail from that offset (write raised
+    part-way, or truncate raised after the write; truncate never runs after a failed write, so a
+    shortened file is not ours). Anything else may be someone else's save and must not be overwritten.
+    Only consulted when write_in_place marked the failure as having written (the open succeeded)."""
     m, o = ap.mutated, ap.orig
     k, n = 0, min(len(cur), len(m))
     while k < n and cur[k] == m[k]:
         k += 1
-    rest = cur[k:]
-    return rest == b"" or rest == o[k:]
+    return cur[k:] == o[k:]
 
 
 def _restore_failure(ap: Applied, cur: bytes | None, why: str) -> RestoreFailure:
@@ -943,7 +949,7 @@ def apply_and_test(mut: Mutation, cwd: str):
             try:
                 write_with_retry(mut.path, ap.mutated)
             except OSError as exc:
-                ap.write_incomplete = True
+                ap.write_incomplete = bool(getattr(exc, "mutate_wrote", False))
                 raise WriteFailure("cannot write %s (%s); the original bytes were written back and no test ran for %s"
                                    % (mut.path, exc, mut.label))
             shift_mtime(ap)

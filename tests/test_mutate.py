@@ -587,55 +587,100 @@ class WriteFailureTests(Base):
         self.assertEqual(self.read('runs.log'), b'x', 'only the baseline ran')
         self.assertEqual(self.backups(), [])
 
-    def test_a_mutation_write_that_fails_part_way_restores_the_whole_original(self):
-        # the write leaves a truncated mutated file whose segment and front context are intact, which
-        # would otherwise look like a foreign edit; only the segment would be reversed and the
-        # truncated tail kept, and the backup (the only full original) deleted
-        app = b'VALUE = 0\nTAIL = "' + b'x' * 64 + b'"\n'
-        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n', app=app)
+    def run_with_mutation_write(self, fake, replace='VALUE = 1'):
+        """main() with write_in_place replaced for the mutation write only (restore writes stay real)."""
         real = M.write_in_place
 
-        def partial(path, data):
+        def patched(path, data):
             if b'VALUE = 1' in data:
-                with open(path, 'r+b') as fh:
-                    fh.write(data[:len(data) - 20])
-                    fh.truncate()
-                raise OSError(28, 'No space left on device')
-            real(path, data)
+                return fake(path, data)
+            return real(path, data)
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(M, 'write_in_place', partial), mock.patch.object(M.time, 'sleep'), \
+        with mock.patch.object(M, 'write_in_place', patched), mock.patch.object(M.time, 'sleep'), \
                 mock.patch.object(tempfile, 'tempdir', str(self.tmp)), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = M.main(['--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1', '--cmd', CHECK_CMD,
+            rc = M.main(['--file', 'app.py', '--find', 'VALUE = 0', '--replace', replace, '--cmd', CHECK_CMD,
                          *RAN, '--cwd', str(self.dir)])
-        self.assertEqual(rc, M.EXIT_IO, err.getvalue())
-        self.assertEqual(self.read('app.py'), app, 'the original comes back whole, truncated tail included')
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_write_in_place_marks_a_failure_after_the_open_and_not_a_failed_open(self):
+        target = self.write('f.bin', b'old bytes\n')
+        with mock.patch.object(M.os, 'fsync', side_effect=OSError(5, 'I/O error')):
+            with self.assertRaises(OSError) as cm:
+                M.write_in_place(str(target), b'new\n')
+        self.assertTrue(getattr(cm.exception, 'mutate_wrote', False))
+        with self.assertRaises(OSError) as cm:
+            M.write_in_place(str(self.dir / 'missing' / 'f.bin'), b'new\n')
+        self.assertFalse(getattr(cm.exception, 'mutate_wrote', False))
+
+    def test_a_mutation_write_that_fails_part_way_restores_the_whole_original(self):
+        # the shape a real interrupted r+b write leaves: our first k bytes, then the original's tail.
+        # Without recognising it, the segment-only reversal would keep a corrupt middle and the
+        # backup (the only full original) would be the one thing left to recover from
+        app = b'VALUE = 0\nTAIL = "' + b'x' * 64 + b'"\n'
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n', app=app)
+
+        def partial(path, data):
+            # a length-changing mutation, so "our 14 bytes + the original's tail" is a shifted, corrupt
+            # file and not simply the whole mutated file
+            assert data.startswith(b'VALUE = 100\n')
+            with open(path, 'r+b') as fh:
+                fh.write(data[:14])                 # past the mutated segment, then the disk fills up
+            assert open(path, 'rb').read() != data
+            exc = OSError(28, 'No space left on device')
+            exc.mutate_wrote = True
+            raise exc
+        rc, out = self.run_with_mutation_write(partial, replace='VALUE = 100')
+        self.assertEqual(rc, M.EXIT_IO, out)
+        self.assertEqual(self.read('app.py'), app, 'the original comes back whole')
         self.assertEqual(self.backups(), [], 'dropped only because the file is byte-identical to the original')
 
-    def test_an_editor_saving_while_the_open_keeps_failing_is_not_overwritten(self):
-        # the open fails every time, so nothing of ours was written; meanwhile an editor saves the file.
-        # Writing the original back would destroy that save: refuse (exit 3), touch nothing, keep the backup.
+    def assert_foreign_save_survives(self, editor, expected):
         self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n')
-        real, saved = M.write_in_place, []
+        saved = []
 
-        def locked(path, data):
-            if b'VALUE = 1' in data:
-                if not saved:
-                    with open(path, 'ab') as fh:
-                        fh.write(b'# saved by an editor\n')
-                    saved.append(1)
-                raise PermissionError(13, 'locked by another program')
-            real(path, data)
-        out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(M, 'write_in_place', locked), mock.patch.object(M.time, 'sleep'), \
-                mock.patch.object(tempfile, 'tempdir', str(self.tmp)), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = M.main(['--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1', '--cmd', CHECK_CMD,
-                         *RAN, '--cwd', str(self.dir)])
-        self.assertEqual(rc, M.EXIT_RESTORE, out.getvalue() + err.getvalue())
-        self.assertEqual(self.read('app.py'), VALUE_APP + b'# saved by an editor\n')
+        def locked(path, data):                     # the open fails every time: nothing of ours is written
+            if not saved:
+                editor(path)
+                saved.append(1)
+            raise PermissionError(13, 'locked by another program')
+        rc, out = self.run_with_mutation_write(locked)
+        self.assertEqual(rc, M.EXIT_RESTORE, out)
+        self.assertEqual(self.read('app.py'), expected, 'the editor\'s save must not be overwritten')
         kept = list(self.tmp.glob('mutate-backup-*/*.orig'))
         self.assertEqual([p.read_bytes() for p in kept], [VALUE_APP])
+
+    def test_an_editor_appending_while_the_open_keeps_failing_is_not_overwritten(self):
+        def append(path):
+            with open(path, 'ab') as fh:
+                fh.write(b'# saved by an editor\n')
+        self.assert_foreign_save_survives(append, VALUE_APP + b'# saved by an editor\n')
+
+    def test_a_save_after_our_write_started_is_not_overwritten(self):
+        # the open succeeded (the failure carries the mark), but what is on disk now is not the shape an
+        # interrupted write of ours leaves: an editor saved over it. The mark alone must not license an overwrite.
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n')
+
+        saved = []
+
+        def started_then_saved_over(path, data):    # called once per retry; the editor saves once
+            if not saved:
+                with open(path, 'ab') as fh:
+                    fh.write(b'# saved by an editor\n')
+                saved.append(1)
+            exc = OSError(5, 'I/O error')
+            exc.mutate_wrote = True
+            raise exc
+        rc, out = self.run_with_mutation_write(started_then_saved_over)
+        self.assertEqual(rc, M.EXIT_RESTORE, out)
+        self.assertEqual(self.read('app.py'), VALUE_APP + b'# saved by an editor\n')
+
+    def test_an_editor_deleting_lines_while_the_open_keeps_failing_is_not_overwritten(self):
+        # a shortened file looks like "a prefix of ours, then nothing": still not ours, the open never succeeded
+        def delete(path):
+            with open(path, 'wb') as fh:
+                fh.write(b'VAL')
+        self.assert_foreign_save_survives(delete, b'VAL')
 
     def test_a_foreign_edit_keeps_the_backup_of_the_original(self):
         self.scripted('print("RAN OK")\nif mutated:\n    open("app.py", "ab").write(b"# someone else\\n")\n')
