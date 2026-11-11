@@ -587,6 +587,40 @@ class WriteFailureTests(Base):
         self.assertEqual(self.read('runs.log'), b'x', 'only the baseline ran')
         self.assertEqual(self.backups(), [])
 
+    def test_a_mutation_write_that_fails_part_way_restores_the_whole_original(self):
+        # the write leaves a truncated mutated file whose segment and front context are intact, which
+        # would otherwise look like a foreign edit; only the segment would be reversed and the
+        # truncated tail kept, and the backup (the only full original) deleted
+        app = b'VALUE = 0\nTAIL = "' + b'x' * 64 + b'"\n'
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n', app=app)
+        real = M.write_in_place
+
+        def partial(path, data):
+            if b'VALUE = 1' in data:
+                with open(path, 'r+b') as fh:
+                    fh.write(data[:len(data) - 20])
+                    fh.truncate()
+                raise OSError(28, 'No space left on device')
+            real(path, data)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(M, 'write_in_place', partial), mock.patch.object(M.time, 'sleep'), \
+                mock.patch.object(tempfile, 'tempdir', str(self.tmp)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = M.main(['--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1', '--cmd', CHECK_CMD,
+                         *RAN, '--cwd', str(self.dir)])
+        self.assertEqual(rc, M.EXIT_IO, err.getvalue())
+        self.assertEqual(self.read('app.py'), app, 'the original comes back whole, truncated tail included')
+        self.assertEqual(self.backups(), [], 'dropped only because the file is byte-identical to the original')
+
+    def test_a_foreign_edit_keeps_the_backup_of_the_original(self):
+        self.scripted('print("RAN OK")\nif mutated:\n    open("app.py", "ab").write(b"# someone else\\n")\n')
+        r = self.single()
+        self.assertEqual(r.verdicts(), ['NOT_RUN'])
+        kept = list(self.tmp.glob('mutate-backup-*/*.orig'))
+        self.assertEqual(len(kept), 1, r.out + r.err)
+        self.assertEqual(kept[0].read_bytes(), VALUE_APP)
+        self.assertIn(str(kept[0]), r.out + r.err)
+
     def test_restore_retries_a_transient_lock_a_few_times_and_then_succeeds(self):
         self.unit_project()
         orig = APP
@@ -984,6 +1018,25 @@ ERROR test_calc.py
 !!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
 ============================== 1 error in 0.10s ===============================
 '''
+# pytest 9.2 -q --continue-on-collection-errors, one module fails to import, the other passes
+PYTEST_COLLECT_MIXED = '''\
+_________________________ ERROR collecting test_b.py __________________________
+test_b.py:1: in <module>
+    import nonexistent_mod
+E   ModuleNotFoundError: No module named 'nonexistent_mod'
+=========================== short test summary info ===========================
+ERROR test_b.py
+1 passed, 1 error in 0.03s
+'''
+# pytest 9.2 -q, a fixture raises: the error names a test, so it is a failing test
+PYTEST_FIXTURE_ERROR = '''\
+__________________________ ERROR at setup of test_c ___________________________
+E       RuntimeError: x
+test_c.py:4: RuntimeError
+=========================== short test summary info ===========================
+ERROR test_c.py::test_c - RuntimeError: x
+1 passed, 1 error in 0.05s
+'''
 PYTEST_NO_FILE = '''\
 ERROR: file or directory not found: nonexistent_dir
 
@@ -1117,6 +1170,12 @@ class RunnerParsingTests(unittest.TestCase):
         self.check(M.parse_pytest, PYTEST_COLLECT_ERROR, False, [])
         self.check(M.parse_pytest, PYTEST_NO_FILE, False, [])
         self.check(M.parse_pytest, '3 skipped in 0.01s\n', False, [])
+
+    def test_pytest_collection_error_beside_passing_modules_is_not_a_run(self):
+        # --continue-on-collection-errors: "1 passed, 1 error" must not read as a test noticing the mutation
+        self.check(M.parse_pytest, PYTEST_COLLECT_MIXED, False, [])
+        ran, _, nfail = M.parse_pytest(PYTEST_FIXTURE_ERROR)        # a fixture error names a test: still a run
+        self.assertEqual((ran, nfail), (True, 1))
 
     def test_go_real_output(self):
         p = M.parse_go

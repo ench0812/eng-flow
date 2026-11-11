@@ -208,6 +208,13 @@ _PYTEST_SUMMARY = re.compile(
 # Every parser returns (ran, failing names, failure count). The count is the runner's own summary
 # of how many tests failed, or None when no summary could be read: "None" means unknown, never zero.
 
+# A module that failed to import is a collection error ("ERROR collecting x.py" header, "ERROR x.py"
+# summary line without "::"). With --continue-on-collection-errors the other modules still run and the
+# summary reads "1 passed, 1 error": that is a mutation that broke an import, not a test noticing it.
+# A fixture error ("ERROR x.py::test_y - ...") names a test and still counts as a failure.
+_PYTEST_COLLECT_ERROR = re.compile(r"^_* ?ERROR collecting\b|^ERROR (?![^\n]*::)\S+", re.M)
+
+
 def parse_pytest(text: str):
     summaries = list(_PYTEST_SUMMARY.finditer(text))
     ran, nfail = False, None
@@ -215,6 +222,8 @@ def parse_pytest(text: str):
         body = summaries[-1].group("body")
         ran = _count(body, "passed") + _count(body, "failed") > 0
         nfail = _count(body, "failed") + _count(body, "errors?")
+    if _PYTEST_COLLECT_ERROR.search(text):
+        ran = False
     names = []
     for line in text.split("\n"):
         m = re.match(r"^FAILED (.+?)(?: - .*)?$", line) or re.match(r"^(\S+::.+?) FAILED\b", line)
@@ -666,6 +675,7 @@ class Applied:
     backup: str | None = None
     foreign: bool = False
     orig_times: tuple | None = None        # (atime_ns, mtime_ns) before the first write
+    write_incomplete: bool = False         # our own mutation write failed part-way: the bytes on disk are ours
 
 
 _USED_MTIMES: set = set()
@@ -839,7 +849,8 @@ def restore(ap: Applied) -> None:
     if cur == ap.orig:
         restore_mtime(ap)
         return
-    if cur == ap.mutated:
+    if cur == ap.mutated or ap.write_incomplete:
+        # a half-written mutation is our own partial bytes, not someone else's edit: put the original back whole
         target = ap.orig
     else:
         ap.foreign = True
@@ -919,19 +930,27 @@ def apply_and_test(mut: Mutation, cwd: str):
             try:
                 write_with_retry(mut.path, ap.mutated)
             except OSError as exc:
-                raise WriteFailure("cannot write %s (%s); the file was not mutated and no test ran for %s"
+                ap.write_incomplete = True
+                raise WriteFailure("cannot write %s (%s); the original bytes were written back and no test ran for %s"
                                    % (mut.path, exc, mut.label))
             shift_mtime(ap)
         outcome = run_tests(mut.cmd, cwd, mut.timeout)
     finally:
         with critical():
             restore(ap)
-            discard_backup(ap)                  # only reached when the restore was verified
+            # The backup is the only full copy of the original: drop it only when the file on disk is
+            # byte-identical to it. A foreign edit (only our segment reversed) keeps it for the user.
+            try:
+                whole = sha256(read_bytes(mut.path)) == ap.orig_sha
+            except OSError:
+                whole = False
+            if whole:
+                discard_backup(ap)
     verdict, names, note = verdict_for(mut, outcome)
     if ap.foreign:
         verdict = "NOT_RUN"
         note = ("file was edited by someone else during the run (only the mutated segment was "
-                "reversed); result untrusted")
+                "reversed); result untrusted; the original before the run is kept at %s" % ap.backup)
     return Result(mut.label, verdict, outcome.rc, names, note), outcome, ap.foreign
 
 
