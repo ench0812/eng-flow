@@ -235,15 +235,21 @@ CODEX_REVIEW_STATE_TTL_DAYS="${CODEX_REVIEW_STATE_TTL_DAYS:-7}"  # payload 快�
 # lockfile 也【刻意不排除】(2026-08-24 codex 交叉複查指出): lockfile 才記錄實際解析到的
 # 版本、transitive dependency 與 integrity hash,manifest 乾淨不代表 lockfile 沒被動過。
 # 把它排掉等於在供應鏈這一軸開盲點,而「不知道有沒有被動」與「確認不需要審」是兩件事。
-# 專案若真的受不了 lockfile 的 diff 體積,自行把它加進 CODEX_REVIEW_EXCLUDE。
+# 專案若真的受不了 lockfile 的 diff 體積,自行把它加進 CODEX_REVIEW_EXCLUDE。注意設定它會【整份取代】預設清單
+# (沒有附加的寫法);要保留預設就把下面的預設清單整份抄進去再加一行——與預設逐字相同的條目不做「沒命中」檢查。
 # 【必須帶 ,glob】: 沒有 glob magic 時 git 的 `**/` 不匹配根層檔案——實測
 # `:(exclude)**/package-lock.json` 排得掉 sub/package-lock.json 卻排不掉根目錄那份。
-CODEX_REVIEW_EXCLUDE="${CODEX_REVIEW_EXCLUDE-:(exclude,glob)**/*.min.*
+# 【以換行分隔】(下方以 IFS=換行 切開)。呼叫端自己設定時,每一條都必須排掉至少一個變更檔,
+# 否則印警示(2026-11-11 用空白分隔五條規則,整串變成一條什麼都比不到的 pathspec,送出量是預期的
+# 3.5 倍而無任何提示——同一錯誤第二次發生,記憶擋不住,改由腳本把關)。預設清單不檢查: 多數 repo 本來就沒有 dist/vendor。
+CODEX_REVIEW_EXCLUDE_GIVEN="${CODEX_REVIEW_EXCLUDE+1}"
+CODEX_REVIEW_EXCLUDE_DEFAULT=':(exclude,glob)**/*.min.*
 :(exclude,glob)**/dist/**
 :(exclude,glob)**/build/**
 :(exclude,glob)**/vendor/**
 :(exclude,glob)**/node_modules/**
-:(exclude,glob)**/__snapshots__/**}"
+:(exclude,glob)**/__snapshots__/**'
+CODEX_REVIEW_EXCLUDE="${CODEX_REVIEW_EXCLUDE-$CODEX_REVIEW_EXCLUDE_DEFAULT}"
 
 # 疑似機密的檔案【不送出,但要大聲講】。兩條規則同時成立:
 #   (a) 不該把金鑰/憑證內容送給外部服務;
@@ -821,6 +827,22 @@ else
     EXCLUDED_FILES="$(comm -23 <(printf '%s\n' "$NAMES_ALL") <(printf '%s\n' "$NAMES_KEPT") | tr '\n' ' ')"
     ARTIFACT_FILES="$(comm -23 <(printf '%s\n' "$NAMES_ALL") <(printf '%s\n' "$NAMES_NOSECRET") | tr '\n' ' ')"
     SECRET_FILES="$(comm -23 <(printf '%s\n' "$NAMES_NOSECRET") <(printf '%s\n' "$NAMES_KEPT") | tr '\n' ' ')"
+    # 呼叫端給的排除規則逐條核對: 單獨套用後變更檔清單與全部相同 = 這條沒有排掉任何東西。
+    # 只警示、不中止(多送不會漏審,只是浪費額度與注意力);整體 pathspec 已在上面驗過有效。
+    if [ "$CODEX_REVIEW_EXCLUDE_GIVEN" = 1 ]; then
+      for sp in ${EXCL[@]+"${EXCL[@]}"}; do
+        # 抄自預設清單的條目不檢查(多數 repo 本來就沒有 dist／vendor,檢查只會產生假警示而讓警示被習慣性忽略)
+        case $'\n'"$CODEX_REVIEW_EXCLUDE_DEFAULT"$'\n' in *$'\n'"$sp"$'\n'*) continue ;; esac
+        if [ "$(git diff --name-only "$MB" -- ':/' "$sp" 2>/dev/null | sort)" = "$NAMES_ALL" ]; then
+          echo "[codex-review] 警示: CODEX_REVIEW_EXCLUDE 的這條規則沒有排掉任何變更檔案: $sp" >&2
+          case "$sp" in
+            [[:space:]]*) echo "  這條規則開頭有空白,git 不會把它當成 pathspec magic(縮排過的多行字串常見);把每行開頭的空白拿掉。" >&2 ;;
+            # :( 長寫法與 :! :^ 短寫法都算(方括號內 ! 與 ^ 跳脫,免得被當成取反)
+            *[[:space:]]:[\(\!\^]*) echo "  CODEX_REVIEW_EXCLUDE 以【換行】分隔;這條含空白又含第二個 pathspec magic,看起來是用空白分隔的多條規則被當成了一條。" >&2 ;;
+          esac
+        fi
+      done
+    fi
   else
     DIFF="$DIFF_ALL"
   fi

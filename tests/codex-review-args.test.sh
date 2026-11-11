@@ -515,6 +515,37 @@ O7="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE= CODEX_REVIEW_STATE="
       CODEX_REVIEW_LOG="$STUB2/u3.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
 ok "diff: 清空排除清單則不排除"      hasnt "已排除" "$O7"
 ok "diff: 清空排除清單仍照常送出" has "fresh round=1" "$O7"
+# 呼叫端自訂的排除規則沒命中要警示(2026-11-11: 空白分隔的五條規則被當成一條、整串沒排掉任何東西而無提示)
+ok "diff: 預設排除清單沒命中的條目不警示"  hasnt "沒有排掉任何變更檔案" "$O6"
+O7b="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE=':(exclude,glob)**/dist/** :(exclude)package-lock.json' \
+      CODEX_REVIEW_STATE="$STUB2/lg3b" CODEX_REVIEW_LOG="$STUB2/u3b.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: 空白分隔的自訂規則 → 警示沒命中"   has "沒有排掉任何變更檔案: :(exclude,glob)\*\*/dist/\*\* :(exclude)package-lock.json" "$O7b"
+ok "diff: 空白分隔的自訂規則 → 點出換行分隔" has "以【換行】分隔" "$O7b"
+ok "diff: 警示不阻斷"                       has "fresh round=1" "$O7b"
+O7c="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE=$':(exclude,glob)**/dist/**\n:(exclude)package-lock.json' \
+      CODEX_REVIEW_STATE="$STUB2/lg3c" CODEX_REVIEW_LOG="$STUB2/u3c.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: 換行分隔的自訂規則 → 各自生效不警示" hasnt "沒有排掉任何變更檔案" "$O7c"
+ok "diff: 換行分隔的自訂規則 → 確實排除"       has "dist/out.js" "$O7c"
+O7d="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE=$':(exclude)package-lock.json\n:(exclude)no-such-file.txt' \
+      CODEX_REVIEW_STATE="$STUB2/lg3d" CODEX_REVIEW_LOG="$STUB2/u3d.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: 單條自訂規則沒命中 → 只點名那一條"   has "沒有排掉任何變更檔案: :(exclude)no-such-file.txt" "$O7d"
+ok "diff: 單條自訂規則沒命中 → 有命中的那條不點名" hasnt "沒有排掉任何變更檔案: :(exclude)package-lock.json" "$O7d"
+ok "diff: 單條沒命中 → 不誤判成空白分隔"        hasnt "以【換行】分隔" "$O7d"
+# :! 短寫法以空白串成一條(最常見的排除寫法)也要點出換行分隔
+O7e="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE=':!package-lock.json :!dist/out.js' \
+      CODEX_REVIEW_STATE="$STUB2/lg3e" CODEX_REVIEW_LOG="$STUB2/u3e.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: :! 短寫法空白分隔 → 點出換行分隔"     has "以【換行】分隔" "$O7e"
+# 開頭有縮排的規則: git 不認 magic → 警示,但提示要講開頭空白,不能誤診成空白分隔
+O7f="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE='  :(exclude)package-lock.json' \
+      CODEX_REVIEW_STATE="$STUB2/lg3f" CODEX_REVIEW_LOG="$STUB2/u3f.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: 開頭縮排的規則 → 警示沒命中"           has "沒有排掉任何變更檔案" "$O7f"
+ok "diff: 開頭縮排的規則 → 提示開頭空白"         has "開頭有空白" "$O7f"
+ok "diff: 開頭縮排的規則 → 不誤診成空白分隔"     hasnt "以【換行】分隔" "$O7f"
+# 把預設清單整份抄進來再加 lockfile(註解與 model-routing.md 建議的用法): 預設條目不得產生假警示
+O7g="$(cd "$GR" && PATH="$STUB2:$PATH" CODEX_REVIEW_EXCLUDE="$(sed -n "/^CODEX_REVIEW_EXCLUDE_DEFAULT='/,/'\$/p" "$SCRIPT" | sed "1s/^CODEX_REVIEW_EXCLUDE_DEFAULT='//; \$s/'\$//")"$'\n:(exclude)package-lock.json' \
+      CODEX_REVIEW_STATE="$STUB2/lg3g" CODEX_REVIEW_LOG="$STUB2/u3g.tsv" bash "$SCRIPT" --severity required --base main 2>&1)"
+ok "diff: 抄預設清單＋lockfile → 預設條目不警示"  hasnt "沒有排掉任何變更檔案" "$O7g"
+ok "diff: 抄預設清單＋lockfile → 抄來的清單確實生效" has "dist/out.js" "$O7g"
 
 # git diff 的 stderr 不得混進 payload(2026-10-08 實際送出過一行 CRLF 警告給 codex):
 # 排除清單非空時走 pathspec 那條 git diff,舊寫法用 2>&1 抓輸出。用 eol=lf + CRLF 工作檔讓
