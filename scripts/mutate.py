@@ -618,6 +618,91 @@ def discard_backup(ap: Applied) -> None:
         os.rmdir(os.path.dirname(ap.backup))          # fails (and is ignored) when anything else is inside
 
 
+def pid_alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":                               # os.kill(pid, 0) would TERMINATE the process here
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5       # access denied: it exists; 87 (bad pid): it does not
+        try:
+            code = wintypes.DWORD()
+            return not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259   # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _norm(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def find_stale_backups(paths: set) -> list:
+    """Backups of files we are about to mutate whose writer is gone and whose file still differs.
+
+    A hard kill (taskkill /F, TerminateProcess, kill -9) cannot be caught: the target stays
+    mutated and the only record of the original is the backup folder. Returns
+    [(orig_file, target_path, folder, pid)].
+    """
+    wanted = {_norm(p) for p in paths}
+    root, found = tempfile.gettempdir(), []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return found
+    for name in names:
+        m = re.match(r"^" + re.escape(BACKUP_PREFIX) + r"(\d+)(?:-.*)?$", name)
+        if not m or pid_alive(int(m.group(1))):
+            continue
+        folder = os.path.join(root, name)
+        try:
+            entries = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.endswith(".path.txt"):
+                continue
+            try:
+                with open(os.path.join(folder, entry), "rb") as fh:
+                    lines = fh.read().decode("utf-8", "replace").splitlines()
+            except OSError:
+                continue
+            orig = os.path.join(folder, entry[:-len(".path.txt")] + ".orig")
+            if len(lines) < 2 or _norm(lines[0]) not in wanted or not os.path.isfile(orig):
+                continue
+            try:
+                same = sha256(read_bytes(lines[0])) == lines[1].strip()
+            except OSError:
+                same = False
+            if not same:                              # a file that equals the recorded original needs no repair
+                found.append((orig, lines[0], folder, int(m.group(1))))
+    return found
+
+
+def refuse_on_stale_backups(paths: set) -> bool:
+    stale = find_stale_backups(paths)
+    for orig, target, folder, pid in stale:
+        compare = 'fc /b "%s" "%s"' % (target, orig) if os.name == "nt" else 'cmp "%s" "%s"' % (target, orig)
+        print("mutate: refusing to run: an earlier mutate run (pid %d, no longer running; hard-killed?) left a "
+              "backup for %s\n"
+              "  original bytes: %s\n"
+              "  the file may still contain that run's mutation. Compare:  %s\n"
+              "  if it differs, put the original back (copy the .orig over the file), then delete %s and run again;\n"
+              "  if the file is fine as it is, just delete that folder"
+              % (pid, target, orig, compare, folder), file=sys.stderr)
+    return bool(stale)
+
+
 def restore(ap: Applied) -> None:
     path = ap.mut.path
     try:
@@ -768,6 +853,9 @@ def main(argv: list[str]) -> int:
     except UsageError as exc:
         print("mutate: usage error: %s" % exc, file=sys.stderr)
         return EXIT_USAGE
+
+    if refuse_on_stale_backups({mut.path for mut in muts}):
+        return EXIT_RESTORE
 
     results: list[Result] = []
     originals: dict[str, str] = {}

@@ -478,6 +478,95 @@ class BackupFolderTests(Base):
         self.assertFalse(Path(ap2.backup).parent.exists(), 'an emptied folder is removed')
 
 
+class StaleBackupTests(Base):
+    """A hard kill (taskkill /F, TerminateProcess, kill -9) cannot be caught and leaves the file mutated.
+    The next run must not take that broken file for the original."""
+
+    def dead_pid(self):
+        out = subprocess.run([PY, '-c', 'import os; print(os.getpid())'], capture_output=True).stdout
+        pid = int(out)
+        self.assertFalse(pid_alive(pid))
+        return pid
+
+    def plant(self, pid, orig, target='app.py', name='planted'):
+        folder = self.tmp / ('mutate-backup-%d-%s' % (pid, name))
+        folder.mkdir()
+        stem = folder / ('app.py-' + sha(orig)[:12])
+        (folder / (stem.name + '.orig')).write_bytes(orig)
+        (folder / (stem.name + '.path.txt')).write_bytes((str(self.dir / target) + '\n' + sha(orig) + '\n').encode())
+        return folder / (stem.name + '.orig')
+
+    def project_with_edited_file(self):
+        # the file on disk differs from the original the planted backup remembers
+        self.scripted('open("runs.log", "a").write("x")\nprint("RAN OK")\n', app=b'VALUE = 0\nEXTRA = 5\n')
+
+    def test_hard_killed_run_is_detected_and_the_next_run_refuses_to_start(self):
+        self.scripted('print("RAN OK", flush=True)\nif mutated:\n    open("pid.txt", "w").write(str(os.getpid()))\n'
+                      '    time.sleep(60)\n')
+        p = subprocess.Popen([PY, str(MUTATE), '--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1',
+                              '--cmd', CHECK_CMD, *RAN], cwd=self.dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=dict(os.environ, TMP=str(self.tmp), TEMP=str(self.tmp), TMPDIR=str(self.tmp)))
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not ((self.dir / 'pid.txt').exists() and (self.dir / 'pid.txt').stat().st_size):
+            time.sleep(0.1)
+        child = int(self.read('pid.txt'))
+
+        def reap():                                 # the orphaned test process holds the temp dir as its cwd
+            with contextlib.suppress(OSError):
+                os.kill(child, signal.SIGTERM)
+            deadline = time.monotonic() + 15
+            while pid_alive(child) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            time.sleep(0.5)                         # and so does the shell that was waiting for it
+            p.stdout.close()
+            p.stderr.close()
+        self.addCleanup(reap)
+        p.kill()                                    # TerminateProcess / SIGKILL: no handler, no restore
+        p.wait(timeout=20)
+        self.assertEqual(self.read('app.py'), b'VALUE = 1\n', 'premise: the hard kill left the file mutated')
+        self.assertEqual(len(self.backups()), 1, 'premise: the backup of the original survived')
+
+        r = self.single(find='VALUE = 1', replace='VALUE = 2')           # what the reviewer did: another mutation
+        self.assertEqual(r.rc, 3, r.out + r.err)
+        self.assertEqual(r.verdicts(), [], 'nothing was baselined, mutated or reported GREEN')
+        self.assertNotIn('restored', r.out)
+        self.assertEqual(self.read('app.py'), b'VALUE = 1\n', 'the refusal must not touch the file')
+        orig = [ln.split(': ', 1)[1].strip() for ln in r.err.splitlines() if 'original bytes' in ln]
+        self.assertEqual(len(orig), 1, r.err)
+        self.assertEqual(Path(orig[0]).read_bytes(), VALUE_APP)
+        self.assertIn('fc /b' if os.name == 'nt' else 'cmp', r.err)       # how to compare
+
+        # the way out printed in the message works: put the original back, delete the folder, run again
+        (self.dir / 'app.py').write_bytes(Path(orig[0]).read_bytes())
+        shutil.rmtree(Path(orig[0]).parent)
+        again = self.single(find='VALUE = 0', replace='VALUE = 2')
+        self.assertEqual(again.verdicts(), ['GREEN'], again.out + again.err)
+
+    def test_a_backup_left_by_a_dead_run_for_this_file_blocks_before_anything_runs(self):
+        self.project_with_edited_file()
+        orig = self.plant(self.dead_pid(), b'VALUE = 0\n')
+        r = self.single()
+        self.assertEqual(r.rc, 3, r.out + r.err)
+        self.assertIn(str(orig), r.err)
+        self.assertFalse((self.dir / 'runs.log').exists(), 'not even the baseline may run')
+
+    def test_a_backup_whose_run_is_still_alive_is_not_stale(self):
+        self.project_with_edited_file()
+        self.plant(os.getpid(), b'VALUE = 0\n')                 # this test process is alive
+        r = self.single()
+        self.assertEqual(r.verdicts(), ['GREEN'], r.out + r.err)
+
+    def test_a_backup_for_another_file_is_ignored(self):
+        self.project_with_edited_file()
+        self.plant(self.dead_pid(), b'VALUE = 0\n', target='other.py')
+        self.assertEqual(self.single().verdicts(), ['GREEN'])
+
+    def test_a_backup_that_matches_the_file_as_it_is_now_is_harmless(self):
+        self.project_with_edited_file()
+        self.plant(self.dead_pid(), b'VALUE = 0\nEXTRA = 5\n')    # nothing to repair: the file already equals it
+        self.assertEqual(self.single().verdicts(), ['GREEN'])
+
+
 # --------------------------------------------------------------------------- 8. interrupts
 
 class InterruptTests(Base):
