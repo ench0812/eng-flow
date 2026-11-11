@@ -109,13 +109,16 @@ class Interrupted(BaseException):
 
 # --------------------------------------------------------------------------- signals
 
-_STATE = {"critical": 0, "pending": None}
+_STATE = {"critical": 0, "pending": None, "fired": False}
 
 
 def _on_signal(signum, _frame):
+    if _STATE["fired"]:             # the first interrupt is already unwinding and restoring: a second
+        return                      # signal must not abort that cleanup half way, so it is dropped
     if _STATE["critical"]:          # never abort in the middle of write / restore: defer
         _STATE["pending"] = signum
         return
+    _STATE["fired"] = True
     raise Interrupted(signum)
 
 
@@ -142,7 +145,9 @@ def critical():
         _STATE["critical"] -= 1
         if clean and _STATE["critical"] == 0 and _STATE["pending"] is not None:
             signum, _STATE["pending"] = _STATE["pending"], None
-            raise Interrupted(signum)
+            if not _STATE["fired"]:
+                _STATE["fired"] = True
+                raise Interrupted(signum)
 
 
 # --------------------------------------------------------------------------- runner parsing
@@ -708,6 +713,25 @@ def fmt(res: Result) -> str:
     return line + ("  -- " + res.note if res.note else "")
 
 
+def unrestored(originals: dict, foreign_paths: set) -> list:
+    """Paths whose bytes on disk differ from what they were before the first mutation.
+
+    Files someone else edited during a run are skipped: they cannot be compared (reported separately).
+    """
+    bad = []
+    for path, digest in originals.items():
+        if path in foreign_paths:
+            continue
+        try:
+            now = sha256(read_bytes(path))
+        except OSError as exc:
+            bad.append("%s (cannot be read: %s)" % (path, exc))
+            continue
+        if now != digest:
+            bad.append(path)
+    return bad
+
+
 def main(argv: list[str]) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -758,8 +782,14 @@ def main(argv: list[str]) -> int:
         print("mutate: " + str(exc), file=sys.stderr)
         return EXIT_RESTORE
     except Interrupted as exc:
-        print("mutate: interrupted (signal %d); every touched file was restored before exiting" % exc.signum,
-              file=sys.stderr)
+        bad = unrestored(originals, foreign_paths)
+        if bad:
+            print("mutate: interrupted (signal %d) and NOT everything is back to its pre-run bytes:\n  %s\n"
+                  "  look for the backup under %s (mutate-backup-*) and compare before trusting these files"
+                  % (exc.signum, "\n  ".join(bad), tempfile.gettempdir()), file=sys.stderr)
+            return EXIT_RESTORE
+        print("mutate: interrupted (signal %d); every touched file was restored and checked (SHA-256) "
+              "before exiting" % exc.signum, file=sys.stderr)
         return 128 + exc.signum
     except UsageError as exc:
         print("mutate: usage error: %s" % exc, file=sys.stderr)

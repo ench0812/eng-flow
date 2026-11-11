@@ -11,8 +11,10 @@ Integration tests that need pytest or go skip when the tool is not installed
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -24,6 +26,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +88,14 @@ class Base(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix='mutate-test-')
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
+        # the script's temp dir (backups, pyc prefixes) is private to each test, so one test's
+        # leftovers can never be seen by another and the real temp dir is never touched
+        self._scratch = tempfile.TemporaryDirectory(prefix='mutate-test-tmp-')
+        self.addCleanup(self._scratch.cleanup)
+        self.tmp = Path(self._scratch.name)
+
+    def backups(self):
+        return sorted(p.name for p in self.tmp.glob('mutate-backup-*'))
 
     def write(self, name, data):
         path = self.dir / name
@@ -96,7 +107,7 @@ class Base(unittest.TestCase):
         return (self.dir / name).read_bytes()
 
     def mutate(self, *args, env=None, timeout=180):
-        e = dict(os.environ, **(env or {}))
+        e = dict(os.environ, TMP=str(self.tmp), TEMP=str(self.tmp), TMPDIR=str(self.tmp), **(env or {}))
         return Run(subprocess.run([PY, str(MUTATE), *args], cwd=self.dir, env=e,
                                   capture_output=True, timeout=timeout))
 
@@ -435,7 +446,8 @@ class InterruptTests(Base):
         kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {}
         p = subprocess.Popen([PY, str(MUTATE), '--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1',
                               '--cmd', CHECK_CMD, *RAN], cwd=self.dir, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, **kw)
+                             stderr=subprocess.PIPE,
+                             env=dict(os.environ, TMP=str(self.tmp), TEMP=str(self.tmp), TMPDIR=str(self.tmp)), **kw)
         try:
             deadline = time.monotonic() + 40
             while time.monotonic() < deadline and not ((self.dir / 'pid.txt').exists()
@@ -460,6 +472,74 @@ class InterruptTests(Base):
     @unittest.skipIf(os.name == 'nt', 'SIGINT is disabled for a new process group on Windows; Ctrl+Break covers it')
     def test_sigint_restores_the_file(self):
         self.run_and_interrupt(signal.SIGINT)
+
+
+class DeferredInterruptTests(unittest.TestCase):
+    """The signal handler's bookkeeping, driven directly (no real signal is sent)."""
+
+    def setUp(self):
+        saved = dict(M._STATE)
+        self.addCleanup(lambda: (M._STATE.clear(), M._STATE.update(saved)))
+        M._STATE.update({'critical': 0, 'pending': None, 'fired': False})
+
+    def test_a_signal_inside_critical_is_deferred_until_the_block_exits(self):
+        reached_end = False
+        with self.assertRaises(M.Interrupted) as cm:
+            with M.critical():
+                M._on_signal(signal.SIGINT, None)           # must not raise in here
+                reached_end = True
+        self.assertTrue(reached_end, 'the write/restore inside the block must run to completion')
+        self.assertEqual(cm.exception.signum, signal.SIGINT)
+
+    def test_nested_critical_blocks_raise_only_when_the_outermost_one_exits(self):
+        inner_exited = False
+        with self.assertRaises(M.Interrupted):
+            with M.critical():
+                with M.critical():
+                    M._on_signal(signal.SIGTERM, None)
+                inner_exited = True                            # still inside the outer block: no raise yet
+        self.assertTrue(inner_exited)
+
+    def test_a_signal_outside_critical_raises_at_once(self):
+        with self.assertRaises(M.Interrupted):
+            M._on_signal(signal.SIGTERM, None)
+
+    def test_after_the_first_interrupt_later_signals_are_only_recorded_never_raised(self):
+        with self.assertRaises(M.Interrupted):
+            M._on_signal(signal.SIGINT, None)
+        M._on_signal(signal.SIGTERM, None)                     # the cleanup after the first one must not be aborted
+        with M.critical():
+            M._on_signal(signal.SIGINT, None)
+        # reaching this line means neither a bare signal nor a deferred one raised a second time
+
+
+class InterruptReportTests(Base):
+    """main() must check the bytes before it claims the interrupt left nothing behind."""
+
+    def run_main_with_interrupt(self, leave):
+        self.scripted('print("RAN OK")\n')
+        out, err = io.StringIO(), io.StringIO()
+
+        def interrupted_apply(mut, cwd):
+            (self.dir / 'app.py').write_bytes(leave)
+            raise M.Interrupted(signal.SIGINT)
+
+        with mock.patch.object(M, 'apply_and_test', interrupted_apply), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = M.main(['--file', 'app.py', '--find', 'VALUE = 0', '--replace', 'VALUE = 1', '--cmd', CHECK_CMD,
+                         *RAN, '--cwd', str(self.dir)])
+        return rc, err.getvalue()
+
+    def test_interrupt_with_the_file_restored_says_so_and_exits_128_plus_signum(self):
+        rc, err = self.run_main_with_interrupt(VALUE_APP)
+        self.assertEqual(rc, 128 + signal.SIGINT)
+        self.assertIn('every touched file was restored', err)
+
+    def test_interrupt_that_leaves_the_file_changed_is_not_reported_as_restored(self):
+        rc, err = self.run_main_with_interrupt(b'VALUE = 1\n')
+        self.assertEqual(rc, M.EXIT_RESTORE)
+        self.assertNotIn('every touched file was restored', err)
+        self.assertIn('app.py', err)
 
 
 # --------------------------------------------------------------------------- 9. only the target changes
