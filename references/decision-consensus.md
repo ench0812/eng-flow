@@ -60,9 +60,15 @@ Check authorization from the actual request and session history. A production/se
 does not require another approval if already authorized; models agreeing can never supply missing
 authorization or scope, and business intent or external facts only through the user's own precedent
 (Fable arbitration below). Explicit review-only requests remain read-only.
-Never treat ten minutes of silence as choosing the recommended option, permission to skip an
-issue, or permission to post an issue comment. Issue writes follow the user's existing authorization
-or an explicitly invoked workflow, not the timeout.
+Silence alone authorizes nothing. The single exception is AGENTS.md's 逾時採推薦 (user ruling
+2026-11-17; code is version-tracked, so a wrong choice can be reverted): a purely code-development
+disagreement inside the existing authorization, asked with a recommended option already marked,
+whose question timed out with no answer from the user (a failed, empty or errored question call is
+not a timeout and still waits) — proceed with the recommended option, log
+「逾時採推薦：題目→選項」 in the task log and the report, and revert if the user later overturns it.
+Everything on the reserved list below, requirement/intent questions, skipping an issue and issue
+comments or rulings still wait for the user; issue writes follow the user's existing authorization or
+an explicitly invoked workflow, never the timeout.
 
 ## Fable arbitration before the user (user decisions, 2026-11-10)
 
@@ -111,12 +117,12 @@ Exit `2` means fix the caller.
   - an intent-mapping entry in `~/.claude/habits.md` (an 意圖對照 line) that answers the same kind of
     question. Behaviour-tendency statistics there (for example how often the user takes the
     recommended option) are reference only, never precedent: they would let Fable pick the
-    recommended option for the user, which silence never authorizes;
+    recommended option for the user, which only the 逾時採推薦 timeout above may do;
   - an arbitration record carrying the user's `overturn`, `user_answer` or explicit `user_accepted`.
     Search them with the path pointed at `~/.claude/cache/arbitration` and `glob: "*.json"` (`.gitignore`
     hides `cache/` from a Grep rooted at `~/.claude`; the glob skips the retro's calibration files). An arbitration Fable executed that the user never answered is
-    reference only — silence is not acceptance, and Fable's own rulings must not pile up into "the
-    user's precedent".
+    reference only — silence is not acceptance (a 逾時採推薦 adoption included), and Fable's own
+    rulings must not pile up into "the user's precedent".
   When rulings conflict, the newest user ruling wins, and current AGENTS.md / skill text overrides an
   older remembered ruling. A precedent about an external fact (a deadline, a budget, the peer's
   version) counts only if it still holds for this situation; when that cannot be confirmed, ask the
