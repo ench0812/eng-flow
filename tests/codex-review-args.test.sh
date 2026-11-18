@@ -1124,9 +1124,10 @@ case "$1" in
   login) exit 0 ;;
   --version) [ -n "$FB_VER" ] && echo "codex-cli $FB_VER"; exit 0 ;;
   exec)
-    m=""
-    for a in "$@"; do case "$a" in model=*) m="${a#model=}" ;; esac; done
+    m=""; e=""
+    for a in "$@"; do case "$a" in model=*) m="${a#model=}" ;; model_reasoning_effort=*) e="${a#model_reasoning_effort=}" ;; esac; done
     echo "$m" >> "$FB_LOG"
+    echo "$m/$e" >> "$FB_LOG.eff"   # 實際送出的模型/effort(不只看完成訊息的自述)
     case "$FB_MODE" in
       # 只拒絕呼叫端指名的那一個模型: 同一個模型在某檔是新模型、在另一檔是退路
       # (2026-10-27～28 間 gpt-6.1-terra 曾同時是主模型與退路),glob 表達不了。
@@ -1232,6 +1233,46 @@ ok "計畫/退路: 計畫模型被拒 → 退到計畫專用舊模型" test "$FB
 # 計畫的退路 effort 固定(2026-10-05 裁定 max、2026-10-08 依實測改 high),不沿用計畫 effort
 # (這裡是 required → medium,所以 high 仍能分辨「固定值」與「沿用」)
 ok "計畫/退路: 退路 effort 是 high、不沿用計畫 effort" has "模型=$PLAN_OLD/high" "$FB_OUT"
+
+# --- diff 模式專用映射(2026-11-18 真實 diff 重放＋使用者裁定) ---
+# doc/spec 沿用共用常數(上面整組 fb_run 都是 --doc spec,即對照組);diff 模式整組換成 DIFF_*。
+# 字面值斷言是刻意的: 只用 map 讀預期值的話,常數改錯測試照樣綠;換模型時要同時改這裡。
+DR="$FB/drepo"; mkdir -p "$DR"
+( cd "$DR" && git init -q . && git config user.email t@t.t && git config user.name t \
+  && echo base > a.txt && git add -A && git commit -qm i && git branch -M main && echo changed > a.txt ) >/dev/null 2>&1
+fbd_run() { # $1=severity $2=模式 → 設 FB_OUT/FB_RC/FB_CALLS(diff 模式,--base main)
+  FB_N=$((FB_N+1)); : > "$FB/log$FB_N"
+  FB_OUT="$( cd "$DR" && PATH="$FB:$PATH" FB_MODE="$2" FB_LOG="$FB/log$FB_N" FB_REJECT="${FB_REJECT:-}" \
+    CODEX_REVIEW_STATE="$FB/dstate$FB_N" CODEX_REVIEW_LOG="$FB/usage.tsv" \
+    bash "$SCRIPT" --severity "$1" --base main 2>&1 )"; FB_RC=$?
+  FB_CALLS="$(tr '\n' ' ' < "$FB/log$FB_N" | sed 's/ $//')"
+  FB_SENT="$(tr '\n' ' ' < "$FB/log$FB_N.eff" 2>/dev/null | sed 's/ $//')"
+}
+for row in "critical gpt-6.2-sol medium" "required gpt-6.2-sol medium" "optional gpt-6.2-sol low" \
+           "nit gpt-6.2-sol low" "fyi gpt-6.2-sol low" " gpt-6.2-sol low" "bogus gpt-6.2-sol low"; do
+  set -- $row; [ $# -eq 2 ] && set -- "" "$1" "$2"
+  fbd_run "$1" ok
+  ok "diff/${1:-未指定}: 主模型 $2/$3、只問一次"  test "$FB_CALLS" = "$2"
+  ok "diff/${1:-未指定}: 實際送出 $2/$3"          test "$FB_SENT" = "$2/$3"
+  ok "diff/${1:-未指定}: 完成行模型 $2/$3"        has "模型=$2/$3" "$FB_OUT"
+done
+fbd_run "" ok
+ok "diff/未指定: 警告印出 diff 的 fallback 名稱"  has "fallback gpt-6.2-sol/low" "$FB_OUT"
+# 欄位: 嚴重度 退路模型 退路effort 主模型effort(主模型一律 gpt-6.2-sol)
+for row in "critical gpt-6.1-sol medium medium" "required gpt-6.1-sol medium medium" \
+           "optional gpt-6-luna high low" " gpt-6-luna high low"; do
+  set -- $row; [ $# -eq 4 ] || set -- "" "$1" "$2" "$3"
+  FB_REJECT="gpt-6.2-sol" fbd_run "$1" reject-new
+  ok "diff/${1:-未指定}/退路: rc 0"               test "$FB_RC" -eq 0
+  ok "diff/${1:-未指定}/退路: 先 6.2-sol 再 $2"    test "$FB_CALLS" = "gpt-6.2-sol $2"
+  ok "diff/${1:-未指定}/退路: effort $3"          has "模型=$2/$3" "$FB_OUT"
+  ok "diff/${1:-未指定}/退路: 實際送出兩次的模型/effort" test "$FB_SENT" = "gpt-6.2-sol/$4 $2/$3"
+  ok "diff/${1:-未指定}/退路: 完成行標出已退回"     has "已退回舊模型" "$FB_OUT"
+done
+# 對照: 同一個嚴重度在 doc/spec 仍走共用常數(6.2 在 doc 上未測)
+fb_run required 0.160.0 ok spec
+ok "diff/對照: spec 的 required 仍是共用常數"     test "$FB_CALLS" = "$REQ_NEW"
+ok "diff/對照: 共用常數不是 6.2(doc 未測不得連帶換)" test "$REQ_NEW" != "gpt-6.2-sol"
 rm -rf "$FB"
 
 rm -rf "$STUB"

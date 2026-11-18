@@ -25,11 +25,32 @@
 #   複查深度應與風險相稱。嚴重度是【輸入】——
 #     diff 模式: 第一輪五軸 review 對本次變更判定的最高原始嚴重度
 #     doc  模式: Claude 對該設計/計畫的風險自評(規則見 mao-brainstorm / mao-plan skill)
-#   映射(嚴重度用語同 mao-review taxonomy;2026-10-27 依合成測資改用 gpt-6.1-terra,2026-10-28
-#   依真實 diff 重放改回,見下方【2026-10-28 真實 diff 重放】):
+#   映射分兩張表(2026-11-18 起;嚴重度用語同 mao-review taxonomy):
+#   diff 模式(DIFF_* 常數,見下方【2026-11-18 真實 diff 重放(gpt-6.2)】):
+#     critical          -> gpt-6.2-sol   / medium 退路 gpt-6.1-sol   / medium
+#     required          -> gpt-6.2-sol   / medium 退路 gpt-6.1-sol   / medium
+#     optional/nit/fyi  -> gpt-6.2-sol   / low    退路 gpt-6-luna    / high
+#     未傳/未知         -> gpt-6.2-sol   / low    退路 gpt-6-luna    / high
+#   doc 模式 spec(共用常數;6.2 在 doc 上【未測】,維持 2026-10-28 的映射):
 #     critical          -> gpt-6.1-sol   / medium 退路 gpt-6.1-terra / medium
 #     required          -> gpt-6.1-sol   / medium 退路 gpt-6.1-terra / medium
 #     optional/nit/fyi  -> gpt-6-luna    / high   退路 gpt-6.1-terra / low
+#
+#   【2026-11-18 真實 diff 重放(gpt-6.2)】codex-cli 0.169.0,同 8 題(標準答案 15 條),凍結 eng-flow
+#   1.49.2 腳本、只差模型,四組各 1 次、拉丁方輪替、兩位評分者盲評(2 題重疊,無 >0.5 分歧);
+#   預登錄與數據在 C:/Users/markh/codex-effort-results/2026-11-18-replay-62/:
+#     gpt-6.1-sol/medium  召回 11    額外成立 3   不成立 0  中位 60 秒  未快取 input 中位 7.4 萬
+#     gpt-6.2-sol/medium  召回 13    額外成立 16  不成立 2  中位 87 秒  未快取 input 中位 7.8 萬
+#     gpt-6.2-sol/low     召回 10    額外成立 9   不成立 5  中位 55 秒  未快取 input 中位 6.1 萬
+#     gpt-6-luna/high     召回 3.5   額外成立 4   不成立 1  中位 95 秒  未快取 input 中位 7.8 萬
+#   預登錄判定兩項都是「維持」:6.2-sol/medium 只卡耗時(1.45 倍 > 1.25 倍門檻),6.2-sol/low 只卡
+#   不成立數(5 > 1+2;5 條都是規格已接受的設計窗口或防禦性建議)。使用者 2026-11-18 裁定放寬兩個
+#   次要門檻:critical／required 換 6.2-sol/medium、optional 與未指定換 6.2-sol/low。critical 跟著換
+#   推翻了預登錄「critical 不改」的規則,是同一次使用者裁定(critical 沒有獨立測資,與 required 同批推論)。
+#   6.2 第一輪漏掉 1 條 6.1 抓到的 GT,依預登錄補跑第二輪 A/B:兩輪平均召回 B 12.5 對 A 11、
+#   A 抓到而 B 漏掉的 GT 0 條、額外成立 17 對 3.5、不成立 1.5 對 0,兩輪合計耗時 1.32 倍 → 確認切換。
+#   luna/high 在真實 diff 上只有 23% 召回,這是它第一次在真實 diff 上測,所以退路只當「有總比沒有好」。
+#   doc/spec 與 plan 沒測,維持原映射;codex-decide 另有映射,也未測、未改。
 #
 #   【2026-10-28 真實 diff 重放】(使用者原則:換不換以我們的實際應用場景實測為準,合成測資不算)
 #   10-08～10-26 間由 sol 完成、finding 後來被採納並修掉的 8 次真實複查(Go 2、TS 3、PHP、Python、
@@ -159,6 +180,17 @@ FALLBACK_MODEL="gpt-6-luna";   FALLBACK_EFFORT="high"   # --severity 未傳/未�
 # 計畫文件(doc 模式 --kind plan)一律用 astra,不看嚴重度選模型——使用者 2026-09-23 裁定:
 # astra 留給計畫階段,輔助完善計畫的全面性。effort 仍隨嚴重度(見 plan_effort_for)。
 PLAN_MODEL="gpt-6-astra"
+# diff 模式專用(2026-11-18 真實 diff 重放＋使用者裁定,見檔頭)。共用常數(上面的主模型與下方的
+# *_LEGACY_*)只剩 doc/spec 使用:
+# 6.2 在 doc 上沒有測資,不可連帶換掉。diff 模式在下方嚴重度分派前把共用常數換成這組。
+DIFF_CRIT_MODEL="gpt-6.2-sol";     DIFF_CRIT_EFFORT="medium"
+DIFF_REQ_MODEL="gpt-6.2-sol";      DIFF_REQ_EFFORT="medium"
+DIFF_LOW_MODEL="gpt-6.2-sol";      DIFF_LOW_EFFORT="low"
+DIFF_FALLBACK_MODEL="gpt-6.2-sol"; DIFF_FALLBACK_EFFORT="low"
+DIFF_CRIT_LEGACY_MODEL="gpt-6.1-sol";    DIFF_CRIT_LEGACY_EFFORT="medium"
+DIFF_REQ_LEGACY_MODEL="gpt-6.1-sol";     DIFF_REQ_LEGACY_EFFORT="medium"
+DIFF_LOW_LEGACY_MODEL="gpt-6-luna";      DIFF_LOW_LEGACY_EFFORT="high"
+DIFF_FALLBACK_LEGACY_MODEL="gpt-6-luna"; DIFF_FALLBACK_LEGACY_EFFORT="high"
 
 # --- 各檔位的退路模型(2026-09-23 新增) ---
 # 為什麼要有: 伺服器會以同一句 400「not supported when using Codex with a ChatGPT account」
@@ -611,6 +643,17 @@ if [ "$DOC_MODE" -eq 1 ]; then
 fi
 
 # --- 依來源嚴重度決定模型/effort ---
+# diff 模式改用 DIFF_* 映射(見常數段);放在分派前整組替換,警告訊息印出的 fallback 名稱才會一致。
+if [ "$DOC_MODE" -eq 0 ]; then
+  CRIT_MODEL="$DIFF_CRIT_MODEL";         CRIT_EFFORT="$DIFF_CRIT_EFFORT"
+  REQ_MODEL="$DIFF_REQ_MODEL";           REQ_EFFORT="$DIFF_REQ_EFFORT"
+  LOW_MODEL="$DIFF_LOW_MODEL";           LOW_EFFORT="$DIFF_LOW_EFFORT"
+  FALLBACK_MODEL="$DIFF_FALLBACK_MODEL"; FALLBACK_EFFORT="$DIFF_FALLBACK_EFFORT"
+  CRIT_LEGACY_MODEL="$DIFF_CRIT_LEGACY_MODEL";         CRIT_LEGACY_EFFORT="$DIFF_CRIT_LEGACY_EFFORT"
+  REQ_LEGACY_MODEL="$DIFF_REQ_LEGACY_MODEL";           REQ_LEGACY_EFFORT="$DIFF_REQ_LEGACY_EFFORT"
+  LOW_LEGACY_MODEL="$DIFF_LOW_LEGACY_MODEL";           LOW_LEGACY_EFFORT="$DIFF_LOW_LEGACY_EFFORT"
+  FALLBACK_LEGACY_MODEL="$DIFF_FALLBACK_LEGACY_MODEL"; FALLBACK_LEGACY_EFFORT="$DIFF_FALLBACK_LEGACY_EFFORT"
+fi
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
   critical)         MODEL="$CRIT_MODEL"; EFFORT="$CRIT_EFFORT"; SEV_SHOWN="critical"
                     LEGACY_MODEL="$CRIT_LEGACY_MODEL"; LEGACY_EFFORT="$CRIT_LEGACY_EFFORT" ;;

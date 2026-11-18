@@ -133,7 +133,20 @@ Fable 5.2 的 input／output 單價是 Opus 的 2 倍（5.1 是 2.5 倍），cac
 
 **Zero-verification (`OK_NOVERIFY`, added 2026-09-07).** A consultation can finish cleanly — exit 0, complete formatting, convergence question attached, script printing `完成(...)` — while codex read **no files at all**, because the tool never crashed: it hit a path failure, gave up, and answered the whole review from inference. `stderr` stays empty in that case, so the existing `exec_command failed` detector cannot see it. The script now judges from the reply itself: findings labelled `【推論】` with **zero** findings labelled `【已讀】` sets the telemetry status to `OK_NOVERIFY` and prints a warning. It deliberately does **not** escalate to FAILED — inference-only findings can still be real (that measured run surfaced two genuine defects) — but the caller must treat that output as a **set of hypotheses, not conclusions**, verify each one before acting, and **must not tell the user codex review is complete**. In doc mode the same condition prints a softer note instead: a spec/plan consultation legitimately has nothing to read. Known gap, left in on purpose: "read nothing **and** found nothing" (`無重大遺漏`) has both counts at zero and does not fire — that is the fail-quiet side of the deliberate no-false-alarm design. **`OK_NOVERIFY` has two sources** (second added 2026-10-14): (1) the content-based rule above; (2) a structural one — every `command_execution` item in the `--json` event stream failed to launch (`status=failed`, `exit_code=-1`, output starting with `Failed to create unified exec process` / `CreateProcess…failed`), i.e. codex's shell never started once. For (2) the script prints the same `[codex-review] 警示: 本輪【零查證】` line (the caller reads one contract, in doc mode too) and the `完成(…)` line carries `警示=codex shell 啟動失敗 N 次…本輪結論全為推論`. If only some shell calls failed to launch, telemetry stays `OK` but the `完成(…)` line still carries `警示=…部分結論為推論`. The `codex-decide.sh` counterpart is stricter — any launch failure is exit `3` (see `references/decision-consensus.md`).
 
-Severity is an **input decided by the source** — never re-triaged by a weaker model. When in doubt, over-estimate — under-calling sends work that deserves deep review to a cheaper tier. Model mapping (all modes, revised 2026-08-07 to cut token spend):
+Severity is an **input decided by the source** — never re-triaged by a weaker model. When in doubt, over-estimate — under-calling sends work that deserves deep review to a cheaper tier. Since 2026-11-18 there are **two mapping tables**: diff mode has its own (`DIFF_*` constants in `codex-review.sh`), doc mode keeps the shared one below, because the gpt-6.2 measurement covered diffs only.
+
+**Diff mode (2026-11-18, real-diff replay + user decision):**
+
+| Source severity | Codex model / effort | Legacy fallback |
+|---------------------|----------------------|-----------------|
+| Critical | `gpt-6.2-sol` / medium | `gpt-6.1-sol` / medium |
+| Required | `gpt-6.2-sol` / medium | `gpt-6.1-sol` / medium |
+| Optional / Nit / FYI | `gpt-6.2-sol` / low | `gpt-6-luna` / high |
+| (unspecified) | fallback `gpt-6.2-sol` / low | `gpt-6-luna` / high |
+
+**2026-11-18 diff mapping.** `gpt-6.2-sol` and `gpt-6.2-astra` appeared in the codex 0.169.0 catalog on 2026-11-17. The same eight real diffs as the 10-28 replay (15 adopted findings) were replayed through one frozen copy of eng-flow 1.49.2's `codex-review.sh` differing only in the model, four arms, once each, Latin-square order, two blind graders with two overlapping cases (no disagreement above 0.5). Pre-registration and data: `C:/Users/markh/codex-effort-results/2026-11-18-replay-62/`. Recall /15, extra findings confirmed valid / invalid on reading, median wall time, median uncached input: 6.1-sol/medium 11, 3/0, 60 s, 74k; 6.2-sol/medium 13, 16/2, 87 s, 78k; 6.2-sol/low 10, 9/5, 55 s, 61k; 6-luna/high 3.5, 4/1, 95 s, 78k. Both pre-registered verdicts were "keep", each failing one secondary gate only: 6.2-sol/medium on wall time (1.45× against a 1.25× gate), 6.2-sol/low on invalid extras (5 against luna's 1+2; all five were reasoned design disputes such as a residual window the spec already accepts, none fabricated). The user waived both secondary gates on 2026-11-18: Critical and Required move to 6.2-sol/medium, Optional and unspecified move to 6.2-sol/low. Moving Critical overrides the pre-registered "Critical stays" rule and is part of the same user decision (Critical has no separate fixture and is inferred from the same run). A second A/B replicate was run because 6.2 missed one ground truth that 6.1 caught in round one (the pre-registered borderline rule): over both rounds B averaged 12.5 against A's 11, no ground truth was caught by A and missed by B, extras confirmed valid averaged 17 against 3.5 (invalid 1.5 against 0), and wall time across both rounds was 1.32× — switch confirmed. Luna/high recalled only 23% on its first real-diff measurement, so as a fallback it is "better than no review", not an equivalent. The 6.2 base instructions write locations as Markdown links with absolute paths instead of plain `path:line`; the `--json` event fields the zero-verification detector depends on (`command_execution`, `aggregated_output`, `exit_code`) are unchanged in 0.169.0.
+
+**Doc mode** (spec by severity; plan always astra) — gpt-6.2 **unmeasured** here, mapping unchanged since 2026-10-28:
 
 | Source severity | Codex model / effort | Legacy fallback |
 |---------------------|----------------------|-----------------|
@@ -195,10 +208,13 @@ Cost is near-parity (1.04x) because astra needs fewer round-trips and reads the 
 | `gpt-6-sol` | medium, high ‡ | not established |
 | `gpt-6-luna` | high, max ‡ (high measured 2026-10-08) | not established |
 | `gpt-6.1-sol` | low, medium, high, xhigh, max, ultra § | low § |
+| `gpt-6.2-sol` | low, medium, high, xhigh, max, ultra ¶ | low ¶ |
+| `gpt-6.2-astra` | low, medium, high, xhigh, max, ultra ¶ | low ¶ |
 
 ‡ 2026-09-23: only the levels listed were actually run (each against the full review fixture, codex 0.156.1). Other levels were **not** probed — third-party write-ups claim Luna tops out at `max` and Sol offers `ultra`, but that is not verified here. (The 0.160.0 catalog read on 2026-10-05 lists `gpt-6-sol` as low…ultra and `gpt-6-luna` as low…max.)
 
 § 2026-10-05: read from the `models_cache.json` catalog fetched by codex 0.160.0 (`supported_reasoning_levels` / `default_reasoning_level`), not run level by level.
+¶ 2026-11-18: read from the codex 0.169.0 catalog; only 6.2-sol low and medium were actually run (real-diff replay). Context window per catalog: 6.2-sol 500k, 6.2-astra 272k.
 
 † The astra row is **server-probed, not catalog-read** (2026-09-07): each value was sent in a minimal `codex exec` call and none was rejected. That proves the server accepts the parameter, *not* that each level behaves distinctly — `ultra` in particular was never exercised on a real review here, so treat it as untested rather than endorsed. The five levels below it were each run against the full review fixture (see the recall table above).
 
