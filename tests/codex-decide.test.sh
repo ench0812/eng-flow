@@ -110,8 +110,9 @@ if [ -n "\${EVENTS:-}" ]; then
   if [ -n "\${REJECT:-}" ] && [ "\$model" = "\$REJECT" ]; then
     # STUB_STOP_ON_REJECT=1 → 被拒前已寫出「裁定:停下」(驗證退回舊模型不會蓋掉安全旗標)
     if [ -n "\${STUB_STOP_ON_REJECT:-}" ] && [ -n "\$o" ]; then printf '裁定:停下\n信心:高\n依據:已讀\n理由:x\n異議:無\n' > "\$o"; fi
-    if [ -n "\${TURN_FAILED:-}" ]; then printf '{"type":"turn.failed","error":{"message":"model_not_found: %s"}}\n' "\$model"
-    else printf '{"type":"error","message":"model_not_found: %s"}\n' "\$model"; fi
+    # REJECT_MSG 可換成其他「模型不可用」形態(例如容量不足);未設時為 model_not_found
+    if [ -n "\${TURN_FAILED:-}" ]; then printf '{"type":"turn.failed","error":{"message":"%s"}}\n' "\${REJECT_MSG:-model_not_found: \$model}"
+    else printf '{"type":"error","message":"%s"}\n' "\${REJECT_MSG:-model_not_found: \$model}"; fi
     exit 1
   fi
   # 真 codex 的 -o 檔最後沒有結尾換行(NO_EOL=1 時照做);NO_O=1 → 完全不寫 -o 檔(exit 0 但沒有最終訊息)
@@ -164,7 +165,7 @@ export OS=Windows_NT
 mkdir -p "$T/binlinux"
 printf '#!/usr/bin/env bash\necho Linux\n' > "$T/binlinux/uname"; chmod +x "$T/binlinux/uname"
 
-for row in "critical gpt-6.1-sol medium" "required gpt-6.1-sol medium" "optional gpt-6-luna high" "nit gpt-6-luna high" "bogus gpt-6.1-sol medium"; do
+for row in "critical gpt-6.2-sol medium" "required gpt-6.2-sol medium" "optional gpt-6.2-sol low" "nit gpt-6.2-sol low" "fyi gpt-6.2-sol low" "bogus gpt-6.2-sol medium"; do
   set -- $row
   run "$1"; rc=$?
   ok "$1: 共識成立 rc=0"            test "$rc" -eq 0
@@ -178,7 +179,8 @@ for row in "critical gpt-6.1-sol medium" "required gpt-6.1-sol medium" "optional
 done
 
 # 執行期退回: 主模型被拒 → 用該檔的舊模型與其 effort 重問一次,兩次呼叫都帶 memories off
-for row in "required gpt-6.1-sol gpt-6-luna high" "optional gpt-6-luna gpt-6-astra low"; do
+for row in "critical gpt-6.2-sol gpt-6.1-sol medium" "required gpt-6.2-sol gpt-6.1-sol medium" \
+           "optional gpt-6.2-sol gpt-6-luna high" "bogus gpt-6.2-sol gpt-6.1-sol medium"; do
   set -- $row
   REJECT="$2" run "$1"; rc=$?
   ok "$1 退回: rc=0"                       test "$rc" -eq 0
@@ -306,9 +308,9 @@ lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n裁定:B' lf_run
 ok "兩個裁定行(A、B) → exit 3"                  test "$lf_rc" -eq 3
 ok "兩個裁定行 → 不印共識成立"                   lf_out_lacks '共識成立'
 # 實際會發生的退回路徑: 主模型被拒(不寫輸出)→ 退回舊模型重問 → 舊模型回停下。守的是退回後的那次檢查
-lf_item "PROBE-OK" 0 completed | lf_events; REJECT=gpt-6.1-sol STUB_VERDICT=停下 lf_run
+lf_item "PROBE-OK" 0 completed | lf_events; REJECT=gpt-6.2-sol STUB_VERDICT=停下 lf_run
 ok "退回舊模型後回停下 → exit 5"                 test "$lf_rc" -eq 5
-ok "退回舊模型後回停下 → 確實重問過舊模型"       test "$(models)" = "gpt-6.1-sol gpt-6-luna"
+ok "退回舊模型後回停下 → 確實重問過舊模型"       test "$(models)" = "gpt-6.2-sol gpt-6.1-sol"
 ok "退回舊模型後回停下 → 不是無共識"             lf_out_lacks '無共識'
 # 格式偏差的停下(粗體、清單符號)也要攔下: 漏判會讓安全旗標進仲裁,誤判只會更保守
 lf_item "PROBE-OK" 0 completed | lf_events; STUB_VERDICT=$'A\n**裁定:停下**' lf_run
@@ -342,9 +344,9 @@ ok "長回覆、停下在最前面 → exit 5"               test "$lf_rc" -eq 5
 lf_item "PROBE-OK" 0 completed | lf_events; LC_ALL=C STUB_VERDICT=$'A\n裁定：停下' lf_run
 ok "C locale＋全形冒號的停下 → exit 5"           test "$lf_rc" -eq 5
 # 防禦性情境(真 codex 被 model_not_found 拒絕時通常不會寫出輸出): 被拒前已寫出停下 → 不得退回重問把它蓋掉
-lf_item "PROBE-OK" 0 completed | lf_events; REJECT=gpt-6.1-sol STUB_STOP_ON_REJECT=1 lf_run
+lf_item "PROBE-OK" 0 completed | lf_events; REJECT=gpt-6.2-sol STUB_STOP_ON_REJECT=1 lf_run
 ok "停下＋模型不可用 → 仍是 exit 5"              test "$lf_rc" -eq 5
-ok "停下＋模型不可用 → 不退回舊模型重問"         test "$(models)" = "gpt-6.1-sol"
+ok "停下＋模型不可用 → 不退回舊模型重問"         test "$(models)" = "gpt-6.2-sol"
 # 對照: 同樣非零結束、裁定不是停下 → 照舊 FAILED(1),證明 STUB_RC 確實讓 codex 非零結束
 lf_item "PROBE-OK" 0 completed | lf_events; STUB_RC=1 lf_run
 ok "對照: 非零結束＋裁定 A → exit 1"             test "$lf_rc" -eq 1
@@ -431,30 +433,34 @@ JSON_ERR="You've hit your usage limit. Upgrade to Pro" lf_run
 ok "額度被擋只在 stdout error 事件 → exit 4"       test "$lf_rc" -eq 4
 ok "額度被擋只在 stdout error 事件 → RATE_LIMITED"  lf_out_has 'RATE_LIMITED'
 # 模型不可用 → 退回舊模型重問一次(先問主模型再問退路,最後共識成立)
-REJECT=gpt-6.1-sol lf_run
-ok "模型不可用只在 stdout error 事件 → 退回舊模型"  test "$(models)" = "gpt-6.1-sol gpt-6-luna"
+REJECT=gpt-6.2-sol lf_run
+ok "模型不可用只在 stdout error 事件 → 退回舊模型"  test "$(models)" = "gpt-6.2-sol gpt-6.1-sol"
 ok "模型不可用只在 stdout error 事件 → 退回後共識"  lf_agreed
 # turn.failed 事件(error.message,沒有獨立的 error 事件)也要併入(2026-10-14 A 層審查):
 # 否則只有 turn.failed 帶額度訊息時會被分成 FAILED(exit 1)而不是 RATE_LIMITED(exit 4)
 TURN_FAILED=1 JSON_ERR="You've hit your usage limit. Upgrade to Pro" lf_run
 ok "額度被擋只在 turn.failed → exit 4"             test "$lf_rc" -eq 4
 ok "額度被擋只在 turn.failed → RATE_LIMITED"        lf_out_has 'RATE_LIMITED'
-TURN_FAILED=1 REJECT=gpt-6.1-sol lf_run
-ok "模型不可用只在 turn.failed → 退回舊模型"        test "$(models)" = "gpt-6.1-sol gpt-6-luna"
+TURN_FAILED=1 REJECT=gpt-6.2-sol lf_run
+ok "模型不可用只在 turn.failed → 退回舊模型"        test "$(models)" = "gpt-6.2-sol gpt-6.1-sol"
 ok "模型不可用只在 turn.failed → 退回後共識"        lf_agreed
+# 容量不足(2026-10-27 terra 發布隔天實際收到的形狀)也算模型不可用 → 退回舊模型
+TURN_FAILED=1 REJECT=gpt-6.2-sol REJECT_MSG="Selected model is at capacity. Please try a different model." lf_run
+ok "容量不足只在 turn.failed → 退回舊模型"          test "$(models)" = "gpt-6.2-sol gpt-6.1-sol"
+ok "容量不足只在 turn.failed → 退回後共識"          lf_agreed
 # 一般失敗(不是額度、不是模型不可用) → FAILED exit 1,不退回
 JSON_ERR=boom lf_run
 ok "一般 error 事件 → FAILED exit 1"                test "$lf_rc" -eq 1 -a "$(grep -c 'FAILED:' "$T/out.txt")" -eq 1
-ok "一般 error 事件 → 不重問(只呼叫一次)"           test "$(models)" = "gpt-6.1-sol"
+ok "一般 error 事件 → 不重問(只呼叫一次)"           test "$(models)" = "gpt-6.2-sol"
 # 只併 error／turn.failed 事件行,不併整份 JSONL: agent_message 引用額度字樣或 model_not_found
 # 都不得把一般失敗誤判成 RATE_LIMITED／觸發舊模型退回(模型回覆內容不能帶進判定)
 { lf_item "PROBE-OK" 0 completed
   echo '{"type":"item.completed","item":{"id":"item_8","type":"agent_message","text":"You'\''ve hit your usage limit. Upgrade to Pro"}}'
-  echo '{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"model_not_found: gpt-6.1-sol"}}'; } | lf_events
+  echo '{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"model_not_found: gpt-6.2-sol"}}'; } | lf_events
 JSON_ERR=boom lf_run
 ok "agent_message 引用字樣 + 一般失敗 → 仍是 FAILED exit 1" test "$lf_rc" -eq 1 -a "$(grep -c 'FAILED:' "$T/out.txt")" -eq 1
 ok "agent_message 引用字樣 → 不得判成 RATE_LIMITED"   lf_out_lacks 'RATE_LIMITED'
-ok "agent_message 引用 model_not_found → 不得退回舊模型" test "$(models)" = "gpt-6.1-sol"
+ok "agent_message 引用 model_not_found → 不得退回舊模型" test "$(models)" = "gpt-6.2-sol"
 
 # 守門: stdout 是 JSONL、-o 檔沒寫出、codex exit 0 → FAILED exit 1。不是把 JSONL 當裁定解析
 # (那會變成「缺少契約行」的 exit 3,看起來像模型沒照格式而不是諮詢根本沒拿到結果)

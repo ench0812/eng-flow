@@ -61,19 +61,24 @@ if ! grep -qE '^##[[:space:]]*安全與可逆性聲明' "$QUESTION" 2>/dev/null;
   exit 2
 fi
 
-# 映射與退路和 codex-review.sh 同一套(模型 2026-10-05 使用者裁定;effort 2026-10-08 依實測調整:
-# required low→medium、luna max→high。依據見該檔 header 的【2026-10-08 實測】)。
-# 同日使用者裁定 gpt-5.6 全面退出(最低 gpt-6):optional 退路改 gpt-6-astra/low。
-# 退路 = 伺服器以「模型不可用」拒絕主模型(帳號 rollout 未輪到、模型下架)時改用的模型。
+# (歷史)映射與退路原和 codex-review.sh 同一套(模型 2026-10-05 使用者裁定;effort 2026-10-08 依實測
+# 調整:required low→medium、luna max→high。依據見該檔 header 的【2026-10-08 實測】)。
+# 同日使用者裁定 gpt-5.6 全面退出(最低 gpt-6):optional 退路當時改 gpt-6-astra/low。
+# 退路 = 伺服器以「模型不可用」拒絕主模型(帳號 rollout 未輪到、模型下架、容量不足)時改用的模型。
 # 環境一律保持 codex client 最新版(2026-10-08 使用者裁定),不做 client 版本判斷。
+# 2026-11-18 使用者裁定直接改用 gpt-6.2-sol,對齊 codex-review.sh 的 diff 映射(DIFF_* 常數):
+# 裁決品質沒有實測,改由日常使用觀察。主模型被拒時退回原本的 gpt-6.1-sol/medium 或 luna/high。
+# 未知 severity 仍走 required 檔位(與 codex-review 的 low 不同):這裡的結果決定能否逕行,寧深勿淺。
 case "$(printf '%s' "$SEVERITY" | tr '[:upper:]' '[:lower:]')" in
-  critical)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="high" ;;
-  required)         MODEL="gpt-6.1-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="high" ;;
-  optional|nit|fyi) MODEL="gpt-6-luna";   EFFORT="high";   LEGACY_MODEL="gpt-6-astra";   LEGACY_EFFORT="low" ;;
+  critical)         MODEL="gpt-6.2-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6.1-sol";   LEGACY_EFFORT="medium" ;;
+  required)         MODEL="gpt-6.2-sol";  EFFORT="medium"; LEGACY_MODEL="gpt-6.1-sol";   LEGACY_EFFORT="medium" ;;
+  optional|nit|fyi) MODEL="gpt-6.2-sol";  EFFORT="low";    LEGACY_MODEL="gpt-6-luna";    LEGACY_EFFORT="high" ;;
   *) echo "[codex-decide] 警告: 未知 severity '$SEVERITY',用 required 檔位。" >&2
-     MODEL="gpt-6.1-sol"; EFFORT="medium"; LEGACY_MODEL="gpt-6-luna"; LEGACY_EFFORT="high" ;;
+     MODEL="gpt-6.2-sol"; EFFORT="medium"; LEGACY_MODEL="gpt-6.1-sol"; LEGACY_EFFORT="medium" ;;
 esac
-MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access"
+# 「Selected model is at capacity」2026-11-18 自 codex-review.sh 補齊(該檔 2026-10-27 起已收):
+# 主模型換成剛上架的 gpt-6.2-sol,新模型發布初期的容量拒絕正是 terra 當時出事的形狀。
+MODEL_UNAVAILABLE_PAT="not supported when using Codex with a ChatGPT account|minimal_client_version|model_not_found|does not exist or you do not have access|Selected model is at capacity"
 USED_LEGACY=0
 
 CODEX_BIN=""
