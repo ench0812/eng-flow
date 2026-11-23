@@ -42,6 +42,12 @@ fire_tr(){ # fire_tr <cwd> <session> <transcript>
 }
 silent(){ [ -z "$(fire "$1" "$2")" ] && ok "$3" || ng "$3" "預期靜默，實際有輸出"; }
 warns(){ [ -n "$(fire "$1" "$2")" ] && ok "$3" || ng "$3" "預期有警告，實際靜默"; }
+# 逐字比對一筆 repo 條目（"  - <頂層>" 接換行）：子字串或 basename 比對分不出外層與巢狀 repo
+# （外層路徑是內層的前綴、pgs-inner 也出現在 pgs-inner/deep 裡）。輸出是 JSON，先解碼；
+# Windows 的 jq 輸出 CRLF，先去掉 \r。
+ctx_of(){ local c; c="$(printf '%s' "$1" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)"; printf '%s\n' "${c//$'\r'/}"; }
+has_entry(){ case "$(ctx_of "$1")" in *"  - $2"$'\n'*) return 0 ;; esac; return 1; }
+in_auto_entry(){ local a; a="$(ctx_of "$1")"; a="${a%%要你先問使用者*}"; case "$a" in *"  - $2"$'\n'*) return 0 ;; esac; return 1; }
 
 git_q(){ git -C "$1" -c user.email=t@t -c user.name=t -c commit.gpgsign=false "${@:2}"; }
 
@@ -231,6 +237,22 @@ td_round(){ # td_round <fixture 根> <標籤>
 }
 td_round "$TROOT" home
 td_round "$SANDBOX/td" sandbox
+# Linux 上 TMPDIR 含字面反斜線（codex 第三輪 Required）：TMPDIR 與 repo 頂層要用同一套分隔符規則。
+# `cache\run` 底下的 repo 要排除；`cache/run`（另一個目錄）底下的 repo 不得被它吞掉。fixture 放在
+# $HOME 底下（/tmp 是寫死的臨時根，放那裡證明不了 TMPDIR 規則）。Windows 檔名不能含反斜線，記 SKIP。
+case "${OSTYPE:-}" in
+  msys*|cygwin*) sk "TMPDIR 含反斜線（Windows 檔名不能含反斜線）" ;;
+  *)
+    BSL=$'\\'; TDB="$TROOT/cache${BSL}run"
+    git init -q -b main "$TDB/repo"; commit1 "$TDB/repo" "under backslash tmpdir"
+    git init -q -b main "$TROOT/cache/run/repo2"; commit1 "$TROOT/cache/run/repo2" "under slash dir"
+    o_tb="$(jq -cn --arg c "$TDB/repo" '{session_id:"s_tmpdir_bs1", cwd:$c}' \
+      | TMPDIR="$TDB" GIT_GUARD_STAMP_DIR="$SANDBOX/stamps" bash "$HOOK" 2>/dev/null)"
+    [ -z "$o_tb" ] && ok "TMPDIR=cache\\run：底下的 repo 不報" || ng "TMPDIR=cache\\run：底下的 repo 不報" "仍報出"
+    o_ts="$(jq -cn --arg c "$TROOT/cache/run/repo2" '{session_id:"s_tmpdir_bs2", cwd:$c}' \
+      | TMPDIR="$TDB" GIT_GUARD_STAMP_DIR="$SANDBOX/stamps" bash "$HOOK" 2>/dev/null)"
+    [ -n "$o_ts" ] && ok "TMPDIR=cache\\run 不得吞掉 cache/run 底下的 repo" || ng "TMPDIR=cache\\run 不得吞掉 cache/run 底下的 repo" "被當成臨時目錄而靜默" ;;
+esac
 # UNC 的 server／share 根也不採用（主要為了標記檔不寫到網路路徑：實測一次 53 秒，超過 timeout）。
 # 這條沒有測試：要有一個放在 UNC 上的 repo，前綴比對的差異才驗得出來。
 
@@ -805,11 +827,14 @@ jq -cn --arg c "$SANDBOX" --arg f "$SANDBOX/nowhere/y"$'\n'"1"$'\t'"$INJW/s.txt"
 out_injw="$(fire_tr "$SANDBOX" s_inject_w "$TR_INJW")"
 in_auto "$out_injw" "$INJW" && ng "Write 路徑內嵌換行的第二段不得拿到寫入證據" "進了 auto 桶" || ok "Write 路徑內嵌換行的第二段不得拿到寫入證據"
 
-echo "== 唯讀路徑的處理順序與舊版相同（codex 第三、四輪）=="
-# add_repo 的前綴快取讓處理順序有意義：父 repo 的路徑先到，巢狀 repo 的路徑就被當成父 repo 的
-# 而跳過。舊版唯讀批依【編碼後的 token 值】排序再反跳脫。巢狀 repo outer/z 在 transcript 裡寫成
-# z：編碼後 "\" 排在 "c" 前面（巢狀 repo 先處理而被找到），解碼後 "z" 排在 "c" 後面
-# （父 repo 先被快取、巢狀 repo 被吃掉）。以 LC_ALL=C 執行，排序結果與平台 locale 無關。
+echo "== 唯讀路徑的處理順序不影響巢狀 repo 的歸屬（codex 第三、四輪；巢狀修正後改寫）=="
+# 1.51.2 以前 add_repo 的前綴快取讓處理順序有意義：父 repo 的路徑先到，巢狀 repo 的路徑就被當成
+# 父 repo 的而跳過，所以當時要求排序與舊版相同。現在前綴短路先確認中間沒有別的 .git，順序已無關；
+# 這兩個案例保留下來，鎖住「父 repo 先被處理時巢狀 repo 仍被找到」。巢狀 repo outer/z 在
+# transcript 裡寫成 JSON 的 Unicode 跳脫形式（反斜線加 u007a，見下方 printf）；hook 先排序編碼後的 token 再解碼，跳脫的那筆反而排在 c 前面，
+# 所以父 repo 先進快取要靠 hook 的 cwd 指向外層（codex 第四輪 Nit：原本 cwd 是 $SANDBOX，標籤與
+# 實際順序不符）。注意：Windows 上 mktemp 的路徑寫法與 git 頂層不同，前綴對不上而不會走到短路，
+# 這兩條只在 Linux 有鑑別力；兩個平台都有鑑別力的版本見下方「巢狀 repo」段（用 git 頂層的寫法）。
 OUTER="$SANDBOX/outer"; mkrepo "$OUTER"
 mkrepo "$OUTER/z"; commit1 "$OUTER/z" "nested unpushed"
 mkdir -p "$OUTER/c"; : > "$OUTER/c/f.txt"
@@ -817,27 +842,156 @@ TR_ORD="$SANDBOX/tr_order.jsonl"
 printf '{"cwd":"/nonexistent","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s/\\u007a/f.txt"}}]}}\n' "$OUTER" > "$TR_ORD"
 printf '{"cwd":"/nonexistent","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s/c/f.txt"}}]}}\n' "$OUTER" >> "$TR_ORD"
 grep -q 'u007a' "$TR_ORD" && ok "前提：transcript 裡是 \\u007a 跳脫形式" || ng "前提：transcript 裡是 \\u007a 跳脫形式" "fixture 不對，以下無鑑別力"
-out_ord="$(jq -cn --arg c "$SANDBOX" --arg t "$TR_ORD" '{session_id:"s_order", cwd:$c, transcript_path:$t}' \
+out_ord="$(jq -cn --arg c "$OUTER" --arg t "$TR_ORD" '{session_id:"s_order", cwd:$c, transcript_path:$t}' \
   | LC_ALL=C GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
-case "$out_ord" in *"$(top_of "$OUTER/z")"*) ok "巢狀 repo 以跳脫形式出現時仍被檢查（處理順序同舊版）" ;; *) ng "巢狀 repo 以跳脫形式出現時仍被檢查（處理順序同舊版）" "被父 repo 的前綴快取吃掉" ;; esac
+case "$out_ord" in *"$(top_of "$OUTER/z")"*) ok "巢狀 repo 以跳脫形式出現、父 repo 先處理時仍被檢查" ;; *) ng "巢狀 repo 以跳脫形式出現、父 repo 先處理時仍被檢查" "被父 repo 的前綴快取吃掉" ;; esac
 
-# 排序要依 locale、不可改成 LC_ALL=C（codex 第三輪）：en_US 下 a/… 排在 Z… 前面（巢狀 repo outer2/a
-# 先處理而被找到），位元組排序則 Z 在前（父 repo 先被快取、巢狀 repo 被吃掉）。需要 en_US.UTF-8；
-# 環境沒有這個 locale 時記 SKIP（C.UTF-8 對有效 UTF-8 就是位元組順序，驗不出差別）。
-if [ "$(printf 'Zb\naa\n' | LC_ALL=en_US.UTF-8 sort 2>/dev/null | head -1)" = aa ]; then
-  OUT2="$SANDBOX/outer2"; mkrepo "$OUT2"
-  mkrepo "$OUT2/a"; commit1 "$OUT2/a" "nested a unpushed"
-  mkdir -p "$OUT2/Z"; : > "$OUT2/Z/f.txt"
-  TR_LOC="$SANDBOX/tr_locale.jsonl"
-  for f in "$OUT2/a/s.txt" "$OUT2/Z/f.txt"; do
-    jq -cn --arg f "$f" '{cwd:"/nonexistent", message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f}}]}}' >> "$TR_LOC"
-  done
-  out_loc="$(jq -cn --arg c "$SANDBOX" --arg t "$TR_LOC" '{session_id:"s_locale", cwd:$c, transcript_path:$t}' \
-    | LC_ALL=en_US.UTF-8 GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
-  case "$out_loc" in *"$(top_of "$OUT2/a")"*) ok "en_US 下 a/… 先於 Z…：巢狀 repo 仍被檢查（排序維持 locale）" ;; *) ng "en_US 下 a/… 先於 Z…：巢狀 repo 仍被檢查（排序維持 locale）" "被父 repo 的前綴快取吃掉" ;; esac
-else
-  sk "locale 排序案例（環境沒有 en_US.UTF-8）"
+# 父 repo 的路徑（Z/…）在 hook 的位元組排序裡先於巢狀 repo（a/…）處理時，巢狀 repo outer2/a
+# 仍要被找到。hook 內固定用 LC_ALL=C 去重排序，與呼叫端的 locale 無關（codex 第三輪 Optional），
+# 所以只跑一次、不需要 en_US.UTF-8。
+OUT2="$SANDBOX/outer2"; mkrepo "$OUT2"
+mkrepo "$OUT2/a"; commit1 "$OUT2/a" "nested a unpushed"
+mkdir -p "$OUT2/Z"; : > "$OUT2/Z/f.txt"
+TR_LOC="$SANDBOX/tr_locale.jsonl"
+for f in "$OUT2/a/s.txt" "$OUT2/Z/f.txt"; do
+  jq -cn --arg f "$f" '{cwd:"/nonexistent", message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f}}]}}' >> "$TR_LOC"
+done
+out_loc="$(jq -cn --arg c "$SANDBOX" --arg t "$TR_LOC" '{session_id:"s_locale", cwd:$c, transcript_path:$t}' \
+  | GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
+case "$out_loc" in *"$(top_of "$OUT2/a")"*) ok "父 repo 的路徑先處理時，巢狀 repo outer2/a 仍被檢查" ;; *) ng "父 repo 的路徑先處理時，巢狀 repo outer2/a 仍被檢查" "被父 repo 的前綴快取吃掉" ;; esac
+
+echo "== 巢狀 repo：cwd 在外層 repo 時，transcript 碰過的內層 repo 仍要被檢查（項目 27，2026-11-23）=="
+# 1.51.2 以前：cwd 是外層 repo（D:/Projects/IntelliPark 本身就是 repo）時，外層第一個進前綴快取，
+# 底下巢狀 pgs-* 的路徑全被歸給外層、從不問 git，內層有未推送 commit 也永遠不提醒（fail-open）。
+# transcript 與 cwd 一律用 git 頂層的寫法：Windows 上 mktemp 給 /tmp/…、git 回 C:/…，用前者的話
+# 前綴對不上、根本走不到短路，案例在 Windows 會失去鑑別力。
+NO="$SANDBOX/nest-outer"; mkrepo "$NO" "$SANDBOX/nest-outer-remote.git"     # 外層：已推送、乾淨
+NO_T="$(top_of "$NO")"
+mkrepo "$NO/pgs-inner" "$SANDBOX/nest-inner-remote.git"; commit1 "$NO/pgs-inner" "inner unpushed"
+mkrepo "$NO/pgs-inner/deep"; commit1 "$NO/pgs-inner/deep" "deep unpushed"   # 兩層巢狀
+# 要有遠端與上游（main、領先 1 筆）：沒有遠端的 repo 不論寫入證據都固定落 ask，斷言就轉不了紅（審查 R1）。
+mkrepo "$NO/pgs-readonly" "$SANDBOX/nest-ro-remote.git"; commit1 "$NO/pgs-readonly" "readonly nested unpushed"
+mkrepo "$NO/pgs-untouched"; commit1 "$NO/pgs-untouched" "untouched unpushed"  # transcript 沒碰過
+git_q "$NO/pgs-inner" worktree add -q -b nest-wt "$NO/wt-linked" HEAD 2>/dev/null  # .git 是檔案
+mkdir -p "$NO/pgs-inner/src" "$NO/plain"
+NI_T="$NO_T/pgs-inner"
+[ "$(top_of "$NO/pgs-inner")" = "$NI_T" ] && [ "$(top_of "$NO/wt-linked")" = "$NO_T/wt-linked" ] \
+  && ok "前提：內層 repo 與 linked worktree 的頂層寫法與外層一致" || ng "前提：內層 repo 與 linked worktree 的頂層寫法與外層一致" "fixture 不對，以下無鑑別力"
+[ -f "$NO/wt-linked/.git" ] && ok "前提：linked worktree 的 .git 是檔案" || ng "前提：linked worktree 的 .git 是檔案" "fixture 不對"
+TR_NEST="$SANDBOX/tr_nest.jsonl"
+jq -cn --arg c "$NO_T" --arg w1 "$NI_T/src/x.txt" --arg w2 "$NI_T/deep/z.txt" --arg w3 "$NO_T/wt-linked/y.txt" \
+       --arg r1 "$NO_T/pgs-readonly/s.txt" --arg r2 "$NO_T/plain/p.txt" \
+  '{cwd:$c, message:{content:[{type:"tool_use", name:"Edit",  input:{file_path:$w1}},
+                              {type:"tool_use", name:"Write", input:{file_path:$w2}},
+                              {type:"tool_use", name:"Edit",  input:{file_path:$w3}},
+                              {type:"tool_use", name:"Read",  input:{file_path:$r1}},
+                              {type:"tool_use", name:"Read",  input:{file_path:$r2}}]}}' > "$TR_NEST"
+out_nest="$(fire_tr "$NO_T" s_nest "$TR_NEST")"
+has_entry "$out_nest" "$NI_T" && ok "cwd 在外層：Edit 過的內層 repo 有報出" || ng "cwd 在外層：Edit 過的內層 repo 有報出" "被外層的前綴快取吃掉"
+in_auto_entry "$out_nest" "$NI_T" && ok "內層 repo 拿到寫入證據（進 auto 桶）" || ng "內層 repo 拿到寫入證據（進 auto 桶）" "寫入證據沒歸給內層"
+has_entry "$out_nest" "$NI_T/deep" && ok "兩層巢狀：最內層 repo 有報出" || ng "兩層巢狀：最內層 repo 有報出" "被中間層吃掉"
+has_entry "$out_nest" "$NO_T/wt-linked" && ok "外層底下的 linked worktree（.git 是檔案）有報出" || ng "外層底下的 linked worktree（.git 是檔案）有報出" "被外層吃掉"
+has_entry "$out_nest" "$NO_T/pgs-readonly" && ok "只讀過的巢狀 repo 納入範圍" || ng "只讀過的巢狀 repo 納入範圍" "漏報"
+in_auto_entry "$out_nest" "$NO_T/pgs-readonly" && ng "只讀過的巢狀 repo 不得進 auto 桶" "誤入 auto" || ok "只讀過的巢狀 repo 不得進 auto 桶"
+has_entry "$out_nest" "$NO_T/pgs-untouched" && ng "transcript 沒碰過的巢狀 repo 不得列入（不掃子目錄）" "誤報" || ok "transcript 沒碰過的巢狀 repo 不得列入（不掃子目錄）"
+has_entry "$out_nest" "$NO_T" && ng "外層已推送且乾淨 → 不列入" "誤報外層" || ok "外層已推送且乾淨 → 不列入"
+
+# 外層的一般子目錄仍歸外層、寫入證據不能因為巢狀檢查而掉（外層本身也有巢狀 repo，走得到新邏輯）。
+# `.` 片段的路徑會被巢狀檢查看成「中間有 .git」（$NO2/. 的 .git 就是外層的），交給 git 後回到已知的
+# 外層——那條路徑也要補記寫入證據，否則外層從 auto 掉到 ask（1.51.2 前綴短路時會記）。
+NO2="$SANDBOX/nest-outer2"; mkrepo "$NO2" "$SANDBOX/nest-outer2-remote.git"; commit1 "$NO2" "outer2 unpushed"
+NO2_T="$(top_of "$NO2")"; mkrepo "$NO2/pgs-x"; mkdir -p "$NO2/sub"
+for case_f in "sub/q.txt" "./s.txt"; do
+  TR_NO2="$SANDBOX/tr_nest2.jsonl"
+  jq -cn --arg c "$NO2_T" --arg f "$NO2_T/$case_f" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_NO2"
+  out_no2="$(fire_tr "$NO2_T" "s_nest2_${case_f//[!a-z]/}" "$TR_NO2")"
+  in_auto_entry "$out_no2" "$NO2_T" && ok "外層路徑 $case_f 的寫入證據仍歸外層（auto 桶）" || ng "外層路徑 $case_f 的寫入證據仍歸外層（auto 桶）" "沒進 auto 桶"
+done
+
+# 字串在外層底下、實際不在（審查 O1）：`<外層>/../非 repo 目錄` 與經過符號連結的寫入，都不得算成
+# 外層的寫入證據（1.51.2 的前綴短路會算，外層因此不問就推）。外層 NO2 有上游、領先 1 筆，cwd 讓它
+# 留在範圍內：有寫入證據就進 auto，所以「不在 auto」才有鑑別力。
+NNR="$SANDBOX/nest-nonrepo"; mkdir -p "$NNR"
+TR_DD="$SANDBOX/tr_nest_dotdot.jsonl"
+jq -cn --arg c "$NO2_T" --arg f "$NO2_T/../nest-nonrepo/x.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_DD"
+out_dd="$(fire_tr "$NO2_T" s_nest_dotdot "$TR_DD")"
+has_entry "$out_dd" "$NO2_T" && ok "前提：外層仍在範圍內（cwd）" || ng "前提：外層仍在範圍內（cwd）" "漏報，以下無鑑別力"
+in_auto_entry "$out_dd" "$NO2_T" && ng "外層/../他處 的寫入不得算成外層的寫入證據" "外層進了 auto 桶" || ok "外層/../他處 的寫入不得算成外層的寫入證據"
+ln -s "$NNR" "$NO2/lnk" 2>/dev/null
+# Git Bash 預設的 ln -s 只會複製；改建 junction（Git Bash 的 [ -L ] 認得，git 會解析成實際路徑）。
+if [ ! -L "$NO2/lnk" ] && command -v cygpath >/dev/null 2>&1 && command -v powershell >/dev/null 2>&1; then
+  rm -rf "${NO2:?}/lnk"
+  powershell -NoProfile -Command "New-Item -ItemType Junction -Path '$(cygpath -w "$NO2/lnk")' -Target '$(cygpath -w "$NNR")' | Out-Null" >/dev/null 2>&1
 fi
+if [ -L "$NO2/lnk" ]; then
+  TR_LN="$SANDBOX/tr_nest_link.jsonl"
+  jq -cn --arg c "$NO2_T" --arg f "$NO2_T/lnk/y.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_LN"
+  out_ln="$(fire_tr "$NO2_T" s_nest_link "$TR_LN")"
+  has_entry "$out_ln" "$NO2_T" && ok "前提：外層仍在範圍內（符號連結案例）" || ng "前提：外層仍在範圍內（符號連結案例）" "漏報，以下無鑑別力"
+  in_auto_entry "$out_ln" "$NO2_T" && ng "經符號連結指到他處的寫入不得算成外層的寫入證據" "外層進了 auto 桶" || ok "經符號連結指到他處的寫入不得算成外層的寫入證據"
+else
+  sk "符號連結案例（環境的 ln -s 建不出真符號連結）"
+fi
+# Linux 上反斜線是合法的檔名字元（codex 複查 Required）：`a\b` 是一個目錄，與 `a/b` 不同。
+# (1) 巢狀 repo 就叫 `a\b`：不可被轉成 a/b 而歸給外層。(2) 先解析 `./a/b`（普通目錄，歸外層、
+# 進 known_dir）再解析 `./a\b`：不可沿用前者的快取。只在非 Windows 跑——Windows 的檔名不能含
+# 反斜線，也不要把這種路徑交給 git.exe。
+case "${OSTYPE:-}" in
+  msys*|cygwin*) sk "檔名含反斜線的巢狀 repo（Windows 檔名不能含反斜線）" ;;
+  *)
+    BS=$'\\'
+    NO3="$SANDBOX/nest-outer3"; mkrepo "$NO3" "$SANDBOX/nest-outer3-remote.git"; NO3_T="$(top_of "$NO3")"
+    mkdir -p "$NO3/a/b"
+    mkrepo "$NO3/a${BS}b"; commit1 "$NO3/a${BS}b" "backslash nested unpushed"
+    [ "$(top_of "$NO3/a${BS}b")" = "$NO3_T/a${BS}b" ] && ok "前提：名稱含反斜線的巢狀 repo 建得起來" || ng "前提：名稱含反斜線的巢狀 repo 建得起來" "fixture 不對，以下無鑑別力"
+    TR_BS="$SANDBOX/tr_nest_bs.jsonl"
+    jq -cn --arg c "$NO3_T" --arg f "$NO3_T/a${BS}b/f.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f}}]}}' > "$TR_BS"
+    has_entry "$(fire_tr "$NO3_T" s_nest_bs "$TR_BS")" "$NO3_T/a${BS}b" && ok "名稱含反斜線的巢狀 repo 有報出" || ng "名稱含反斜線的巢狀 repo 有報出" "被轉成 a/b 而歸給外層"
+    TR_BS2="$SANDBOX/tr_nest_bs2.jsonl"
+    jq -cn --arg c "$NO3_T" --arg f1 "$NO3_T/./a/b/f.txt" --arg f2 "$NO3_T/./a${BS}b/f.txt" \
+      '{cwd:$c, message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f1}},
+                                  {type:"tool_use", name:"Read", input:{file_path:$f2}}]}}' > "$TR_BS2"
+    has_entry "$(fire_tr "$NO3_T" s_nest_bs2 "$TR_BS2")" "$NO3_T/a${BS}b" && ok "./a/b 先解析時 ./a\\b 不沿用它的快取" || ng "./a/b 先解析時 ./a\\b 不沿用它的快取" "沿用了外層的結果"
+    # git 回傳的頂層也不可轉換（codex 第二輪 Required）：cwd 是 repo `a\b`、寫入的是另一個 repo `a/b`。
+    # 頂層若被轉成 a/b，兩個 repo 共用同一個鍵：a/b 被短路吃掉而漏報，寫入證據落到只有 cwd 的 a\b。
+    BW="$SANDBOX/bs-two"; mkdir -p "$BW/a"
+    mkrepo "$BW/a${BS}b" "$SANDBOX/bs-two-1.git"; commit1 "$BW/a${BS}b" "bs cwd repo unpushed"
+    mkrepo "$BW/a/b" "$SANDBOX/bs-two-2.git"; commit1 "$BW/a/b" "bs written repo unpushed"; mkdir -p "$BW/a/b/src"
+    BW_T="$(top_of "$BW/a/b")"; BW_T="${BW_T%/a/b}"
+    TR_BW="$SANDBOX/tr_bs_two.jsonl"
+    jq -cn --arg c "$BW_T/a${BS}b" --arg f "$BW_T/a/b/src/f.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_BW"
+    out_bw="$(fire_tr "$BW_T/a${BS}b" s_bs_two "$TR_BW")"
+    has_entry "$out_bw" "$BW_T/a/b" && ok "cwd 為 a\\b 時，寫入的 repo a/b 有報出" || ng "cwd 為 a\\b 時，寫入的 repo a/b 有報出" "與 a\\b 共用鍵而被吃掉"
+    in_auto_entry "$out_bw" "$BW_T/a/b" && ok "寫入的 repo a/b 拿到寫入證據（auto 桶）" || ng "寫入的 repo a/b 拿到寫入證據（auto 桶）" "沒進 auto 桶"
+    has_entry "$out_bw" "$BW_T/a${BS}b" && ok "前提：cwd 的 repo a\\b 在範圍內" || ng "前提：cwd 的 repo a\\b 在範圍內" "漏報，以下無鑑別力"
+    in_auto_entry "$out_bw" "$BW_T/a${BS}b" && ng "只有 cwd 的 repo a\\b 不得進 auto 桶" "寫入證據被錯歸" || ok "只有 cwd 的 repo a\\b 不得進 auto 桶"
+    # 取父目錄也不可把反斜線當分隔符（codex 第二輪 Required）：寫入外層的 `a\b.txt`，父目錄是外層，
+    # 不是巢狀 repo `a`；a 不得拿到寫入證據。
+    BP="$SANDBOX/bs-parent"; mkrepo "$BP" "$SANDBOX/bs-parent-remote.git"; commit1 "$BP" "bs parent unpushed"
+    mkrepo "$BP/a" "$SANDBOX/bs-parent-a.git"; commit1 "$BP/a" "bs nested a unpushed"
+    BP_T="$(top_of "$BP")"
+    TR_BP="$SANDBOX/tr_bs_parent.jsonl"
+    jq -cn --arg c "$BP_T" --arg f "$BP_T/a${BS}b.txt" --arg r "$BP_T/a/s.txt" \
+      '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}},
+                                  {type:"tool_use", name:"Read",  input:{file_path:$r}}]}}' > "$TR_BP"
+    out_bp="$(fire_tr "$BP_T" s_bs_parent "$TR_BP")"
+    in_auto_entry "$out_bp" "$BP_T" && ok "寫入外層的 a\\b.txt：寫入證據歸外層" || ng "寫入外層的 a\\b.txt：寫入證據歸外層" "外層沒進 auto 桶"
+    has_entry "$out_bp" "$BP_T/a" && ok "前提：巢狀 repo a 在範圍內（讀過）" || ng "前提：巢狀 repo a 在範圍內（讀過）" "漏報，以下無鑑別力"
+    in_auto_entry "$out_bp" "$BP_T/a" && ng "寫入外層的 a\\b.txt 不得把寫入證據給巢狀 repo a" "a 進了 auto 桶" || ok "寫入外層的 a\\b.txt 不得把寫入證據給巢狀 repo a" ;;
+esac
+
+# git 回到已知 repo 的目錄要記住（審查 O2）：`<外層>/./sub` 底下 20 個檔，cwd 一次＋該目錄一次＝2。
+n_dot="$(count_rp 1 "$NO2_T" s_nest_dotperf "$(mktr_reads "$SANDBOX/tr_nest_dot.jsonl" "$NO2_T" "$NO2_T/./sub" 20; printf '%s' "$SANDBOX/tr_nest_dot.jsonl")")"
+[ "$n_dot" = 2 ] && ok "含 . 片段的目錄 20 個檔只問 git 兩次（實得 $n_dot）" || ng "含 . 片段的目錄 20 個檔只問 git 兩次" "rev-parse 次數 ${n_dot:-?}"
+
+# 效能：前綴短路仍要生效。cwd 外層＋內層 20 個檔＋外層一般子目錄 20 個檔 → 只問 git 兩次
+# （外層一次、內層一次）。拿掉短路（每個路徑都問 git）或巢狀檢查把頂層自己的 .git 也算進去，
+# 次數都會變成幾十次。
+TR_NP="$SANDBOX/tr_nest_perf.jsonl"
+mktr_reads "$TR_NP" "$NO_T" "$NI_T/src" 20
+mktr_reads "$SANDBOX/tr_nest_perf2.jsonl" "$NO_T" "$NO_T/plain" 20; cat "$SANDBOX/tr_nest_perf2.jsonl" >> "$TR_NP"
+n_nest="$(count_rp 1 "$NO_T" s_nest_perf "$TR_NP")"
+[ "$n_nest" = 2 ] && ok "巢狀情境 40 個檔只問 git 兩次（實得 $n_nest）" || ng "巢狀情境 40 個檔只問 git 兩次" "rev-parse 次數 ${n_nest:-?}"
 
 echo "== cwd 中間含換行不得被改寫成另一個路徑（codex 第三輪）=="
 # 舊版拿到含換行、不存在的路徑而不檢查；不可把換行刪掉、變成真的存在的 cwdnl-x 而報出它。

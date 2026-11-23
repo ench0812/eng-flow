@@ -29,8 +29,8 @@
 #   掃全機器：會報出跟這次工作無關的專案。範圍不對的警告會被忽略，
 #            而被忽略的警告等於沒有警告。
 # 折衷做法是從 transcript 取出本 session 出現過的所有 cwd，以及 Write/Edit
-# 動過的檔案所在目錄，解析成 repo 後只檢查那些。這正好是「這次工作可能造成
-# 遺失」的集合。成本是兩個 grep 先篩、一次 jq 反跳脫（167MB 實測約 1.4 秒，見下方掃描段）。
+# 動過的檔案所在目錄，解析成 repo（最內層的那一個：外層 repo 底下的巢狀 repo、linked worktree
+# 各自算）後只檢查那些。這正好是「這次工作可能造成遺失」的集合。成本是兩個 grep 先篩、一次 jq 反跳脫（167MB 實測約 1.4 秒，見下方掃描段）。
 #
 # ~/.claude/git-guard-roots 仍然支援，但定位改為「不論這次有沒有碰、都要盯著的
 # 根目錄」的明確加選，不是預設。多數情況不需要它——session 範圍已經涵蓋。
@@ -56,6 +56,14 @@ input="$(cat 2>/dev/null || true)"
 # 空字串與根目錄（""/* 匹配所有絕對路徑）、磁碟根（d:）、UNC 的 server 或 share 根、
 # 以及涵蓋 $HOME 的值（~/.claude 的三個 repo 都在那底下）。列舉擋不完所有上層目錄，
 # 擋的是真的會被設成 TMPDIR 的那幾種；D:/Projects 這種值仍會吞掉其下的 repo。
+# 【反斜線只在 Windows 是分隔符】(codex 複查 Required ×4): Linux 上 `\` 是合法的檔名字元，
+# `a\b` 與 `a/b` 是不同目錄。TMPDIR／HOME、輸入路徑、git 回傳的頂層、寫入證據的比對、取父目錄，
+# 全部用同一套規則；只換其中一處，同一個鍵就會對著兩個不同目錄（例如 cwd `/w/a\b` 與寫入的
+# `/w/a/b` 共用 `/w/a/b`，寫入證據被歸到只有 cwd 的 repo；TMPDIR `/w/cache\run` 被轉成
+# `/w/cache/run`，真正在它底下的 repo 反而被列入）。
+WINPATH=0
+case "${OSTYPE:-}" in msys*|cygwin*) WINPATH=1 ;; esac
+
 TMP_NORM=""; tmp_path=""
 if [ -n "${TMPDIR:-}" ]; then
   home_norm=""
@@ -63,7 +71,8 @@ if [ -n "${TMPDIR:-}" ]; then
     { IFS= read -r tmp_path; IFS= read -r home_norm; } < <(cygpath -m "$TMPDIR" "$HOME" 2>/dev/null)
   fi
   if [ -z "$tmp_path" ]; then
-    tmp_path="${TMPDIR//\\//}"; home_norm="${HOME//\\//}"
+    tmp_path="$TMPDIR"; home_norm="$HOME"
+    [ "$WINPATH" = 1 ] && { tmp_path="${TMPDIR//\\//}"; home_norm="${HOME//\\//}"; }
     # /d/... 只在 Windows 上是磁碟寫法；Linux 的 /d/temp 是一般目錄，不能轉。
     case "${OSTYPE:-}" in msys*|cygwin*)
       case "$tmp_path" in /[a-zA-Z]/*) tmp_path="${tmp_path:1:1}:${tmp_path:2}" ;; esac
@@ -141,6 +150,29 @@ is_temp_path() {
   return 1
 }
 
+# 【巢狀 repo】(2026-11-23 擁有者裁定修，項目 27): 前綴短路只能在「已知頂層與這個目錄之間
+# 沒有別的 .git」時成立。舊版只看前綴：cwd 是外層 repo（D:/Projects/IntelliPark 本身就是 repo）
+# 時它第一個進 tops_norm，底下 pgs-* 的每個路徑都被歸給外層、從不問 git，內層 repo 有未推送
+# commit 也永遠不提醒——fail-open。這裡從目錄往上逐層看 .git 是否存在（檔案或目錄都算：
+# linked worktree 與 submodule 的 .git 是檔案），到已知頂層為止；有就不短路、交給 git 判定
+# 最內層的 repo。只用 [ -e ]／[ -L ]（stat，不開子行程），而且只走 transcript 實際出現的路徑，
+# 不掃描子目錄——cwd 底下沒被碰過的巢狀 repo 不會因此被列入。
+# 【字串前綴不等於實際位置】(五軸審查 O1): `<top>/../elsewhere`、或經過符號連結／junction 的
+# 路徑，字串上在 top 底下、實際上不在。短路會把那筆寫入算成 top 的寫入證據（實測重現：外層
+# 因此進 auto 桶），而真正被寫的 repo 反而不在範圍內。所以路徑含 `.`／`..` 片段、或中間有任何
+# 一層是符號連結時，同樣不短路，交給 git 依實際路徑解析。1.51.2 的前綴短路就有這個缺口。
+nested_git_below() {  # nested_git_below <top> <dir>：<dir> 在 <top> 底下；兩者之間（不含 top）有 .git、符號連結或 ./.. 片段就回 0
+  local t="$1" d="$2"
+  case "$d/" in */./*|*/../*) return 0 ;; esac
+  while [ "${#d}" -gt "${#t}" ]; do
+    [ -e "$d/.git" ] && return 0
+    [ -L "$d" ] && return 0
+    d="${d%/*}"
+  done
+  return 1
+}
+declare -A known_dir=()   # git 解析回【已知 repo】的目錄 → 該 repo（正規化頂層）；同一目錄不再問 git（審查 O2）
+
 # $2="w" 表示這個路徑帶有【本 session 的寫入證據】（Write/Edit 類工具動過的檔；cwd 不算，見下方）。
 # 為什麼要分：auto 桶會讓模型【不問就推】，而 push 是這條路徑上唯一不可逆的動作。
 # 只有「讀過一個檔」就授權推送，會把使用者自己留在那個 repo 的 WIP commit 推出去——
@@ -149,10 +181,14 @@ is_temp_path() {
 add_repo() {
   local p="${1:-}" mode="${2:-}" top np ntop t
   [ -n "$p" ] || return 0
-  np="${p//\\//}"                       # 反斜線換正斜線（內建，不開子行程）
+  # 反斜線換正斜線（內建，不開子行程）只在 Windows 做（WINPATH，見其定義處）。
+  np="$p"; [ "$WINPATH" = 1 ] && np="${p//\\//}"
   for t in ${tops_norm+"${tops_norm[@]}"}; do
     case "$np/" in
       "$t/"*)
+        # 中間有別的 .git＝可能是巢狀 repo，不歸給這個頂層（見上方 nested_git_below）。
+        # 換下一個已知頂層：內層 repo 若已解析過，會在它那一輪短路。
+        nested_git_below "$t" "$np" && continue
         # 已知 repo 底下就不再問 git，但【寫入證據仍要補記】——否則先 Read 後 Write
         # 同一個 repo 時，寫入證據會被前綴短路吃掉，該 repo 就永遠進不了 auto 桶。
         [ "$mode" = w ] && case "$writable" in *"|$t|"*) ;; *) writable="$writable|$t|" ;; esac
@@ -167,15 +203,30 @@ add_repo() {
   # 只記「不列入」的結論：是 repo 的那一支已在 tops_norm，且寫入證據的補記必須
   # 繼續走上面的前綴迴圈，不能被這裡短路掉。
   case "$not_repo" in *"|$np|"*) return 0 ;; esac
+  # 鍵加前綴 k：路徑可以是任意字串（例如 @），不讓它碰到陣列下標的特殊寫法。
+  t="${known_dir["k$np"]-}"
+  if [ -n "$t" ]; then
+    [ "$mode" = w ] && case "$writable" in *"|$t|"*) ;; *) writable="$writable|$t|" ;; esac
+    return 0
+  fi
   top="$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)" || { not_repo="$not_repo|$np|"; return 0; }
   [ -n "$top" ] || { not_repo="$not_repo|$np|"; return 0; }
-  ntop="${top//\\//}"
+  ntop="$top"; [ "$WINPATH" = 1 ] && ntop="${top//\\//}"
   # 【臨時目錄要對 repo 頂層判定，不是對被存取的路徑】(複查抓到): 對入參判定的話，
   # D:/Projects/myapp/.cache/vite 這種子路徑會讓【整個 myapp】被丟掉——而漏掉的正是
   # 本 hook 唯一要防的東西。放在 rev-parse 之後、用 $ntop 判定；fixture 那種
   # /tmp/tmp.XXX/work 的 toplevel 本身就在臨時根底下，排除行為不變。
   is_temp_path "$ntop" && { not_repo="$not_repo|$np|"; return 0; }
-  case "$repos" in *"|$top|"*) return 0 ;; esac
+  # git 回到已知的 repo（路徑裡有 `.`、寫法不同、經過指回同一 repo 的符號連結，或中間是空的
+  # .git 目錄而 git 退回外層）：寫入證據照樣補記，否則這種路徑的 Write 會讓 repo 從 auto 掉到 ask
+  # （1.51.2 前綴短路時會記），並記進 known_dir。中間的 .git 是失效的 gitdir 檔或內容無效時，
+  # git 直接失敗（rc=128），那個目錄進上面的 not_repo、不給外層寫入證據——方向安全（外層落 ask）。
+  case "$repos" in
+    *"|$top|"*)
+      known_dir["k$np"]="$ntop"
+      [ "$mode" = w ] && case "$writable" in *"|$ntop|"*) ;; *) writable="$writable|$ntop|" ;; esac
+      return 0 ;;
+  esac
   repos="$repos|$top|"
   repo_list+=("$top")
   [ "$mode" = w ] && writable="$writable|$ntop|"
@@ -212,18 +263,17 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
   # 2<TAB>路徑 ＝其餘路徑（cwd、Read 過的檔，以及寫入行裡出現的所有路徑）：只納入檢查範圍，
   #   不授權自動推送。
   #
-  # 【兩條管線，處理順序與舊版逐一相同】(2026-11-23 量測與 codex 第三、四輪):
-  #   add_repo 的前綴快取讓處理順序有意義——父 repo 的路徑先到，巢狀子 repo 的路徑就被當成
-  #   父 repo 的而跳過。所以兩批的順序都照舊版：寫入批依 locale 排序【解碼後的路徑】，唯讀批
-  #   依 locale 排序【編碼後的 token 值】（去掉 "cwd": 這類鍵名之後）再反跳脫；先寫入、後唯讀。
-  #   改成位元組排序、或改成對解碼後的唯讀路徑排序，都會在 a/…↔Z…、é↔z 這類情況換順序。
-  #   - LC_ALL=C 只用在 grep 與去重：逐位元組比對，token 那支在 en_US.UTF-8 下 938ms、C 下
+  # 【兩條管線，處理順序不影響結果】(2026-11-23 量測、codex 第三、四輪；巢狀修正後改寫):
+  #   1.51.2 以前 add_repo 的前綴快取讓順序有意義（父 repo 的路徑先到，巢狀 repo 就被吃掉），
+  #   所以當時刻意維持舊版的 locale 排序。現在前綴短路先確認中間沒有別的 .git
+  #   （nested_git_below），歸屬與寫入證據都不再依賴順序，locale 排序已拿掉；最後逐 repo
+  #   迴圈另外排序，輸出順序不變。先寫入、後唯讀的順序維持，但只是習慣，不是正確性條件。
+  #   - LC_ALL=C 用在 grep 與去重：逐位元組比對，token 那支在 en_US.UTF-8 下 938ms、C 下
   #     432ms；UTF-8 locale 遇到無效位元組還會把整個檔當二進位、只印 "Binary file matches"
-  #     （-a 再保險一次）。排序本身維持 locale。
-  #   - 兩批都先 LC_ALL=C sort -u（位元組精確去重；一份 transcript 有上萬個重複 token、寫入行
-  #     也常是同一個檔寫好幾次），
-  #     再 locale sort（得到舊版的順序）。不直接用 locale 的 sort -u：UTF-8 collation 會把
-  #     排序上相等的不同路徑併成一筆而少檢查一個 repo（舊版就是如此，這裡順手堵住）。
+  #     （-a 再保險一次）。
+  #   - 兩批都用 LC_ALL=C sort -u（位元組精確去重；一份 transcript 有上萬個重複 token、寫入行
+  #     也常是同一個檔寫好幾次）。不用 locale 的 sort -u：UTF-8 collation 會把排序上相等的
+  #     不同路徑併成一筆而少檢查一個 repo。
   #   - 【不要合成一個 grep】：試過以 `^.*"name":"Write".*$|<token>` 一次取整行與 token，
   #     grep 失去快速搜尋路徑，C locale 下單是 grep 就 4.1 秒，UTF-8 locale 下跑了數分鐘。
   #     多讀一次檔的成本在 page cache 裡很小，兩個簡單的 grep 比一個複雜的快。
@@ -267,13 +317,17 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
     # cwd 本來就是目錄；file_path 是檔案，取其所在目錄。
     # 用參數展開而非 printf|sed：後者每個路徑要開一個子行程，實測 23 個
     # 路徑共 740ms——本 hook 最大的單項成本，而它掛在每個回合結束。
-    [ -d "$d" ] || d="${d%[/\\]*}"
+    # 取父目錄的分隔符同樣只在 Windows 含反斜線（WINPATH）：Linux 上 outer/a\b.txt 的父目錄是
+    # outer，不是 outer/a（a 若是巢狀 repo，寫入證據會被錯歸給它）。
+    if [ ! -d "$d" ]; then
+      if [ "$WINPATH" = 1 ]; then d="${d%[/\\]*}"; else d="${d%/*}"; fi
+    fi
     add_repo "$d" "$mode"
   done <<EOF
 $({ LC_ALL=C grep -ahE '"name":"(Write|Edit|MultiEdit|NotebookEdit)"' "$transcript" \
-      | "$JQ" -rR "$WRITE_JQ" | LC_ALL=C sort -u | sort
+      | "$JQ" -rR "$WRITE_JQ" | LC_ALL=C sort -u
     LC_ALL=C grep -aohE '"(cwd|file_path|notebook_path)":"[^"]*"' "$transcript" \
-      | sed 's/^"[a-z_]*"://' | LC_ALL=C sort -u | sort | "$JQ" -rR "$READ_JQ"
+      | sed 's/^"[a-z_]*"://' | LC_ALL=C sort -u | "$JQ" -rR "$READ_JQ"
   } 2>/dev/null)
 EOF
 fi
@@ -454,7 +508,7 @@ while IFS= read -r top; do
     if [ -z "$branch" ] || [ -z "$urem" ] || [ "$urem" = . ] || [ -z "$umerge" ] || [ "$ubranch" = "$umerge" ]; then
       urem='<upstream>'; ubranch='<upstream>'; upstream='<upstream>'
     fi
-    ntop_chk="${top//\\//}"
+    ntop_chk="$top"; [ "$WINPATH" = 1 ] && ntop_chk="${top//\\//}"
     has_write=0; case "$writable" in *"|$ntop_chk|"*) has_write=1 ;; esac
     if [ -n "$branch" ] && [ "$upstream" != '<upstream>' ] && [ "$branch" != "$ubranch" ]; then
       # 【上游名稱與本地分支不同】(2026-10-07): `git worktree add -b feat/x origin/main` 或
@@ -548,7 +602,8 @@ while IFS= read -r top; do
             bucket=auto
             reason="feature 分支 $branch 沒有上游追蹤、尚無遠端備份，唯一的遠端是 $remotes"
             pr_remote="$remotes"; pr_branch="$branch"; pr_u=u
-            case "$writable" in *"|${top//\\//}|"*) ;; *) reason="$reason$NOTE_NO_WRITE" ;; esac
+            ntop_chk="$top"; [ "$WINPATH" = 1 ] && ntop_chk="${top//\\//}"
+            case "$writable" in *"|$ntop_chk|"*) ;; *) reason="$reason$NOTE_NO_WRITE" ;; esac
           fi ;;
       esac
     fi
