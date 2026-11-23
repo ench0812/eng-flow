@@ -66,6 +66,31 @@ count_rp(){ # count_rp <allow_temp 0|1> <cwd> <session> <transcript> -> rev-pars
     | GIT_GUARD_ALLOW_TEMP="$1" PATH="$SHIM_DIR:$PATH" bash "$HOOK" >/dev/null 2>&1
   wc -l < "$RP_LOG" | tr -cd '0-9'
 }
+# 另兩支 shim：GC 記下每一次 git 呼叫（次數就是成本，2026-11-23 量測的主因是逐 repo 迴圈的
+# git 次數）；FER 讓 `for-each-ref --points-at` 失敗，模擬 git 太舊、不認得欄位的情況。
+GC_DIR="$SANDBOX/shim-gc"; GC_LOG="$SANDBOX/gc.log"; FER_DIR="$SANDBOX/shim-fer"
+mkdir -p "$GC_DIR" "$FER_DIR"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" "$@"\n' "$GC_LOG" "$REAL_GIT" > "$GC_DIR/git"
+printf '#!/usr/bin/env bash\ncase " $* " in *" for-each-ref --points-at "*) echo "fatal: unknown field name" >&2; exit 128 ;; esac\nexec "%s" "$@"\n' \
+  "$REAL_GIT" > "$FER_DIR/git"
+# TRK：把 for-each-ref 輸出的 "ahead N" 換成認不得的字樣，模擬 track 格式改變（例如被翻譯）。
+TRK_DIR="$SANDBOX/shim-trk"; mkdir -p "$TRK_DIR"
+printf '#!/usr/bin/env bash\ncase " $* " in *" for-each-ref --points-at "*) "%s" "$@" | sed "s/ahead /voraus /"; exit "${PIPESTATUS[0]}" ;; esac\nexec "%s" "$@"\n' \
+  "$REAL_GIT" "$REAL_GIT" > "$TRK_DIR/git"
+chmod +x "$GC_DIR/git" "$FER_DIR/git" "$TRK_DIR/git"
+fire_path(){ # fire_path <shim dir> <cwd> <session> [transcript]：PATH 前面放指定 shim 跑 hook
+  jq -cn --arg c "$2" --arg s "$3" --arg t "${4:-}" '{session_id:$s, cwd:$c, transcript_path:$t}' \
+    | GIT_GUARD_ALLOW_TEMP=1 PATH="$1:$PATH" bash "$HOOK" 2>/dev/null
+}
+mkrepo(){ # mkrepo <dir> [remote.git]：一個 commit 的 repo；給 remote 就推上去並設上游
+  git init -q -b main "$1"; echo s > "$1/s.txt"; git_q "$1" add s.txt; git_q "$1" commit -qm seed
+  if [ -n "${2:-}" ]; then
+    git init -q --bare "$2"; git_q "$1" remote add origin "$2"; git_q "$1" push -q -u origin main
+  fi
+}
+commit1(){ # commit1 <dir> <msg>
+  echo "$2" > "$1/$(printf '%s' "$2" | tr -c 'a-z0-9' _).txt"; git_q "$1" add -A; git_q "$1" commit -qm "$2"
+}
 
 # --- 建一個有遠端的 repo ---
 REMOTE="$SANDBOX/remote.git"
@@ -164,6 +189,7 @@ echo "== 臨時目錄底下的 repo 不列入 =="
 # 才驗得到 /tmp 掛載寫法，與「不在 HOME 那顆磁碟」的磁碟根）。落在寫死的臨時根就記 SKIP。
 # 標記檔用 GIT_GUARD_STAMP_DIR 留在 sandbox，不會寫進磁碟根或網路路徑。
 TROOT="$(mktemp -d "$HOME/.git-guard-test.XXXXXX")"
+mr_n=0
 home_m="$HOME"; command -v cygpath >/dev/null 2>&1 && home_m="$(cygpath -m "$HOME")"
 td_round(){ # td_round <fixture 根> <標籤>
   local root=$1 tag=$2 repo="$1/repo" top tm="" td seen="|" o
@@ -174,7 +200,9 @@ td_round(){ # td_round <fixture 根> <標籤>
     sk "[$tag] TMPDIR 規則（fixture 在寫死的臨時根底下：$top）"; return 0 ;; esac
   tq(){ jq -cn --arg c "$repo" --arg s "$2" '{session_id:$s, cwd:$c}' \
         | TMPDIR="$1" GIT_GUARD_STAMP_DIR="$SANDBOX/stamps" bash "$HOOK" 2>/dev/null; }
-  must_report(){ o="$(tq "$1" "s_${tag}_r_${#1}_${1//[^a-zA-Z]/}")"
+  # session 帶流水號：Linux 容器裡 HOME=/root，dirname "$HOME" 就是 "/"，與上面的根目錄案例
+  # 同一個 TMPDIR 值，不帶流水號就共用 session，第二次被 stamp 擋成靜默而誤紅。
+  must_report(){ mr_n=$((mr_n+1)); o="$(tq "$1" "s_${tag}_r${mr_n}_${#1}_${1//[^a-zA-Z]/}")"
     if [ -n "$o" ]; then ok "[$tag] TMPDIR=$1 $2"; else ng "[$tag] TMPDIR=$1 $2" "沒有輸出"; fi; }
   # 對照組：TMPDIR 指到別處就必須報，證明下面的「不報」是 TMPDIR 規則造成的。
   must_report "$SANDBOX/tmp" "不涵蓋時照報（對照組）"
@@ -571,6 +599,267 @@ git_q "$FWORK" remote add second "$FREMOTE"
 out_f6="$(fire_ro "$FWORK" s_feat_tworemotes)"
 in_auto "$out_f6" "$FWORK" && ng "無上游＋多個遠端不得進 auto 桶" "誤入 auto" || ok "無上游＋多個遠端不得進 auto 桶"
 git_q "$FWORK" remote remove second
+
+echo "== 分支狀態一次取得（for-each-ref，2026-11-23）的邊界 =="
+# 舊版以「rev-list @{u}...HEAD 失敗」當無上游的訊號，新版改看 for-each-ref 的 %(upstream) 與
+# %(upstream:track)。以下逐一鎖住兩者要等價的邊界。
+# (a) 上游的 remote-tracking ref 已被刪除（track=gone）：舊版 @{u} 解析失敗 → 無上游路徑，照報。
+GONE="$SANDBOX/gone"; mkrepo "$GONE" "$SANDBOX/gone-remote.git"
+git_q "$GONE" push -q origin main:feat-gone; git_q "$GONE" checkout -q -b feat-gone
+git_q "$GONE" branch -q --set-upstream-to origin/feat-gone
+git_q "$GONE" push -q origin :feat-gone; git_q "$GONE" fetch -q --prune origin
+commit1 "$GONE" "gone local"
+out_g="$(fire "$GONE" s_gone)"
+case "$out_g" in *"$(top_of "$GONE")"*"無遠端備份"*) ok "上游已刪除（gone）→ 照無上游路徑報出" ;; *) ng "上游已刪除（gone）→ 照無上游路徑報出" "漏報或說法不符" ;; esac
+# (b) detached HEAD、有不在任何遠端的 commit → 報出，分支記為 <detached>，留在 ask 桶。
+DET="$SANDBOX/detached"; mkrepo "$DET" "$SANDBOX/det-remote.git"
+git_q "$DET" checkout -q --detach; commit1 "$DET" "detached work"
+out_d="$(fire "$DET" s_det)"
+case "$out_d" in *"<detached>"*"無遠端備份"*) ok "detached HEAD 的未推 commit → 報出" ;; *) ng "detached HEAD 的未推 commit → 報出" "漏報或說法不符" ;; esac
+in_auto "$out_d" "$DET" && ng "detached HEAD 不得進 auto 桶" "誤入 auto" || ok "detached HEAD 不得進 auto 桶"
+# (b2) codex 第二輪：detached HEAD 剛好也被具名分支（有上游、領先 1 筆）指到。for-each-ref 會列出
+#      那條分支、但沒有 * 標記；不可拿它的上游判定，必須仍走 detached 路徑、不給推到 main 的指令。
+DET2="$SANDBOX/detached-named"; mkrepo "$DET2" "$SANDBOX/det2-remote.git"; commit1 "$DET2" "main ahead"
+git_q "$DET2" checkout -q --detach
+TR_DET2="$SANDBOX/tr_det2.jsonl"
+jq -cn --arg c "$DET2" --arg f "$DET2/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_DET2"
+out_d2="$(fire_tr "$DET2" s_det2 "$TR_DET2")"
+case "$out_d2" in *"<detached>"*) ok "detached 且被具名分支指到 → 仍以 <detached> 報出" ;; *) ng "detached 且被具名分支指到 → 仍以 <detached> 報出" "改用了具名分支的狀態" ;; esac
+in_auto "$out_d2" "$DET2" && ng "detached 且被具名分支指到不得進 auto 桶" "誤入 auto" || ok "detached 且被具名分支指到不得進 auto 桶"
+# (c) 上游是本地分支（remote 為 "."）→ 目的地不明確，ask、不給推送指令。
+LUP="$SANDBOX/localup"; mkrepo "$LUP"
+git_q "$LUP" checkout -q -b topic; git_q "$LUP" branch -q --set-upstream-to main; commit1 "$LUP" "local upstream"
+TR_LUP="$SANDBOX/tr_lup.jsonl"
+jq -cn --arg c "$LUP" --arg f "$LUP/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_LUP"
+out_l="$(fire_tr "$LUP" s_lup "$TR_LUP")"
+case "$out_l" in *"$(top_of "$LUP")"*) ok "本地上游的領先 commit → 報出" ;; *) ng "本地上游的領先 commit → 報出" "漏報" ;; esac
+in_auto "$out_l" "$LUP" && ng "本地上游不得進 auto 桶" "誤入 auto" || ok "本地上游不得進 auto 桶"
+# (d) 只落後、不領先 → 沒有東西會遺失，靜默。
+BEH="$SANDBOX/behind"; mkrepo "$BEH" "$SANDBOX/beh-remote.git"
+commit1 "$BEH" "will be remote"; git_q "$BEH" push -q origin main; git_q "$BEH" reset -q --hard HEAD~1
+silent "$BEH" s_behind "只落後上游 → 靜默"
+# (e) for-each-ref 失敗但 HEAD 存在（例如 git 太舊）→ 不得靜默放過，要留在 ask 桶（fail-closed）。
+FERR="$SANDBOX/fer-fail"; mkrepo "$FERR" "$SANDBOX/fer-remote.git"; commit1 "$FERR" "fer unpushed"
+out_e="$(fire_path "$FER_DIR" "$FERR" s_fer)"
+case "$out_e" in *"$(top_of "$FERR")"*"無法判定分支與上游狀態"*) ok "for-each-ref 失敗 → 照報並說明無法判定" ;; *) ng "for-each-ref 失敗 → 照報並說明無法判定" "靜默或說法不符" ;; esac
+in_auto "$out_e" "$FERR" && ng "for-each-ref 失敗不得進 auto 桶" "誤入 auto" || ok "for-each-ref 失敗不得進 auto 桶"
+# (f) track 欄位認不得（不是 ""／gone／ahead／behind）→ 不可當成「領先 0 筆」靜默放過。
+out_t="$(fire_path "$TRK_DIR" "$FERR" s_trk)"
+case "$out_t" in *"$(top_of "$FERR")"*"無法判定分支與上游狀態"*) ok "track 格式認不得 → 照報並說明無法判定" ;; *) ng "track 格式認不得 → 照報並說明無法判定" "靜默或說法不符" ;; esac
+# (g) 最終版複查 R-A：branch.<b>.merge 含換行時，for-each-ref 的目前分支那一列被拆成兩列——
+#     上游被截成不存在的名字、track 變空，不驗格式就會被當成「與上游同步」而靜默。舊版 @{u}
+#     解析失敗、照無上游路徑報出；新版必須至少轉 ask 照報。
+#     （2026-11-23 同時段主機跳出過 git.exe 的 0x7C 錯誤框，查證後與本條無關：事件在這條測試
+#      跑完之後，且 Git for Windows 2.55 以同樣設定實跑十餘次都正常結束。）
+NLM="$SANDBOX/newline-merge"; mkrepo "$NLM" "$SANDBOX/newline-merge-remote.git"
+git_q "$NLM" checkout -q -b feat-nl; commit1 "$NLM" "nl merge"
+git_q "$NLM" config branch.feat-nl.remote origin
+git_q "$NLM" config branch.feat-nl.merge "refs/heads/ma"$'\n'"in"
+out_nl="$(fire "$NLM" s_nl_merge)"
+case "$out_nl" in *"$(top_of "$NLM")"*) ok "merge 設定含換行 → 仍報出（不得當成同步而靜默）" ;; *) ng "merge 設定含換行 → 仍報出（不得當成同步而靜默）" "靜默漏報" ;; esac
+in_auto "$out_nl" "$NLM" && ng "merge 設定含換行不得進 auto 桶" "誤入 auto" || ok "merge 設定含換行不得進 auto 桶"
+# (g2) 最終版複查 O2：detached HEAD，同一個 commit 上另有分支 y，其 merge 設定接出偽造的 "*" 列。
+#      續行檢查擋不到（偽造列以 *<US> 開頭），要靠「* 列只能一列」與「分隔符數量」：不擋的話
+#      會拿偽造列當目前分支，給出推到別處的指令而進 auto 桶。舊版判 ask（<detached>）。
+FAKE="$SANDBOX/fake-star"; mkrepo "$FAKE" "$SANDBOX/fake-star-remote.git"; commit1 "$FAKE" "detached fake star"
+git_q "$FAKE" branch y; git_q "$FAKE" checkout -q --detach
+git_q "$FAKE" config branch.y.remote origin
+git_q "$FAKE" config branch.y.merge "refs/heads/a"$'\n'"*"
+n_star="$(git -C "$FAKE" for-each-ref --points-at HEAD --format='%(HEAD)%(upstream)' refs/heads/ | grep -c '^\*')"
+[ "${n_star:-0}" -ge 1 ] && ok "前提：for-each-ref 輸出含偽造的 * 列（實得 $n_star）" \
+  || ng "前提：for-each-ref 輸出含偽造的 * 列" "沒有 * 列，以下無鑑別力（git 可能改了輸出）"
+TR_FAKE="$SANDBOX/tr_fake.jsonl"
+jq -cn --arg c "$FAKE" --arg f "$FAKE/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_FAKE"
+out_fake="$(fire_tr "$FAKE" s_fake_star "$TR_FAKE")"
+case "$out_fake" in *"$(top_of "$FAKE")"*) ok "偽造 * 列：仍報出" ;; *) ng "偽造 * 列：仍報出" "漏報" ;; esac
+in_auto "$out_fake" "$FAKE" && ng "偽造 * 列不得進 auto 桶" "誤入 auto" || ok "偽造 * 列不得進 auto 桶"
+# (h) 最終版複查 O-1：標記目錄建不起來時，stderr 必須是空的（Codex 轉接層看到 stderr 就丟掉整份
+#     發現），而且照樣輸出警告。
+: > "$SANDBOX/not-a-dir"
+err_st="$(jq -cn --arg c "$FERR" '{session_id:"s_stamp_err", cwd:$c}' \
+  | GIT_GUARD_ALLOW_TEMP=1 GIT_GUARD_STAMP_DIR="$SANDBOX/not-a-dir/stamps" bash "$HOOK" 2>&1 >/dev/null)"
+out_st="$(jq -cn --arg c "$FERR" '{session_id:"s_stamp_err2", cwd:$c}' \
+  | GIT_GUARD_ALLOW_TEMP=1 GIT_GUARD_STAMP_DIR="$SANDBOX/not-a-dir/stamps" bash "$HOOK" 2>/dev/null)"
+[ -z "$err_st" ] && ok "標記目錄建不起來時 stderr 為空" || ng "標記目錄建不起來時 stderr 為空" "stderr: $(printf '%s' "$err_st" | head -c 120)"
+[ -n "$out_st" ] && ok "標記目錄建不起來時照樣輸出警告" || ng "標記目錄建不起來時照樣輸出警告" "沒有輸出"
+# 對照組：空 repo 讓 for-each-ref 同樣失敗，但沒有東西會遺失 → 靜默（與舊版相同）。
+git init -q -b main "$SANDBOX/empty-repo"
+silent "$SANDBOX/empty-repo" s_empty "空 repo → 靜默"
+
+echo "== 標記命中時每個 repo 只問 git 一次（效能回歸，2026-11-23）=="
+# 舊版把標記檢查排在 rev-list、rev-parse @{u}、branch、兩次 config 之後，同一 session 第二次
+# Stop 在 78MB 的實例裡仍跑 104 個 git。斷言用次數：cwd 的 rev-parse --show-toplevel 一次＋
+# for-each-ref 一次＝2。舊版同情境（無上游）是 6 次以上。
+PERF="$SANDBOX/perf-pending"; mkrepo "$PERF"; commit1 "$PERF" "perf pending"
+[ -n "$(fire_path "$GC_DIR" "$PERF" s_perf_stamp)" ] && ok "前提：第一次 Stop 有警告" || ng "前提：第一次 Stop 有警告" "fixture 不對，以下無鑑別力"
+: > "$GC_LOG"
+out_p="$(fire_path "$GC_DIR" "$PERF" s_perf_stamp)"
+n_gc="$(wc -l < "$GC_LOG" | tr -cd '0-9')"
+[ -z "$out_p" ] && [ "$n_gc" = 2 ] && ok "標記命中：靜默且只呼叫 git 2 次（實得 $n_gc）" \
+  || ng "標記命中：靜默且只呼叫 git 2 次" "輸出長度 ${#out_p}、git 次數 $n_gc：$(tr '\n' ';' < "$GC_LOG")"
+# 有上游且領先的 repo 也一樣（舊版這條路徑在標記前要跑 5 次 git）。
+PERF2="$SANDBOX/perf-up"; mkrepo "$PERF2" "$SANDBOX/perf-up-remote.git"; commit1 "$PERF2" "perf up pending"
+[ -n "$(fire_path "$GC_DIR" "$PERF2" s_perf_up)" ] && ok "前提：有上游的待推 repo 第一次有警告" || ng "前提：有上游的待推 repo 第一次有警告" "fixture 不對"
+: > "$GC_LOG"
+out_p2="$(fire_path "$GC_DIR" "$PERF2" s_perf_up)"
+n_gc2="$(wc -l < "$GC_LOG" | tr -cd '0-9')"
+[ -z "$out_p2" ] && [ "$n_gc2" = 2 ] && ok "標記命中（有上游）：只呼叫 git 2 次（實得 $n_gc2）" \
+  || ng "標記命中（有上游）：只呼叫 git 2 次" "輸出長度 ${#out_p2}、git 次數 $n_gc2"
+
+echo "== 標記鍵要區分同一個 HEAD 的不同 worktree =="
+# 標記鍵＝HEAD sha＋路徑雜湊。同一 repo 的兩個 worktree 停在同一個 commit、都沒推，兩個都要報；
+# 鍵若只看 HEAD，第二個會被第一個的標記擋掉。
+WTA="$SANDBOX/wt-main"; mkrepo "$WTA"; commit1 "$WTA" "shared head"
+WTB="$SANDBOX/wt-linked"; git_q "$WTA" worktree add -q -b wt-other "$WTB" HEAD 2>/dev/null
+TR_WT="$SANDBOX/tr_wt.jsonl"; mktr "$TR_WT" "$WTA"; jq -cn --arg c "$WTB" '{cwd:$c, message:{content:[]}}' >> "$TR_WT"
+out_wt="$(fire_tr "$SANDBOX" s_wt "$TR_WT")"
+case "$out_wt" in *"$(top_of "$WTA")"*) ok "同 HEAD 的主 worktree 報出" ;; *) ng "同 HEAD 的主 worktree 報出" "漏報" ;; esac
+case "$out_wt" in *"$(top_of "$WTB")"*) ok "同 HEAD 的另一個 worktree 也報出" ;; *) ng "同 HEAD 的另一個 worktree 也報出" "被同一個標記擋掉" ;; esac
+# %(HEAD) 要依各 worktree 自己的 HEAD 判定：linked worktree 的分支名稱是 wt-other，不是主 worktree 的 main。
+case "$out_wt" in *"$(top_of "$WTB")"*"分支 wt-other 沒有上游"*) ok "linked worktree 報出自己的分支名稱" ;; *) ng "linked worktree 報出自己的分支名稱" "分支名稱不是 wt-other" ;; esac
+
+echo "== branch.<b>.merge 有多個值時取最後一個（五軸審查 R1）=="
+# 舊版 `git config --get` 取最後一個值；%(upstream:remoteref) 取第一個。在 main 上追加一個
+# 指向 other 的 merge 值後，舊版判成「上游名稱不同＋共用分支名稱」→ ask，必須維持。
+MM="$SANDBOX/multi-merge"; mkrepo "$MM" "$SANDBOX/multi-merge-remote.git"; commit1 "$MM" "multi merge"
+git_q "$MM" config --add branch.main.merge refs/heads/other
+TR_MM="$SANDBOX/tr_mm.jsonl"
+jq -cn --arg c "$MM" --arg f "$MM/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_MM"
+out_mm="$(fire_tr "$MM" s_multimerge "$TR_MM")"
+case "$out_mm" in *"$(top_of "$MM")"*) ok "前提：多值 merge 的 repo 有報出" ;; *) ng "前提：多值 merge 的 repo 有報出" "漏報" ;; esac
+in_auto "$out_mm" "$MM" && ng "merge 多值（最後一個與分支不同）不得進 auto 桶" "誤入 auto" || ok "merge 多值（最後一個與分支不同）不得進 auto 桶"
+# codex 第一輪 Required：最後一個值是空字串時，舊版 --get 取到空值 → 目的地不明確 → ask。
+# 用 --get-all 自取末行會被命令替換吃掉尾端空值，退回第一個值 main 而誤入 auto。
+MME="$SANDBOX/multi-merge-empty"; mkrepo "$MME" "$SANDBOX/multi-merge-empty-remote.git"; commit1 "$MME" "multi merge empty"
+git_q "$MME" config --add branch.main.merge ""
+[ "$(git -C "$MME" rev-parse --abbrev-ref '@{u}' 2>/dev/null)" = origin/main ] \
+  && ok "前提：末值為空時上游仍解析為 origin/main" || ng "前提：末值為空時上游仍解析為 origin/main" "fixture 形狀不對，以下無鑑別力"
+TR_MME="$SANDBOX/tr_mme.jsonl"
+jq -cn --arg c "$MME" --arg f "$MME/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_MME"
+out_mme="$(fire_tr "$MME" s_multimerge_empty "$TR_MME")"
+case "$out_mme" in *"$(top_of "$MME")"*) ok "前提：末值為空的 repo 有報出" ;; *) ng "前提：末值為空的 repo 有報出" "漏報" ;; esac
+in_auto "$out_mme" "$MME" && ng "merge 末值為空不得進 auto 桶" "誤入 auto" || ok "merge 末值為空不得進 auto 桶"
+# codex 第五輪：末值結尾帶 \r 時，判定要與舊版的 `$(git config --get …)` 原樣結果一致——取到的值
+# 與分支同名才算目的地明確（auto），否則 ask。不可另外剝 \r 而把 ask 放寬成 auto。預期值由本 shell
+# 實際的命令替換結果決定（Linux 保留 \r → ask；若某平台的命令替換會去掉 CR，兩版都是 auto）。
+MMC="$SANDBOX/multi-merge-cr"; mkrepo "$MMC" "$SANDBOX/multi-merge-cr-remote.git"; commit1 "$MMC" "multi merge cr"
+git_q "$MMC" config --add branch.main.merge "refs/heads/main"$'\r'
+TR_MMC="$SANDBOX/tr_mmc.jsonl"
+jq -cn --arg c "$MMC" --arg f "$MMC/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_MMC"
+out_mmc="$(fire_tr "$MMC" s_multimerge_cr "$TR_MMC")"
+case "$out_mmc" in *"$(top_of "$MMC")"*) ok "前提：末值帶 CR 的 repo 有報出" ;; *) ng "前提：末值帶 CR 的 repo 有報出" "漏報" ;; esac
+if [ "$(git -C "$MMC" config --get branch.main.merge)" = refs/heads/main ]; then
+  in_auto "$out_mmc" "$MMC" && ok "merge 末值帶 CR：與本 shell 的取值一致（auto）" || ng "merge 末值帶 CR：與本 shell 的取值一致（auto）" "落在 ask"
+else
+  in_auto "$out_mmc" "$MMC" && ng "merge 末值帶 CR 不得被剝成同名而進 auto 桶" "誤入 auto" || ok "merge 末值帶 CR 不得被剝成同名而進 auto 桶"
+fi
+
+echo "== transcript 單次掃描（2026-11-23）=="
+# 寫入類工具那一行由 grep 整行輸出、交給 jq 補抽 token；同一行的 cwd 不可因此漏掉。
+SCA="$SANDBOX/scan-write"; SCB="$SANDBOX/scan-cwd"; mkrepo "$SCA"; mkrepo "$SCB"
+commit1 "$SCA" "scan write"; commit1 "$SCB" "scan cwd"
+TR_SC="$SANDBOX/tr_scan.jsonl"
+jq -cn --arg c "$SCB" --arg f "$SCA/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Edit", input:{file_path:$f}}]}}' > "$TR_SC"
+out_sc="$(fire_tr "$SANDBOX" s_scan "$TR_SC")"
+case "$out_sc" in *"$(top_of "$SCB")"*) ok "寫入行裡的 cwd 仍納入範圍" ;; *) ng "寫入行裡的 cwd 仍納入範圍" "漏掉了 $(top_of "$SCB")" ;; esac
+case "$out_sc" in *"$(top_of "$SCA")"*) ok "寫入行的 file_path 所屬 repo 也被檢查" ;; *) ng "寫入行的 file_path 所屬 repo 也被檢查" "漏掉了" ;; esac
+# 壞 JSON 行不得中止後續的寫入證據（舊版第一批 jq 遇到壞行就整串中止，之後的 Write 全漏）。
+SCW="$SANDBOX/scan-afterbad"; mkrepo "$SCW" "$SANDBOX/scan-afterbad-remote.git"; commit1 "$SCW" "after bad line"
+TR_BAD="$SANDBOX/tr_bad.jsonl"
+printf '%s\n' '{"cwd":"/nonexistent","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":' > "$TR_BAD"
+jq -cn --arg c "$SANDBOX" --arg f "$SCW/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' >> "$TR_BAD"
+out_bad="$(fire_tr "$SANDBOX" s_badline "$TR_BAD")"
+in_auto "$out_bad" "$SCW" && ok "壞 JSON 行之後的 Write 仍算寫入證據（進 auto 桶）" || ng "壞 JSON 行之後的 Write 仍算寫入證據" "沒進 auto 桶"
+# 寫入抽取在某一行出錯（name 不是字串，test() 會拋錯）時，同一行的範圍路徑仍要保留。
+SCE="$SANDBOX/scan-err-cwd"; mkrepo "$SCE"; commit1 "$SCE" "scan err cwd"
+TR_ERR="$SANDBOX/tr_err.jsonl"
+jq -cn --arg c "$SCE" --arg f "$SANDBOX/nowhere/x.txt" \
+  '{cwd:$c, odd:{name:5}, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_ERR"
+out_err="$(fire_tr "$SANDBOX" s_scan_err "$TR_ERR")"
+case "$out_err" in *"$(top_of "$SCE")"*) ok "寫入抽取出錯的那一行，cwd 仍納入範圍" ;; *) ng "寫入抽取出錯的那一行，cwd 仍納入範圍" "漏掉了 $(top_of "$SCE")" ;; esac
+
+# codex 第一輪 Optional：寫入行前面有空白仍是合法 JSONL，寫入證據不可因此消失。
+SCL="$SANDBOX/scan-lead-ws"; mkrepo "$SCL" "$SANDBOX/scan-lead-ws-remote.git"; commit1 "$SCL" "leading ws"
+TR_LWS="$SANDBOX/tr_lws.jsonl"
+printf '  %s\n' "$(jq -cn --arg c "$SCL" --arg f "$SCL/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}')" > "$TR_LWS"
+out_lws="$(fire_tr "$SANDBOX" s_lead_ws "$TR_LWS")"
+in_auto "$out_lws" "$SCL" && ok "前導空白的寫入行仍算寫入證據（進 auto 桶）" || ng "前導空白的寫入行仍算寫入證據" "沒進 auto 桶"
+
+echo "== 路徑內嵌換行不得偽造寫入證據（五軸審查 C1）=="
+# 寫入／唯讀的區分在輸出文字的行首，fromjson 會把 \n 還原成真的換行。一筆 Read 的 file_path
+# 若是 "x\n1\t<repo>/s.txt"，不擋的話會多出一行偽造的寫入證據，讓只讀過的 repo 進 auto 桶。
+INJ="$SANDBOX/inject"; mkrepo "$INJ" "$SANDBOX/inject-remote.git"; commit1 "$INJ" "user wip not mine"
+TR_INJ="$SANDBOX/tr_inj.jsonl"
+jq -cn --arg c "$SANDBOX" --arg f "$SANDBOX/nowhere/x"$'\n'"1"$'\t'"$INJ/s.txt" --arg r "$INJ/s.txt" \
+  '{cwd:$c, message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f}},
+                              {type:"tool_use", name:"Read", input:{file_path:$r}}]}}' > "$TR_INJ"
+out_inj="$(fire_tr "$SANDBOX" s_inject "$TR_INJ")"
+case "$out_inj" in *"$(top_of "$INJ")"*) ok "前提：被注入的 repo 仍在檢查範圍" ;; *) ng "前提：被注入的 repo 仍在檢查範圍" "漏報，以下無鑑別力" ;; esac
+in_auto "$out_inj" "$INJ" && ng "內嵌換行的唯讀路徑不得升級成寫入證據" "只讀過卻進了 auto 桶" || ok "內嵌換行的唯讀路徑不得升級成寫入證據"
+# Write 那批同理：內嵌換行的第二段不得拿到寫入證據。
+INJW="$SANDBOX/inject-w"; mkrepo "$INJW" "$SANDBOX/inject-w-remote.git"; commit1 "$INJW" "user wip w"
+TR_INJW="$SANDBOX/tr_injw.jsonl"
+jq -cn --arg c "$SANDBOX" --arg f "$SANDBOX/nowhere/y"$'\n'"1"$'\t'"$INJW/s.txt" --arg r "$INJW/s.txt" \
+  '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}},
+                              {type:"tool_use", name:"Read",  input:{file_path:$r}}]}}' > "$TR_INJW"
+out_injw="$(fire_tr "$SANDBOX" s_inject_w "$TR_INJW")"
+in_auto "$out_injw" "$INJW" && ng "Write 路徑內嵌換行的第二段不得拿到寫入證據" "進了 auto 桶" || ok "Write 路徑內嵌換行的第二段不得拿到寫入證據"
+
+echo "== 唯讀路徑的處理順序與舊版相同（codex 第三、四輪）=="
+# add_repo 的前綴快取讓處理順序有意義：父 repo 的路徑先到，巢狀 repo 的路徑就被當成父 repo 的
+# 而跳過。舊版唯讀批依【編碼後的 token 值】排序再反跳脫。巢狀 repo outer/z 在 transcript 裡寫成
+# z：編碼後 "\" 排在 "c" 前面（巢狀 repo 先處理而被找到），解碼後 "z" 排在 "c" 後面
+# （父 repo 先被快取、巢狀 repo 被吃掉）。以 LC_ALL=C 執行，排序結果與平台 locale 無關。
+OUTER="$SANDBOX/outer"; mkrepo "$OUTER"
+mkrepo "$OUTER/z"; commit1 "$OUTER/z" "nested unpushed"
+mkdir -p "$OUTER/c"; : > "$OUTER/c/f.txt"
+TR_ORD="$SANDBOX/tr_order.jsonl"
+printf '{"cwd":"/nonexistent","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s/\\u007a/f.txt"}}]}}\n' "$OUTER" > "$TR_ORD"
+printf '{"cwd":"/nonexistent","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"%s/c/f.txt"}}]}}\n' "$OUTER" >> "$TR_ORD"
+grep -q 'u007a' "$TR_ORD" && ok "前提：transcript 裡是 \\u007a 跳脫形式" || ng "前提：transcript 裡是 \\u007a 跳脫形式" "fixture 不對，以下無鑑別力"
+out_ord="$(jq -cn --arg c "$SANDBOX" --arg t "$TR_ORD" '{session_id:"s_order", cwd:$c, transcript_path:$t}' \
+  | LC_ALL=C GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
+case "$out_ord" in *"$(top_of "$OUTER/z")"*) ok "巢狀 repo 以跳脫形式出現時仍被檢查（處理順序同舊版）" ;; *) ng "巢狀 repo 以跳脫形式出現時仍被檢查（處理順序同舊版）" "被父 repo 的前綴快取吃掉" ;; esac
+
+# 排序要依 locale、不可改成 LC_ALL=C（codex 第三輪）：en_US 下 a/… 排在 Z… 前面（巢狀 repo outer2/a
+# 先處理而被找到），位元組排序則 Z 在前（父 repo 先被快取、巢狀 repo 被吃掉）。需要 en_US.UTF-8；
+# 環境沒有這個 locale 時記 SKIP（C.UTF-8 對有效 UTF-8 就是位元組順序，驗不出差別）。
+if [ "$(printf 'Zb\naa\n' | LC_ALL=en_US.UTF-8 sort 2>/dev/null | head -1)" = aa ]; then
+  OUT2="$SANDBOX/outer2"; mkrepo "$OUT2"
+  mkrepo "$OUT2/a"; commit1 "$OUT2/a" "nested a unpushed"
+  mkdir -p "$OUT2/Z"; : > "$OUT2/Z/f.txt"
+  TR_LOC="$SANDBOX/tr_locale.jsonl"
+  for f in "$OUT2/a/s.txt" "$OUT2/Z/f.txt"; do
+    jq -cn --arg f "$f" '{cwd:"/nonexistent", message:{content:[{type:"tool_use", name:"Read", input:{file_path:$f}}]}}' >> "$TR_LOC"
+  done
+  out_loc="$(jq -cn --arg c "$SANDBOX" --arg t "$TR_LOC" '{session_id:"s_locale", cwd:$c, transcript_path:$t}' \
+    | LC_ALL=en_US.UTF-8 GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
+  case "$out_loc" in *"$(top_of "$OUT2/a")"*) ok "en_US 下 a/… 先於 Z…：巢狀 repo 仍被檢查（排序維持 locale）" ;; *) ng "en_US 下 a/… 先於 Z…：巢狀 repo 仍被檢查（排序維持 locale）" "被父 repo 的前綴快取吃掉" ;; esac
+else
+  sk "locale 排序案例（環境沒有 en_US.UTF-8）"
+fi
+
+echo "== cwd 中間含換行不得被改寫成另一個路徑（codex 第三輪）=="
+# 舊版拿到含換行、不存在的路徑而不檢查；不可把換行刪掉、變成真的存在的 cwdnl-x 而報出它。
+CNX="$SANDBOX/cwdnl-x"; mkrepo "$CNX"; commit1 "$CNX" "cwd newline target"
+# 在 $CNX 裡執行：同時鎖住「無效的 cwd 不退回 $PWD」——退回的話 PWD 就是 cwdnl-x 而報出它。
+out_cnx="$(cd "$CNX" && jq -cn --arg c "$SANDBOX/cwdnl"$'\n'"-x" '{session_id:"s_cwd_nl", cwd:$c}' \
+  | GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
+case "$out_cnx" in *"$(top_of "$CNX")"*) ng "cwd 含換行不得被改寫成另一個存在的路徑" "報出了 cwdnl-x" ;; *) ok "cwd 含換行不得被改寫成另一個存在的路徑" ;; esac
+# 對照組：尾端換行與舊版相同（命令替換會去掉），仍指向該 repo 而報出。
+out_cnt="$(cd "$SANDBOX" && jq -cn --arg c "$CNX"$'\n' '{session_id:"s_cwd_nl_tail", cwd:$c}' \
+  | GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
+case "$out_cnt" in *"$(top_of "$CNX")"*) ok "cwd 只有尾端換行 → 照舊指向該 repo" ;; *) ng "cwd 只有尾端換行 → 照舊指向該 repo" "漏報" ;; esac
+
+echo "== stdin 合法物件後面接垃圾仍讀得到欄位（最終版複查 O1）=="
+# jq 先印完第一個物件的欄位才以 exit 5 結束；舊版逐欄 `|| true` 保住了值。不可因為離開碼非 0
+# 而丟掉 transcript（那會少檢查）。
+GARB="$SANDBOX/garbage-tail"; mkrepo "$GARB" "$SANDBOX/garbage-tail-remote.git"; commit1 "$GARB" "garbage tail"
+TR_GARB="$SANDBOX/tr_garb.jsonl"
+jq -cn --arg c "$SANDBOX" --arg f "$GARB/s.txt" '{cwd:$c, message:{content:[{type:"tool_use", name:"Write", input:{file_path:$f}}]}}' > "$TR_GARB"
+out_garb="$(cd "$SANDBOX" && { jq -cn --arg c "$SANDBOX" --arg t "$TR_GARB" '{session_id:"s_garbage", cwd:$c, transcript_path:$t}'; printf ' garbage'; } \
+  | GIT_GUARD_ALLOW_TEMP=1 bash "$HOOK" 2>/dev/null)"
+case "$out_garb" in *"$(top_of "$GARB")"*) ok "stdin 尾端有垃圾時仍讀 transcript" ;; *) ng "stdin 尾端有垃圾時仍讀 transcript" "transcript 被丟掉而漏報" ;; esac
 
 echo "== 非 repo / 異常輸入不得出錯 =="
 silent "$SANDBOX" s13 "非 git 目錄 → 靜默"

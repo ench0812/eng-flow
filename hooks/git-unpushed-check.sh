@@ -30,7 +30,7 @@
 #            而被忽略的警告等於沒有警告。
 # 折衷做法是從 transcript 取出本 session 出現過的所有 cwd，以及 Write/Edit
 # 動過的檔案所在目錄，解析成 repo 後只檢查那些。這正好是「這次工作可能造成
-# 遺失」的集合。成本是一次 jq 掃 transcript（實測 4.7MB / 127ms）。
+# 遺失」的集合。成本是兩個 grep 先篩、一次 jq 反跳脫（167MB 實測約 1.4 秒，見下方掃描段）。
 #
 # ~/.claude/git-guard-roots 仍然支援，但定位改為「不論這次有沒有碰、都要盯著的
 # 根目錄」的明確加選，不是預設。多數情況不需要它——session 範圍已經涵蓋。
@@ -85,14 +85,31 @@ fi
 # （實測 53 秒，超過 15 秒 timeout，hook 被取消就等於靜默）。GIT_GUARD_STAMP_DIR 只給測試用。
 STAMP_DIR="${GIT_GUARD_STAMP_DIR:-${tmp_path:-/tmp}/claude-git-guard}"
 
-sid="$(printf '%s' "$input" | "$JQ" -r '.session_id // "nosession"' 2>/dev/null || echo nosession)"
-sid="$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9._-' | cut -c1-40)"
-cwd="$(printf '%s' "$input" | "$JQ" -r '.cwd // ""' 2>/dev/null || true)"
+# 一次 jq 取出三個欄位（舊版三次 jq＋tr＋cut），一行一欄讀回，所以值裡不能留換行：
+# - sid：換行直接去掉（舊版 tr 本來就只留安全字元）。
+# - cwd／transcript_path：與舊版 `$(jq -r …)` 相同，只去掉尾端的 \n（不含 \r）；仍含 \r 或 \n 的值【不可】
+#   把換行刪掉——那會把 /a\n-b 改寫成另一個可能真的存在的 /a-b（codex 第三輪）。舊版拿到的是
+#   含換行、不存在的路徑；這裡改輸出 0x1f 當「無效」記號：cwd 無效就不檢查（也不退回 $PWD），
+#   transcript 無效就當成沒有 transcript，結果與舊版相同。
+# 輸入不是 JSON 物件時 jq 沒有輸出，三個欄位維持預設值。【不看 jq 的離開碼】（最終版複查 O1）：
+# 「合法物件後面接垃圾」時 jq 先印完第一個物件的三行才以 exit 5 結束，舊版逐欄的 `|| true` 會
+# 保住那些值；看離開碼就會丟掉 transcript、少檢查。陣列在 .[] 之前已完整建好，不會只印一半。
+sid=nosession; cwd=""; transcript=""; BAD=$'\x1f'
+meta="$(printf '%s' "$input" | "$JQ" -r '
+            def path_field: tostring | sub("\n+$"; "") | if test("[\r\n]") then "\u001f" else . end;
+            [(.session_id // "nosession" | tostring | gsub("[\r\n]"; "")),
+             (.cwd // "" | path_field), (.transcript_path // "" | path_field)] | .[]' 2>/dev/null)"
+if [ -n "$meta" ]; then
+  { IFS= read -r sid; IFS= read -r cwd; IFS= read -r transcript; } <<<"$meta"
+  sid="${sid%$'\r'}"; cwd="${cwd%$'\r'}"; transcript="${transcript%$'\r'}"   # Windows 的 jq 輸出 CRLF
+fi
+sid="${sid//[!A-Za-z0-9._-]/}"; sid="${sid:0:40}"
+[ "$transcript" = "$BAD" ] && transcript=""
 [ -n "$cwd" ] || cwd="$PWD"
-transcript="$(printf '%s' "$input" | "$JQ" -r '.transcript_path // ""' 2>/dev/null || true)"
 
 # --- 收集要檢查的 repo ---
 repos=""
+repo_list=()    # 同一批 repo 的陣列形式，逐 repo 迴圈直接用，不必再開 tr／grep 拆字串
 writable=""     # 其中「本 session 有寫入證據」的 repo（正規化頂層），只有這些能進 auto 桶
 tops_norm=()    # 已解析出的 repo 頂層（正斜線形式），用於前綴短路
 not_repo=""     # 問過 git、結論是「不列入」的路徑（不是 repo，或頂層在臨時目錄），同一路徑不再問
@@ -124,7 +141,7 @@ is_temp_path() {
   return 1
 }
 
-# $2="w" 表示這個路徑帶有【本 session 的寫入證據】（cwd，或 Write/Edit 類工具動過的檔）。
+# $2="w" 表示這個路徑帶有【本 session 的寫入證據】（Write/Edit 類工具動過的檔；cwd 不算，見下方）。
 # 為什麼要分：auto 桶會讓模型【不問就推】，而 push 是這條路徑上唯一不可逆的動作。
 # 只有「讀過一個檔」就授權推送，會把使用者自己留在那個 repo 的 WIP commit 推出去——
 # 那筆 commit 根本不是這次工作產生的。範圍收集維持寬鬆（多報方向安全），
@@ -160,10 +177,11 @@ add_repo() {
   is_temp_path "$ntop" && { not_repo="$not_repo|$np|"; return 0; }
   case "$repos" in *"|$top|"*) return 0 ;; esac
   repos="$repos|$top|"
+  repo_list+=("$top")
   [ "$mode" = w ] && writable="$writable|$ntop|"
   tops_norm+=("$ntop")
 }
-add_repo "$cwd"   # 只進範圍，不算寫入證據（理由見下方 take w 的註解）
+[ "$cwd" = "$BAD" ] || add_repo "$cwd"   # 只進範圍，不算寫入證據（理由見下方掃描段的註解）
 
 # 本 session 碰過的目錄：transcript 每筆記錄都帶 cwd，Write/Edit 則帶 file_path
 # （檔案可能不在 cwd 底下，所以要另外取其所在目錄）。一次 jq 取完兩者。
@@ -179,55 +197,84 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
   # 少數字串做 JSON 反跳脫。純 jq 走完整份 transcript 要迭代每筆的 message.content
   # 陣列——實測 4.7MB 要 1889ms，比這個混合寫法慢 19 倍，而這段掛在每個回合結束。
   # 反跳脫交給 jq 而不是自己 sed：Windows 路徑的反斜線是跳脫過的，手寫容易錯。
-  # fromjson? 讓個別壞行被略過而不是中止整串。
-  # 分兩批，先寫入後唯讀（順序有意義：寫入那批要先建立 tops_norm 並標記 writable）。
-  # 成本：比原本多掃兩次 transcript（實測 4.7MB / 每次約 127ms）。掛在 Stop、每回合一次，
-  # timeout 15s，這個代價換掉的是「只讀過就自動對外推送」——不對稱到不需要猶豫。
-  norm_paths() { sed 's/^"[a-z_]*"://' | sort -u | "$JQ" -rR 'fromjson? // empty' 2>/dev/null; }
-  take() {  # take <mode>：把 stdin 的路徑逐一餵給 add_repo
-    local mode="${1:-}" d
-    while IFS= read -r d; do
-      # 【先去掉行尾 \r】(2026-10-05 週回顧): Windows 上的 jq（實測 1.8.2）輸出 CRLF，
-      # 多行清單除了最後一行都帶 \r。目錄字串帶 \r 時下面的 [ -d ] 判為否、被剝掉一層，
-      # transcript 裡的 cwd 就被解析成父目錄，那個 repo 整個漏檢（檔案路徑剝最後一段時
-      # 剛好連 \r 一起剝掉，所以只有 cwd 會中）。
-      d="${d%$'\r'}"
-      [ -n "$d" ] || continue
-      # cwd 本來就是目錄；file_path 是檔案，取其所在目錄。
-      # 用參數展開而非 printf|sed：後者每個路徑要開一個子行程，實測 23 個
-      # 路徑共 740ms——本 hook 最大的單項成本，而它掛在每個回合結束。
-      [ -d "$d" ] || d="${d%[/\\]*}"
-      add_repo "$d" "$mode"
-    done
-  }
-
-  # 【必須用 heredoc 餵，不可用 `... | take`】：管線會讓 take 跑在子行程裡，
+  # 個別壞行以 try 略過，不中止整串。
+  #
+  # 路徑分兩類，以行首標記區分：
+  # 1<TAB>路徑 ＝寫入證據：【只有】寫入類工具實際動過的檔。
+  #   【cwd 不算證據】(codex 複查抓到): cwd 只表示「session 從那裡啟動」，不表示有寫入。
+  #   在一個有既存 WIP commit 的 repo 裡開 session 做純唯讀 review，cwd 就指向它——
+  #   若算證據，那些不屬於本次工作的 commit 會被自動推出去。
+  #   代價：純 git 操作（merge / cherry-pick，沒有 Write/Edit）產生的 commit 會落到 ask 桶，
+  #   每次多問一句。這個方向是對的——那種 commit 本來就該讓使用者確認。
+  #   【必須以工具物件為單位抽路徑】(codex 複查抓到): 先 grep 含 Write/Edit 的整行、再抽該行
+  #   所有 file_path 是錯的——同一筆 message.content 可以同時裝著 Write(A) 與 Read(B)，
+  #   B 會跟著被授權。所以 grep 只用來把候選行縮到極少數，真正的抽取交給 jq 逐物件做。
+  # 2<TAB>路徑 ＝其餘路徑（cwd、Read 過的檔，以及寫入行裡出現的所有路徑）：只納入檢查範圍，
+  #   不授權自動推送。
+  #
+  # 【兩條管線，處理順序與舊版逐一相同】(2026-11-23 量測與 codex 第三、四輪):
+  #   add_repo 的前綴快取讓處理順序有意義——父 repo 的路徑先到，巢狀子 repo 的路徑就被當成
+  #   父 repo 的而跳過。所以兩批的順序都照舊版：寫入批依 locale 排序【解碼後的路徑】，唯讀批
+  #   依 locale 排序【編碼後的 token 值】（去掉 "cwd": 這類鍵名之後）再反跳脫；先寫入、後唯讀。
+  #   改成位元組排序、或改成對解碼後的唯讀路徑排序，都會在 a/…↔Z…、é↔z 這類情況換順序。
+  #   - LC_ALL=C 只用在 grep 與去重：逐位元組比對，token 那支在 en_US.UTF-8 下 938ms、C 下
+  #     432ms；UTF-8 locale 遇到無效位元組還會把整個檔當二進位、只印 "Binary file matches"
+  #     （-a 再保險一次）。排序本身維持 locale。
+  #   - 兩批都先 LC_ALL=C sort -u（位元組精確去重；一份 transcript 有上萬個重複 token、寫入行
+  #     也常是同一個檔寫好幾次），
+  #     再 locale sort（得到舊版的順序）。不直接用 locale 的 sort -u：UTF-8 collation 會把
+  #     排序上相等的不同路徑併成一筆而少檢查一個 repo（舊版就是如此，這裡順手堵住）。
+  #   - 【不要合成一個 grep】：試過以 `^.*"name":"Write".*$|<token>` 一次取整行與 token，
+  #     grep 失去快速搜尋路徑，C locale 下單是 grep 就 4.1 秒，UTF-8 locale 下跑了數分鐘。
+  #     多讀一次檔的成本在 page cache 裡很小，兩個簡單的 grep 比一個複雜的快。
+  # jq -R 逐行 fromjson：舊版第一批的 jq 直接解析 JSON 串流，遇到一行壞 JSON 就中止，之後的
+  # 寫入證據全部漏掉；-R 之下一行出錯只影響那一行（實測：拿掉 try 結果不變，try 只是不留 stderr）。
+  # 寫入行裡的路徑 token 由第二個 grep 照樣取到（它掃全部的行）。
+  # 成本：純 jq 走完整份 transcript 實測 4.7MB / 1889ms，比 grep 先篩慢 19 倍，故不那樣做。
+  #
+  # jq 程式放在 heredoc 外的單引號變數：裡面有 \" 與 \t，不要讓它們經過 heredoc 的反斜線處理。
+  # 【含換行的路徑一律丟掉】(五軸審查 C1): 寫入與唯讀的區分放在輸出文字的行首（1／2），
+  # 而 fromjson 會把路徑裡的 \n 還原成真的換行。一筆 Read 的 file_path 若是
+  # "x\n1\t<repo>/f"，就會多出一行偽造的寫入證據，讓只讀過的 repo 進 auto 桶（實測重現）。
+  # 路徑可由模型產生（prompt injection、失敗的工具呼叫也會留在 transcript），所以要擋在
+  # 標記之前。代價：含換行的路徑整個退出檢查範圍（Linux 上檔名可以含換行；位在那種 repo 裡的
+  # cwd 同樣含換行而被判無效，只剩 ROOTS_FILE 掃描找得到它）——為了擋偽造寫入證據而接受的取捨。
+  # 舊版寫入批帶換行時也有同樣的偽造缺口，一併堵住。
+  CLEAN_JQ='def clean: select(type == "string" and (test("[\r\n]") | not));'
+  WRITE_JQ="$CLEAN_JQ"'
+    try ([fromjson | .. | objects
+          | select((.name? // "") | test("^(Write|Edit|MultiEdit|NotebookEdit)$"))
+          | (.input.file_path? // .input.notebook_path?)
+          | select(. != null)] | .[] | tostring | clean | "1\t" + .) catch empty'
+  READ_JQ="$CLEAN_JQ"'
+    try (fromjson | clean | "2\t" + .) catch empty'
+  # 【必須用 heredoc 餵，不可用 `... | while`】：管線會讓迴圈跑在子行程裡，
   # $writable 與 tops_norm 的累積出不來，最後 auto 桶永遠是空的——靜默失效。
   # 本檔下方的逐 repo 迴圈已經為同一個理由寫過一次註解，這裡是第二個現場。
-  #
-  # (1) 寫入證據：【只有】寫入類工具實際動過的檔。
-  #
-  # 【cwd 不算證據】(codex 複查抓到): cwd 只表示「session 從那裡啟動」，不表示有寫入。
-  # 在一個有既存 WIP commit 的 repo 裡開 session 做純唯讀 review，cwd 就指向它——
-  # 若算證據，那些不屬於本次工作的 commit 會被自動推出去。
-  # 代價：純 git 操作（merge / cherry-pick，沒有 Write/Edit）產生的 commit 會落到 ask 桶，
-  # 每次多問一句。這個方向是對的——那種 commit 本來就該讓使用者確認。
-  #
-  # 【必須以工具物件為單位抽路徑】(codex 複查抓到): 先 grep 含 Write/Edit 的整行、再抽該行
-  # 所有 file_path 是錯的——同一筆 message.content 可以同時裝著 Write(A) 與 Read(B)，
-  # B 會跟著被授權。所以 grep 只用來把候選行數縮到極少數，真正的抽取交給 jq 逐物件做。
-  # （純 jq 走完整份 transcript 實測 4.7MB / 1889ms，比這個混合寫法慢 19 倍，故不那樣做。）
-  take w <<EOF
-$(grep -hE '"name":"(Write|Edit|MultiEdit|NotebookEdit)"' "$transcript" 2>/dev/null \
-  | "$JQ" -r '[.. | objects
-                 | select((.name? // "") | test("^(Write|Edit|MultiEdit|NotebookEdit)$"))
-                 | (.input.file_path? // .input.notebook_path?)
-                 | select(. != null)] | .[]' 2>/dev/null | sort -u)
-EOF
-
-  # (2) 其餘路徑（cwd 與 Read 過的檔）：只納入檢查範圍，不授權自動推送。
-  take <<EOF
-$(grep -ohE '"(cwd|file_path|notebook_path)":"[^"]*"' "$transcript" 2>/dev/null | norm_paths)
+  while IFS= read -r d; do
+    # 【先去掉行尾 \r】(2026-10-05 週回顧): Windows 上的 jq（實測 1.8.2）輸出 CRLF，
+    # 多行清單除了最後一行都帶 \r。目錄字串帶 \r 時下面的 [ -d ] 判為否、被剝掉一層，
+    # transcript 裡的 cwd 就被解析成父目錄，那個 repo 整個漏檢（檔案路徑剝最後一段時
+    # 剛好連 \r 一起剝掉，所以只有 cwd 會中）。
+    d="${d%$'\r'}"
+    case "$d" in
+      1$'\t'*) mode=w ;;
+      2$'\t'*) mode="" ;;
+      *) continue ;;
+    esac
+    d="${d#?$'\t'}"
+    [ -n "$d" ] || continue
+    # cwd 本來就是目錄；file_path 是檔案，取其所在目錄。
+    # 用參數展開而非 printf|sed：後者每個路徑要開一個子行程，實測 23 個
+    # 路徑共 740ms——本 hook 最大的單項成本，而它掛在每個回合結束。
+    [ -d "$d" ] || d="${d%[/\\]*}"
+    add_repo "$d" "$mode"
+  done <<EOF
+$({ LC_ALL=C grep -ahE '"name":"(Write|Edit|MultiEdit|NotebookEdit)"' "$transcript" \
+      | "$JQ" -rR "$WRITE_JQ" | LC_ALL=C sort -u | sort
+    LC_ALL=C grep -aohE '"(cwd|file_path|notebook_path)":"[^"]*"' "$transcript" \
+      | sed 's/^"[a-z_]*"://' | LC_ALL=C sort -u | sort | "$JQ" -rR "$READ_JQ"
+  } 2>/dev/null)
 EOF
 fi
 
@@ -279,6 +326,47 @@ NOTE_UNSAFE="（分支或遠端名稱含特殊字元，不提供自動推送指�
 # feature 分支沒有寫入證據時附的說明（不再因此轉 ask，見上方 is_shared_branch）。
 NOTE_NO_WRITE="（本 session 沒有寫入證據；推送目標是 feature 分支，依 2026-10-07 使用者裁定不必確認 commit 歸屬）"
 
+# 每個 repo 一次 for-each-ref 就拿齊判定所需的狀態（2026-11-23 量測）：只列指向 HEAD 的分支
+# （通常一兩條，ahead/behind 只對這幾條算），目前分支以 %(HEAD)=* 標示。欄位以 0x1f 分隔：
+# tab 是 IFS 空白字元，連續兩個 tab 會被 read 合併，空欄位（沒有上游）就會讓後面的欄位錯位。
+# %(upstream:remotename) 讀的就是 branch.<b>.remote 設定（與舊版 config --get 相同）；merge 設定
+# 不從這裡取（多值時取法不同，待示警時另行 config --get，見迴圈內 R1）。%(upstream:track) 是
+# plumbing 輸出、不翻譯，形式只有 ""／gone／ahead N／behind N／ahead N, behind N 幾種。
+# 【輸出格式要先驗】(最終版複查 R-A): branch.<b>.merge 與 fetch refspec 的值可以含換行，
+# %(upstream)／upstream:short 會把它原樣輸出，一列被拆成兩列——目前分支那一列被截短（上游變成
+# 不存在的名字、track 變空＝誤判乾淨），或另一條分支的設定接出一列偽造的「* 列」。所以每一列
+# 都必須以 "*<US>" 或 " <US>" 開頭、* 列剛好一列、且那一列剛好 7 個欄位；任何一點不符就整筆
+# 轉 ask（state=unknown）。三項檢查對正常輸入互為備援，負控組刻意一次全拿掉（M20）。
+# 刻意不防：值裡同時塞 0x1f 與換行、精心湊出格式的設定——能改 .git/config 的人本來就能設
+# core.hooksPath 之類，這裡防的是「設定不正常」，不是「設定被惡意改寫」。
+US=$'\x1f'
+CUR_MARK="*$US"   # 目前分支那一列的開頭（%(HEAD) 輸出 *，其餘列是空白）
+REF_FMT='%(HEAD)%1f%(objectname)%1f%(refname)%1f%(upstream)%1f%(upstream:short)%1f%(upstream:remotename)%1f%(upstream:track,nobracket)'
+REF_SEPS="$US$US$US$US$US$US"   # 7 個欄位＝6 個分隔符
+
+# 標記檔名＝HEAD sha＋repo 路徑的雜湊，全用 bash 內建運算算出。舊版每個待示警的 repo 要開
+# sha256sum／tr／cut 四個子行程。兩個 31 位元的多項式雜湊合成 64 位元：只有「同一 session、
+# 同一個 HEAD sha、不同路徑」（同一 repo 的多個 worktree）才需要靠它區分，碰撞機率可忽略。
+# 換鍵的代價：升級當下的 session 對已提醒過的 repo 會再提醒一次。
+path_hash() {  # path_hash <s>：結果放在 REPLY（16 個十六進位字元）
+  local s="$1" i c h1=5381 h2=52711
+  for ((i = 0; i < ${#s}; i++)); do
+    printf -v c '%d' "'${s:i:1}"
+    h1=$(( (h1 * 33 + c) & 0x7fffffff ))
+    h2=$(( (h2 * 131 + c) & 0x7fffffff ))
+  done
+  printf -v REPLY '%08x%08x' "$h1" "$h2"
+}
+# 【一取得 HEAD 就先查標記】(2026-11-23 量測)：舊版把標記檢查排在每個 repo 的 rev-list、
+# rev-parse @{u}、branch、兩次 config 之後，同一 session 第二次 Stop 仍要跑 104 個 git。
+# 提前查不會改變結果：標記存在時，舊版不是在中途 continue、就是在標記檢查 continue，
+# 兩者都不輸出；標記仍然只在確定要示警的位置寫入（見迴圈尾端）。
+stamp_seen() {  # 依 $top 與 $head_sha 設定 $stamp；已存在回 0
+  path_hash "$top"
+  stamp="$STAMP_DIR/$sid/$head_sha.$REPLY"
+  [ -f "$stamp" ]
+}
+
 # --- 逐 repo 判定 ---
 findings=""
 auto_findings=""   # fast-forward 且目的地明確：照列出的推送指令推，不需要逐一問人
@@ -289,31 +377,78 @@ ask_findings=""    # 目的地不明確、落後遠端、或推共用分支但�
 while IFS= read -r top; do
   [ -n "$top" ] || continue
   [ -d "$top" ] || continue
-  # 先跑唯一具決定性的那一次 git 呼叫。絕大多數情況是「乾淨」，這條路徑要最短：
-  # 本 hook 掛在 Stop 上、每個回合結束都會跑，每多一次 git 子行程在
-  # Windows/Git Bash 上就是 50-80ms。細節（分支名、主旨、未提交數）只在
-  # 確定要示警時才去取。
-  #
-  # rev-list 在沒有上游時會失敗，正好用它的失敗當「無上游」的訊號，
-  # 省掉一次額外的 rev-parse。
-  # --left-right --count 一次拿到 behind 與 ahead（輸出是「behind<TAB>ahead」）。
+  push_cmd=""; pr_remote=""; pr_branch=""; pr_u=""; cmp_ref=""; head_sha=""; branch=""
+  # 先跑唯一具決定性的那一次 git 呼叫（REF_FMT 見上方）。絕大多數情況是「乾淨」，這條路徑
+  # 要最短：本 hook 掛在 Stop 上、每個回合結束都會跑，每多一次 git 子行程在 Windows/Git Bash
+  # 上就是 20～180ms。細節（主旨、未提交數）只在確定要示警時才去取。
   # 需要 behind 是因為 2026-09-08 起有上游的 repo 會被歸類成「可直接推」，而那個結論
   # 只在 fast-forward 時成立——落後遠端時 push 會被拒（或需要 rebase/merge），
   # 那是要人決定的事，不能自動做。
-  # 仍然沿用「rev-list 失敗＝無上游」這個訊號，省一次 rev-parse。
-  if lr="$(git -C "$top" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null)"; then
-    behind="${lr%%[	 ]*}"; ahead="${lr##*[	 ]}"
-    case "$ahead"  in ''|*[!0-9]*) ahead=0 ;; esac
-    case "$behind" in ''|*[!0-9]*) behind=0 ;; esac
+  # 「有上游」的判準與舊版的 `rev-list @{u}...HEAD` 成功相同：設定了上游（%(upstream) 非空），
+  # 而且它的 remote-tracking ref 存在（track 不是 gone）。
+  state=unknown
+  if refs="$(git -C "$top" for-each-ref --points-at HEAD --format="$REF_FMT" refs/heads/ 2>/dev/null)"; then
+    # 只採 %(HEAD) 為 * 的那一列（目前分支）。CUR_MARK 在引號內，* 是字面字元不是萬用字元；
+    # 其他指向同一個 HEAD 的分支列以空白開頭，不會被採用。沒有 * 列就是 detached（見下）。
+    cur=""; nstar=0; fmt_ok=1
+    if [ -n "$refs" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          "$CUR_MARK"*) cur="$line"; nstar=$((nstar + 1)) ;;
+          " $US"*) ;;
+          *) fmt_ok=0 ;;   # 設定值裡的換行接出來的續行（R-A）
+        esac
+      done <<<"$refs"
+    fi
+    if [ "$nstar" -gt 1 ]; then fmt_ok=0; fi
+    if [ "$nstar" = 1 ] && [ "${cur//[!$US]/}" != "$REF_SEPS" ]; then fmt_ok=0; fi
+    if [ "$fmt_ok" = 0 ]; then
+      head_sha="$(git -C "$top" rev-parse -q --verify HEAD 2>/dev/null)" || continue
+      state=unknown
+    elif [ -n "$cur" ]; then
+      IFS="$US" read -r _hmark head_sha ref up ups urem track <<<"$cur"
+      branch="${ref#refs/heads/}"
+      ahead=0; behind=0; track_ok=1
+      case "$track" in
+        '') ;;
+        gone) up="" ;;
+        'ahead '*', behind '*) ahead="${track#ahead }"; ahead="${ahead%%,*}"; behind="${track##*behind }" ;;
+        'ahead '*) ahead="${track#ahead }" ;;
+        'behind '*) behind="${track#behind }" ;;
+        *) track_ok=0 ;;
+      esac
+      case "$ahead"  in ''|*[!0-9]*) track_ok=0 ;; esac
+      case "$behind" in ''|*[!0-9]*) track_ok=0 ;; esac
+      if [ "$track_ok" = 0 ]; then state=unknown
+      elif [ -n "$up" ]; then state=up
+      else state=noup; fi
+    else
+      # 沒有 * 列＝detached HEAD（目前分支一定指向 HEAD，一定會被列出）。
+      head_sha="$(git -C "$top" rev-parse -q --verify HEAD 2>/dev/null)" || continue
+      branch="<detached>"; state=noup
+    fi
+  else
+    # for-each-ref 失敗。HEAD 解析不了（空 repo、orphan 分支）時 --points-at HEAD 必然失敗，
+    # 那沒有東西會遺失——與舊版 rev-list、rev-parse HEAD 都失敗而 continue 相同。
+    # HEAD 解析得了卻失敗（例如 git 太舊、不認得欄位）就不可靜默：state=unknown 轉 ask。
+    head_sha="$(git -C "$top" rev-parse -q --verify HEAD 2>/dev/null)" || continue
+  fi
+  [ -n "$head_sha" ] || continue
+  if [ "$state" = up ]; then
     [ "$ahead" -gt 0 ] || continue
-    push_cmd=""; pr_remote=""; pr_branch=""; pr_u=""
+    stamp_seen && continue
     cmp_ref='@{u}'   # 列 commit 用的比較基準；用 ref 本身，不用顯示用的短名稱
-    upstream="$(git -C "$top" rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '<upstream>')"
-    branch="$(git -C "$top" branch --show-current 2>/dev/null)"
+    upstream="${ups:-<upstream>}"
     # 遠端與上游分支要從分支設定讀，不可從 "origin/main" 這個字串用第一個 `/` 拆（codex 第二輪
     # Required）：遠端名稱本身可以含 `/`，`team/origin` 與 `team` 可以同時存在，拆錯就會推到
     # 另一個 repository。讀不到、或上游是本地分支（remote 為 "."），一律當成不明確。
-    urem="$(git -C "$top" config --get "branch.$branch.remote" 2>/dev/null)"
+    # urem 由上面的 for-each-ref 一併取得（＝branch.<b>.remote 設定）；umerge 在下面另讀。
+    # 【merge 改用 config --get 重讀】(五軸審查 R1、codex 第一輪 Required): %(upstream:remoteref)
+    # 取多值的第一個，舊版的 `git config --get` 取最後一個（含空值）；不同值會讓原本 ask 的分支
+    # （上游名稱不同＋共用分支名稱、或 merge 為空）變成 auto。不可用 --get-all 自己取末行：
+    # 命令替換會把尾端的空值連同換行一起吃掉。只在已確定要示警的 repo 上多問這一次。
+    # 不另外剝 \r（codex 第五輪）：舊版就是原樣的命令替換結果；多剝一個 \r 會讓結尾帶 CR 的
+    # merge 值變成與分支同名，把原本要問的共用分支推送放進 auto 桶。
     umerge="$(git -C "$top" config --get "branch.$branch.merge" 2>/dev/null)"
     ubranch="${umerge#refs/heads/}"
     if [ -z "$branch" ] || [ -z "$urem" ] || [ "$urem" = . ] || [ -z "$umerge" ] || [ "$ubranch" = "$umerge" ]; then
@@ -387,19 +522,17 @@ while IFS= read -r top; do
            reason="$reason（本 session 只讀取過這個 repo，沒有寫入證據——這些 commit 可能不是這次工作產生的）" ;;
       esac
     fi
-  else
+  elif [ "$state" = noup ]; then
+    # 沒有上游追蹤。空 repo（尚無 commit）在上面已經 continue，那沒有東西會遺失。
+    stamp_seen && continue
     bucket=ask
-    push_cmd=""; pr_remote=""; pr_branch=""; pr_u=""; cmp_ref=""
-    # 沒有上游追蹤。空 repo（尚無 commit）不算，那沒有東西會遺失。
-    git -C "$top" rev-parse HEAD >/dev/null 2>&1 || continue
     upstream=""
-    branch="$(git -C "$top" branch --show-current 2>/dev/null)"
-    [ -n "$branch" ] || branch="<detached>"
     # 「沒有上游」不等於「沒有遠端備份」：從 origin/main 切出、尚未新增 commit
     # 的本地分支，所有 commit 都已在遠端。所以再問一次「HEAD 是否被任何
     # remote-tracking ref 涵蓋」，據此分成兩種嚴重度不同的說法，不要一律當成
     # 最壞情況——狼來了的警告會被忽略，那等於沒有警告。
-    if [ -n "$(git -C "$top" branch -r --contains HEAD 2>/dev/null | head -1)" ]; then
+    # for-each-ref --count=1 等同舊版的 `branch -r --contains HEAD | head -1`，少一個 head 子行程。
+    if [ -n "$(git -C "$top" for-each-ref --count=1 --contains HEAD --format=x refs/remotes/ 2>/dev/null)" ]; then
       reason="分支 $branch 沒有上游追蹤（HEAD 已被某個 remote-tracking ref 涵蓋，尚可確認有備份）"
     else
       reason="分支 $branch 沒有上游追蹤，且 HEAD 不在任何 remote-tracking ref 內（無遠端備份）"
@@ -419,6 +552,11 @@ while IFS= read -r top; do
           fi ;;
       esac
     fi
+  else
+    # 讀不到分支狀態，但 HEAD 存在（有東西可能遺失）：不可當成「乾淨」靜默放過（fail-closed）。
+    stamp_seen && continue
+    bucket=ask; upstream=""
+    reason="無法判定分支與上游狀態（git for-each-ref 失敗或輸出無法辨識），請手動確認是否已推送"
   fi
   # 推送指令在這裡統一組出：固定遠端＋完整 refspec，參數跳脫；名稱不安全就不給指令、轉 ask。
   if [ "$bucket" = auto ]; then
@@ -430,30 +568,31 @@ while IFS= read -r top; do
       bucket=ask; reason="$reason$NOTE_UNSAFE"
     fi
   fi
-  head_sha="$(git -C "$top" rev-parse HEAD 2>/dev/null)" || continue
-  [ -n "$head_sha" ] || continue
-
-  # 同一 (session, repo, HEAD) 只提醒一次，避免 Stop 迴圈。
-  key="$(printf '%s|%s' "$top" "$head_sha" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || cksum; } | tr -cd '0-9a-f' | cut -c1-32)"
-  stamp="$STAMP_DIR/$sid/$key"
-  [ -f "$stamp" ] && continue
-  mkdir -p "$(dirname "$stamp")" 2>/dev/null && : > "$stamp" 2>/dev/null
+  # 同一 (session, repo, HEAD) 只提醒一次，避免 Stop 迴圈。標記有沒有存在，上面各分支一取得
+  # HEAD 就先查過（stamp_seen 同時算好 $stamp）；這裡只在確定要示警時寫入，位置與舊版相同。
+  # mkdir 失敗就不寫（同舊版）；寫檔包在 { } 裡，重導向失敗的訊息才會被 2>/dev/null 收掉——
+  # Codex 轉接層看到 stderr 非空就丟掉整份發現（最終版複查 O-1）。
+  { [ -d "${stamp%/*}" ] || mkdir -p "${stamp%/*}"; } 2>/dev/null && { : > "$stamp"; } 2>/dev/null
 
   # 帶上相對時間: 判斷「這些 commit 是不是本次工作做的」最直接的線索就是它有多舊。
   # hook 自己不做這個判斷——它沒有「本次工作是什麼」的上下文，而讀到這段訊息的一方有。
   # 分層是刻意的: hook 做機械過濾（有無上游 / 是否 fast-forward / 本 session 有無寫入），
   # commit 歸屬這種語意判斷留給執行者。往 hook 裡再堆推斷（比對 session 起始時間、
   # 配對 tool_result 確認寫入成功）只會擴大誤判面，而誤判的代價是不可逆的對外推送。
-  subjects="$(git -C "$top" log --format='      %h %ad %s' --date=relative \
-                ${cmp_ref:+"$cmp_ref"..}HEAD 2>/dev/null | head -3)"
-  # 用 wc -l 不用 grep -c：工作目錄乾淨時 grep 會印 0 但以 status 1 結束，
-  # 後面的 `|| echo 0` 於是再補一個 0，dirty 變成兩行的 "0\n0"，警告裡就會
-  # 出現異常的數字。wc 永遠 exit 0。
-  dirty="$(git -C "$top" status --porcelain 2>/dev/null | wc -l | tr -cd '0-9')"
-  [ -n "$dirty" ] || dirty=0
+  # -n 3 而不是 `| head -3`：沒有上游時範圍是整條歷史，舊版要等 git log 印完（或被 SIGPIPE）
+  # 才結束，實測最長 601ms；輸出與取前三行相同。
+  subjects="$(git -C "$top" log -n 3 --format='      %h %ad %s' --date=relative \
+                ${cmp_ref:+"$cmp_ref"..}HEAD 2>/dev/null)"
+  # 未提交數只是給讀者的參考，不影響分桶。不掃未追蹤檔（2026-11-23 量測）：worktree 上
+  # `git status --porcelain` 單次 0.45～2.15 秒，是逐 repo 迴圈裡最大的尖峰；訊息裡註明口徑。
+  # 計數用 mapfile（內建）而不是 wc -l：省子行程，且狀態讀不到時維持 0。
+  dirty=0
+  if st="$(git -C "$top" status --porcelain --untracked-files=no 2>/dev/null)" && [ -n "$st" ]; then
+    mapfile -t st_lines <<<"$st"; dirty=${#st_lines[@]}
+  fi
   entry="
   - $top
-      $reason；未提交變更 $dirty 筆
+      $reason；未提交變更 $dirty 筆（不含未追蹤檔）
 $subjects"
   # auto 桶附上確切的推送指令：上游名稱可能與分支不同（見上方），讓執行者自己組指令就有推錯目標的機會。
   [ "$bucket" = auto ] && [ -n "$push_cmd" ] && entry="$entry
@@ -465,8 +604,10 @@ $subjects"
   findings="$findings$entry"
 # 用 heredoc 餵入而不是 `... | while`：管線會讓迴圈跑在子行程裡，
 # $findings 累積的結果出不來，最後永遠是空的（＝靜默漏報）。
+# sort 不加 -u：add_repo 已逐字去重；UTF-8 locale 的 sort -u 會把排序上相等的不同路徑
+# 併成一筆而少檢查一個 repo（最終版複查 O-2）。不加 LC_ALL=C 是為了維持舊版的輸出順序。
 done <<EOF
-$(printf '%s' "$repos" | tr '|' '\n' | grep -v '^$' | sort -u)
+$(printf '%s\n' ${repo_list+"${repo_list[@]}"} | sort)
 EOF
 
 [ -n "$findings" ] || exit 0
