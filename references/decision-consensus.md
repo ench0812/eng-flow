@@ -90,9 +90,19 @@ replaces a codex-review round, and the delivery cross-family review axis is unch
 Claude-family.
 
 **Reserved for the user (never arbitrated).** Irreversible, destructive or production actions;
-expanding authorization or scope (including the review-loop scope stop and moving work out of an
-issue's scope); anything touching the safety iron rules; codex-decide exit `5` (Codex ruled 停下).
-Exit `2` means fix the caller.
+expanding authorization or scope (including the stop after three fix-and-review rounds that still
+raise new must-fix findings, and moving work out of an issue's scope); anything touching the safety
+iron rules; codex-decide exit `5` (Codex ruled 停下). Exit `2` means fix the caller.
+
+**Every Critical/Required judged out of the requirement's scope** (mao-review *Triaging Findings*)
+needs a ruling under AGENTS.md Response #3 — even when the reviewer itself noted it as outside the
+requirement, which is input, not a ruling. Whether it lies within the original requirement's intent is
+a requirement/intent question: Fable may rule only when precedent covers it, otherwise the user. When
+fixing it would expand authorization or scope, or it touches the safety iron rules, it stays reserved
+for the user. A coordinator the user has explicitly authorized for this task may rule within what the
+user delegated, never on the reserved items above. Security-class findings are never out of scope, and
+the change is not integrated or delivered until the ruling is made; a ruling that it is in scope makes
+it must-fix, back through the fix and re-review loop.
 
 **Before dispatching.**
 - Codex chose our option but attached an objection: first follow the existing procedure — record the
