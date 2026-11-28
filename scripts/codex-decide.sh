@@ -29,27 +29,106 @@
 #   1 = FAILED(諮詢根本沒發生)   2 = 呼叫端合約錯誤
 #   5 = codex 裁定「停下」(它判定這個決定屬安全鐵律或不可逆操作) → 直接交使用者,【不經 Fable 仲裁】:
 #       「屬不屬於排除類」本身就是不得仲裁的問題,不能讓兩個 Claude 家族模型推翻 codex 的安全旗標。
+#
+# 副作用: 每次結束(任何離開碼)在 $CODEX_DECIDE_LOG(預設 ~/.claude/cache/codex-decide-usage.tsv)
+# 追加一列紀錄,寫不進去也不影響離開碼與輸出。欄位見 write_decide_log,報表: codex-usage.sh。
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUESTION=""; PREFER=""; SEVERITY="required"; ALLOW_INFERENCE=0
+
+# --- 每次呼叫結束時留一行紀錄(2026-11-28 週回顧提案二,使用者裁定「做」) ---
+# 為什麼: 1.51.0 換 gpt-6.2-sol 後要觀察 exit 3(例如契約行被加粗),但這支多半在背景跑、完成通知
+# 沒人讀,又沒有用量檔,連兩週都量不到。比照 codex-review.sh 的 $CODEX_REVIEW_LOG 追加一列 TSV
+# (同目錄、ts 同為 UTC、第一次寫入先寫表頭);報表見 codex-usage.sh 的「codex-decide」區塊。
+# 【fail-open 只限紀錄這一行】: 寫不進去(目錄不可寫、磁碟滿)不得改變離開碼與任何輸出——離開碼是
+# 唯一可靠的判定管道。所以整段在子殼裡跑、stdout／stderr 都丟掉;若改寫成 { …; } 2>/dev/null,
+# 群組內 set -u 的展開錯誤會跳過後面的 return,把離開碼改掉。
+# 隱私: 不寫問題內容、codex 的理由／異議。來源只記 repo 與問題檔的 basename。prefer 與 verdict 的原值
+# 【一律不寫】(格式合法的代號也可能是姓名,例如 Alice_Smith),只寫 agree(裁定是否等於傾向)與
+# verdict_kind(same／other_option／其他／停下／<nonstd>);severity／信心／依據只寫白名單內的值。
+# token 欄只代表最後一次嘗試(退回舊模型時 JSONL 會清空重來);沒有 usage 就留空。
+# DETAIL 是離開原因的固定代號,只給紀錄用,【不參與任何判定】。
+# 沒有 HOME(env -i、部分排程)時紀錄路徑留空、不寫: 裸寫 $HOME 會在 set -u 下讓整支腳本在這裡就死掉。
+CODEX_DECIDE_LOG="${CODEX_DECIDE_LOG:-${HOME:+$HOME/.claude/cache/codex-decide-usage.tsv}}"
+DETAIL=""; OUT=""; ERR=""; JSONL=""
+# 紀錄會讀到的變數一律先清空: 否則在選定模型之前就離開的路徑(參數錯誤、缺安全聲明)會記到
+# 環境裡同名變數的值(MODEL 記錯、USED_LEGACY 含 tab 會讓欄位錯位)。後面的流程都會在使用前重新賦值。
+MODEL=""; EFFORT=""; USED_LEGACY=0; REPO_ROOT=""; VERDICT=""; CONF=""; BASIS=""; REASON=""; DISSENT=""
+decide_log_tsv() { local v="${1:-}"; v="${v//$'\t'/ }"; v="${v//$'\n'/ }"; v="${v//$'\r'/ }"; printf '%s' "$v"; }
+decide_log_kind() { # $1=裁定 $2=傾向 → 裁定的類別(不含原值)
+  case "${1:-}" in
+    '') ;;
+    其他|停下) printf '%s' "$1" ;;
+    *) if [ -n "${2:-}" ] && [ "$1" = "$2" ]; then printf 'same'
+       elif [[ "$1" =~ ^[A-Za-z0-9_-]{1,16}$ ]]; then printf 'other_option'
+       else printf '<nonstd>'; fi ;;
+  esac
+}
+write_decide_log() { # $1=腳本離開碼。只在 on_exit 的子殼裡呼叫
+  local rc="$1" status repo q sev verdict agree usage
+  [ -n "${CODEX_DECIDE_LOG:-}" ] || return 0
+  case "$rc" in
+    0) status=OK ;; 1) status=FAILED ;; 2) status=CONTRACT_ERROR ;; 3) status=NO_CONSENSUS ;;
+    4) status=RATE_LIMITED ;; 5) status=STOP ;; *) status=OTHER ;;
+  esac
+  # 每個刻意的 exit 都先設 DETAIL;空的就是非預期離開(被 SIGTERM／TaskStop 砍掉、set -u 中止)。
+  # signal 路徑上 EXIT trap 看到的 $? 是前一個指令的 0,照抄會把被砍掉的呼叫記成共識成立,
+  # 所以改記 INTERRUPTED,rc 為 0 時留空(不宣稱一個沒發生的離開碼)。
+  if [ -z "${DETAIL:-}" ]; then status=INTERRUPTED; [ "$rc" = 0 ] && rc=""; fi
+  repo="${REPO_ROOT:-}"; [ -n "$repo" ] || repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  repo="${repo%/}"; repo="${repo##*[/\\]}"
+  q="${QUESTION:-}"; q="${q##*[/\\]}"
+  sev="$(printf '%s' "${SEVERITY:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$sev" in critical|required|optional|nit|fyi) ;; *) sev="<unknown>" ;; esac
+  verdict="${VERDICT:-}"; [ "$rc" = 5 ] && verdict="停下"   # 停下在契約解析之前就離開,VERDICT 還沒有值
+  # agree: 裁定是否等於傾向。停下也記 0(它本來就不是同意);算一致率時請以 status／verdict_kind 排除 STOP
+  agree=""; if [ -n "$verdict" ]; then if [ "$verdict" = "${PREFER:-}" ]; then agree=1; else agree=0; fi; fi
+  usage=""; [ -n "${JSONL:-}" ] && usage="$(grep -o '"usage":{[^}]*}' "$JSONL" 2>/dev/null | tail -1)"
+  jn() { printf '%s' "$usage" | grep -o "\"$1\":[0-9]*" | head -1 | cut -d: -f2; }
+  mkdir -p "$(dirname "$CODEX_DECIDE_LOG")" || return 0
+  # 上一次寫到一半(磁碟滿、被砍)留下沒有換行的半列時先補換行,這一列才不會接在殘列後面而錯位
+  # ($( ) 會吃掉結尾換行,所以「最後一個 byte 非空」就代表缺換行)
+  if [ -s "$CODEX_DECIDE_LOG" ] && [ -n "$(tail -c1 "$CODEX_DECIDE_LOG")" ]; then printf '\n' >> "$CODEX_DECIDE_LOG"; fi
+  if [ ! -s "$CODEX_DECIDE_LOG" ]; then   # 不存在或空檔都先寫表頭(依欄名取值的讀法要靠它)
+    printf 'ts\trepo\tquestion\tseverity\tmodel\teffort\tused_legacy\tagree\tverdict_kind\tconfidence\tbasis\tallow_inference\tinput_tokens\tcached_input_tokens\toutput_tokens\treasoning_tokens\tstatus\tdetail\trc\n' \
+      >> "$CODEX_DECIDE_LOG" || return 0
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" "$(decide_log_tsv "$repo")" "$(decide_log_tsv "$q")" \
+    "$sev" "$(decide_log_tsv "${MODEL:-}")" "$(decide_log_tsv "${EFFORT:-}")" "${USED_LEGACY:-0}" \
+    "$agree" "$(decide_log_kind "$verdict" "${PREFER:-}")" \
+    "$(case "${CONF:-}" in 高|中|低) printf '%s' "$CONF" ;; '') ;; *) printf '<nonstd>' ;; esac)" \
+    "$(case "${BASIS:-}" in 已讀|推論) printf '%s' "$BASIS" ;; '') ;; *) printf '<nonstd>' ;; esac)" \
+    "${ALLOW_INFERENCE:-0}" "$(jn input_tokens)" "$(jn cached_input_tokens)" "$(jn output_tokens)" \
+    "$(jn reasoning_output_tokens)" "$status" "$(decide_log_tsv "${DETAIL:-}")" "$rc" \
+    >> "$CODEX_DECIDE_LOG"
+}
+on_exit() {
+  local rc=$?
+  ( write_decide_log "$rc" ) >/dev/null 2>&1 || :
+  rm -f ${OUT:+"$OUT"} ${ERR:+"$ERR"} ${JSONL:+"$JSONL"} 2>/dev/null || :
+  exit "$rc"
+}
+trap on_exit EXIT
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --question|--prefer|--severity)
-      [ $# -ge 2 ] || { echo "[codex-decide] 錯誤: $1 需要值。" >&2; exit 2; }
+      [ $# -ge 2 ] || { DETAIL=args; echo "[codex-decide] 錯誤: $1 需要值。" >&2; exit 2; }
       case "$1" in
         --question) QUESTION="$2" ;;
         --prefer)   PREFER="$2" ;;
         --severity) SEVERITY="$2" ;;
       esac; shift 2 ;;
     --allow-inference) ALLOW_INFERENCE=1; shift ;;
-    -h|--help) echo "用法: bash codex-decide.sh --question <path> --prefer <代號> [--severity <level>] [--allow-inference]"; exit 0 ;;
-    *) echo "[codex-decide] 未知參數: $1" >&2; exit 2 ;;
+    -h|--help) DETAIL=help; echo "用法: bash codex-decide.sh --question <path> --prefer <代號> [--severity <level>] [--allow-inference]"; exit 0 ;;
+    *) DETAIL=args; echo "[codex-decide] 未知參數: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$QUESTION" ] || { echo "[codex-decide] 錯誤: 需要 --question <path>。" >&2; exit 2; }
-[ -f "$QUESTION" ] || { echo "[codex-decide] 錯誤: 找不到 '$QUESTION'。" >&2; exit 2; }
-[ -n "$PREFER" ]   || { echo "[codex-decide] 錯誤: 需要 --prefer <代號>(你自己的傾向;沒有傾向就不該走這條流程,直接問使用者)。" >&2; exit 2; }
+[ -n "$QUESTION" ] || { DETAIL=args; echo "[codex-decide] 錯誤: 需要 --question <path>。" >&2; exit 2; }
+[ -f "$QUESTION" ] || { DETAIL=no_question_file; echo "[codex-decide] 錯誤: 找不到 '$QUESTION'。" >&2; exit 2; }
+[ -n "$PREFER" ]   || { DETAIL=args; echo "[codex-decide] 錯誤: 需要 --prefer <代號>(你自己的傾向;沒有傾向就不該走這條流程,直接問使用者)。" >&2; exit 2; }
 
 # 【呼叫端必須聲明這不是安全鐵律/不可逆類】。這裡只驗證聲明【在場】,不驗證它正確——
 # 正確性無法用程式判定。缺聲明就擋下,是要逼呼叫端在送出前實際想過這一步,
@@ -58,7 +137,7 @@ if ! grep -qE '^##[[:space:]]*安全與可逆性聲明' "$QUESTION" 2>/dev/null;
   echo "[codex-decide] 錯誤: '$QUESTION' 缺少「## 安全與可逆性聲明」小節。" >&2
   echo "  這條流程不適用於安全鐵律五條與不可逆操作——那些一律停下等使用者。" >&2
   echo "  請在問題檔加一節寫明: 這個決定為什麼不屬於那幾類、以及做錯了怎麼還原。" >&2
-  exit 2
+  DETAIL=no_safety_declaration; exit 2
 fi
 
 # (歷史)映射與退路原和 codex-review.sh 同一套(模型 2026-10-05 使用者裁定;effort 2026-10-08 依實測
@@ -93,11 +172,11 @@ fi
 # 這裡 codex 的意見是「可不可以逕行」的唯一依據,缺了就沒有共識可言)。
 if [ -z "$CODEX_BIN" ]; then
   echo "[codex-decide] SKIP: 未偵測到 codex CLI —— 沒有第二意見就沒有共識,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
-  exit 3
+  DETAIL=no_codex; exit 3
 fi
 if ! "$CODEX_BIN" login status >/dev/null 2>&1; then
   echo "[codex-decide] SKIP: codex 未授權 —— 停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
-  exit 3
+  DETAIL=no_auth; exit 3
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -136,8 +215,7 @@ read -r -d '' PROMPT <<EOF
 提供的內容推得、沒有查證任何東西就寫「推論」。誠實標註——標錯比標保守糟得多。
 EOF
 
-OUT="$(mktemp)"; ERR="$(mktemp)"; JSONL="$(mktemp)"
-trap 'rm -f "$OUT" "$ERR" "$JSONL" 2>/dev/null || true' EXIT
+OUT="$(mktemp)"; ERR="$(mktemp)"; JSONL="$(mktemp)"   # 由開頭的 on_exit 清除(先寫紀錄、再刪暫存檔)
 
 # features.memories=false: 理由同 codex-review.sh 的 NO_MEMORIES_FLAG(注入 7.3k Memory 區塊、
 # luna 會因此讀工作根以外的檔)。
@@ -217,7 +295,7 @@ exit_if_stop() {
   if sed -E "$STOP_NORM_SED" "$OUT" 2>/dev/null | grep -E '^裁定(:|：)?停下' >/dev/null; then
     cat "$OUT"; [ -n "$(tail -c1 "$OUT")" ] && echo
     echo "[codex-decide] 停下: codex 判定此決定屬安全鐵律或不可逆操作,直接交使用者(不經 Fable 仲裁)。" >&2
-    exit 5
+    DETAIL=stop; exit 5
   fi
 }
 run_codex
@@ -241,12 +319,12 @@ cat "$OUT"
 RATE_PAT="you'?ve (hit|reached) your usage limit|you have (hit|reached) your usage limit|reached your workspace credit limit|out of credits|quota exceeded|rate limit reached"
 if grep -qiE "$RATE_PAT" "$ERR" "$OUT" 2>/dev/null && ! grep -qE '^裁定[:：]' "$OUT" 2>/dev/null; then
   echo "[codex-decide] RATE_LIMITED: 諮詢沒有取得結果。沒有第二意見就沒有共識——停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
-  exit 4
+  DETAIL=rate_limited; exit 4
 fi
 if [ "$RC" -ne 0 ] || [ ! -s "$OUT" ]; then
   echo "[codex-decide] FAILED: codex 非正常結束(exit=$RC)或零輸出,諮詢根本沒發生。" >&2
   tail -n 20 "$ERR" >&2
-  exit 1
+  if [ "$RC" -ne 0 ]; then DETAIL=codex_exit; else DETAIL=empty_output; fi; exit 1
 fi
 
 # --- codex 的 shell 起得來嗎(2026-10-14) ---
@@ -284,7 +362,7 @@ if [ "$LAUNCH_FAIL_N" -gt 0 ]; then
   printf '%s\n' "$LAUNCH_FAIL_TYPES" | sort | uniq -c | awk '{ $1=$1; printf "    %s\n", $0 }' >&2
   echo "  復發診斷(不花額度): codex sandbox \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile -Command \"Get-Location\";" >&2
   echo "  沙箱能跑但 exec 仍失敗時看 \$CODEX_HOME/.sandbox/setup_error.json 與當天 sandbox.<日期>.log 的 os error 32(詳見 codex-review.sh)。" >&2
-  exit 3
+  DETAIL=launch_fail; exit 3
 fi
 
 # 裁定行不只一行 = 回覆自相矛盾(例如先同意後改口),field() 只取第一行會誤判成共識 → 無共識
@@ -292,7 +370,7 @@ VERDICT_LINES="$(grep -cE '^裁定(:|：)' "$OUT" 2>/dev/null)"
 case "$VERDICT_LINES" in ''|*[!0-9]*) VERDICT_LINES=0 ;; esac
 if [ "$VERDICT_LINES" -gt 1 ]; then
   echo "[codex-decide] 無共識: 回覆有 ${VERDICT_LINES} 個裁定行,無法判定採哪一個,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
-  exit 3
+  DETAIL=multi_verdict; exit 3
 fi
 field() { grep -m1 -E "^$1(:|：)" "$OUT" | sed -E "s/^$1(:|：)[[:space:]]*//" | tr -d '\r' | xargs; }  # (:|：) 與 locale 無關
 VERDICT="$(field 裁定)"; CONF="$(field 信心)"; BASIS="$(field 依據)"
@@ -309,13 +387,13 @@ for f in 裁定:VERDICT 信心:CONF 依據:BASIS 理由:REASON 異議:DISSENT; d
 done
 if [ -n "$MISSING" ]; then
   echo "[codex-decide] 無共識: 回覆缺少契約行:$MISSING。格式不完整無法判定,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
-  exit 3
+  DETAIL="missing_fields:$(printf '%s' "${MISSING# }" | tr ' ' ',')"; exit 3
 fi
 case "$CONF" in 高|中|低) ;; *)
-  echo "[codex-decide] 無共識: 信心值「$CONF」不在 高|中|低 之內,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2; exit 3 ;;
+  echo "[codex-decide] 無共識: 信心值「$CONF」不在 高|中|低 之內,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2; DETAIL=bad_confidence; exit 3 ;;
 esac
 case "$BASIS" in 已讀|推論) ;; *)
-  echo "[codex-decide] 無共識: 依據值「$BASIS」不在 已讀|推論 之內,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2; exit 3 ;;
+  echo "[codex-decide] 無共識: 依據值「$BASIS」不在 已讀|推論 之內,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2; DETAIL=bad_basis; exit 3 ;;
 esac
 # 契約行完整且值域合法時才印這一行,摘要 codex 的立場,供呼叫端在 Fable 仲裁時轉述給仲裁者
 # (references/decision-consensus.md)。【它不參與任何判定】: 要不要逕行仍只看離開碼,
@@ -325,17 +403,17 @@ echo "[codex-decide] codex 立場: 裁定=$VERDICT 信心=$CONF 依據=$BASIS �
 if [ "$VERDICT" != "$PREFER" ]; then
   echo "[codex-decide] 無共識: codex 裁定「$VERDICT」,我方傾向「$PREFER」。停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   [ "$DISSENT" != "無" ] && echo "  codex 異議: $DISSENT" >&2
-  exit 3
+  DETAIL=mismatch; exit 3
 fi
 # 選了同一個但信心低 = 兩邊都不確定,不該當成可以逕行的依據。
 if [ "$CONF" = "低" ]; then
   echo "[codex-decide] 無共識: codex 同選「$VERDICT」但信心低——兩邊都不確定,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
-  exit 3
+  DETAIL=low_confidence; exit 3
 fi
 if [ "$DISSENT" != "無" ]; then
   echo "[codex-decide] 無共識: codex 雖同選「$VERDICT」但提出異議,停下(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
   echo "  codex 異議: $DISSENT" >&2
-  exit 3
+  DETAIL=dissent; exit 3
 fi
 # 【純推論預設不構成共識】,對齊 decision-consensus.md 的 "unverified inference are not
 # consensus"。但不無條件擋死: 有一類決定(先做哪張卡、優先序)本來就沒有原始碼可讀,
@@ -345,10 +423,10 @@ if [ "$BASIS" = "推論" ] && [ "$ALLOW_INFERENCE" != "1" ]; then
   echo "[codex-decide] 無共識: codex 標【推論】(未查證任何檔案),依預設不構成共識。" >&2
   echo "  這個決定若本來就不需要讀程式碼(例如純優先序),呼叫端加 --allow-inference 重跑;" >&2
   echo "  若它其實需要查證,那就是不得逕行的情況(先依 decision-consensus.md 交 Fable 仲裁,仍不成立再交使用者)。" >&2
-  exit 3
+  DETAIL=inference_not_allowed; exit 3
 fi
 
 NOTE=""; [ "$BASIS" = "推論" ] && NOTE=" 【注意: 無查證共識,呼叫端已聲明本決定不需查證】"
 [ "$USED_LEGACY" -eq 1 ] && NOTE="$NOTE 【已退回舊模型】"
 echo "[codex-decide] 共識成立: 裁定=$VERDICT 信心=$CONF 依據=$BASIS (模型=$MODEL/$EFFORT)。可依共識進行。$NOTE" >&2
-exit 0
+DETAIL=consensus; exit 0

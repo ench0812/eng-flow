@@ -42,6 +42,8 @@ need_tmp() { # $1=tmpd 的結果 $2=變數名稱
 T="$(tmpd)"; need_tmp "$T" T
 # === TMP-PREAMBLE-END ===
 trap 'rm -rf "$T"' EXIT
+# 腳本每次結束都追加一列紀錄(2026-11-28 起);不導走就會寫進使用者真正的 ~/.claude/cache
+export CODEX_DECIDE_LOG="$T/decide-usage-default.tsv"
 mkdir -p "$T/bin" "$T/repo"
 ( cd "$T/repo" && git init -q . )
 printf '# Q\n\n選項 A／B\n\n## 安全與可逆性聲明\n可逆。\n' > "$T/q.md"
@@ -94,6 +96,9 @@ for a in "\$@"; do [ "\$prev" = "-m" ] && model="\$a"; prev="\$a"; done
 { printf '%s\n' "\$@"; echo "----"; } >> "$T/calls.log"
 echo "\${LOCALAPPDATA-<unset>}" >> "$T/laa.log"
 cat >/dev/null
+# STUB_SLEEP: 模擬 codex 還在跑(測試在這段期間對腳本送 SIGTERM);先留下 started 標記讓測試知道已進到這裡
+# (記下 pid 並 exec: 測試收尾時要能砍掉它,否則它以 \$T 底下為工作目錄,Windows 上 rm -rf "\$T" 會刪不掉)
+if [ -n "\${STUB_SLEEP:-}" ]; then echo "\$\$" > "$T/stub-started"; exec sleep "\$STUB_SLEEP"; fi
 o=""; prev=""
 for a in "\$@"; do [ "\$prev" = "-o" ] && o="\$a"; prev="\$a"; done
 # JSON 模式(EVENTS 指到一份 JSONL): 忠實模擬真 codex --json —— stdout 只有 JSONL 事件流,
@@ -469,6 +474,187 @@ NO_O=1 lf_run
 ok "-o 沒寫出(JSONL 在 stdout、exit 0) → FAILED exit 1" test "$lf_rc" -eq 1 -a "$(grep -c 'FAILED:' "$T/out.txt")" -eq 1
 ok "-o 沒寫出 → 不是缺契約行的無共識"              lf_out_lacks '缺少契約行'
 # === LAUNCHFAIL-END ===
+
+# === DECIDE-LOG-BEGIN ===
+# --- 每次呼叫結束都追加一列 TSV(2026-11-28 週回顧提案二) ---
+# 任何離開碼(0～5)都要寫;寫紀錄失敗不得改變離開碼與輸出;prefer／verdict 的原值一律不寫(只記 agree 與 verdict_kind)。
+# 欄位依表頭的欄名取值(不靠位置),另有一則斷言把表頭整列鎖死——codex-usage.sh 依位置讀。
+DL="$T/decide-log"; mkdir -p "$DL"
+DL_HEADER="$(printf 'ts\trepo\tquestion\tseverity\tmodel\teffort\tused_legacy\tagree\tverdict_kind\tconfidence\tbasis\tallow_inference\tinput_tokens\tcached_input_tokens\toutput_tokens\treasoning_tokens\tstatus\tdetail\trc')"
+dl_rc=0
+dl_run() { # $1=紀錄檔名(先刪掉);其餘=codex-decide.sh 的參數。其他環境變數由呼叫端前綴帶入
+  local f="$DL/$1"; shift; rm -f "$f"
+  ( cd "$T/repo" && CODEX_DECIDE_LOG="$f" EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" "$@" >"$T/out.txt" 2>&1 )
+  dl_rc=$?
+}
+dl_rows() { grep -vc "^ts$(printf '\t')" "$DL/$1" 2>/dev/null; }      # 資料列數
+dl_col() { # $1=檔 $2=欄名 → 最後一筆資料列該欄的值
+  awk -F'\t' -v c="$2" 'NR==1{for(i=1;i<=NF;i++) if($i==c) k=i; next} {v=(k?$k:"<no-col>")} END{print v}' "$DL/$1"; }
+dl_row_is() { # $1=檔 其餘=欄名=期望值;逐一比對,不符就印出差異
+  local f="$1" kv c want got; shift
+  [ "$(dl_rows "$f")" = 1 ] || { echo "    $f 資料列數 $(dl_rows "$f") ≠ 1"; return 1; }
+  # 紀錄的 rc 必須等於腳本實際的離開碼(trap 保留了 $?,而且沒有被紀錄本身改掉)
+  [ "$(dl_col "$f" rc)" = "$dl_rc" ] || { echo "    $f 紀錄 rc=$(dl_col "$f" rc) ≠ 腳本 exit $dl_rc"; return 1; }
+  for kv in "$@"; do c="${kv%%=*}"; want="${kv#*=}"; got="$(dl_col "$f" "$c")"
+    [ "$got" = "$want" ] || { echo "    $f 欄 $c: 期望 <$want> 實得 <$got>"; return 1; }
+  done
+}
+QB="$T/q-nodecl.md"; printf '# Q\n\n選項 A／B\n' > "$QB"
+BASE=(--question "$T/q.md" --prefer A --severity required)
+
+lf_item "PROBE-OK" 0 completed | lf_events
+dl_run r0.tsv "${BASE[@]}"
+ok "紀錄 rc=0: 腳本照常 exit 0"            test "$dl_rc" -eq 0
+ok "紀錄 rc=0: 表頭整列固定"                test "$(head -1 "$DL/r0.tsv")" = "$DL_HEADER"
+ok "紀錄 rc=0: 每列 19 欄"                  test "$(awk -F'\t' 'NF!=19' "$DL/r0.tsv" | wc -l)" -eq 0
+ok "紀錄 rc=0: 欄位正確"                    dl_row_is r0.tsv status=OK rc=0 detail=consensus model=gpt-6.2-sol effort=medium \
+  severity=required used_legacy=0 agree=1 verdict_kind=same confidence=高 basis=已讀 allow_inference=0 repo=repo question=q.md \
+  input_tokens=100 cached_input_tokens=50 output_tokens=10 reasoning_tokens=0
+ok "紀錄 rc=0: ts 是帶 Z 的 UTC"            bash -c '[[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]' _ "$(dl_col r0.tsv ts)"
+
+JSON_ERR=boom dl_run r1.tsv "${BASE[@]}"
+ok "紀錄 rc=1(FAILED)"                     dl_row_is r1.tsv status=FAILED rc=1 detail=codex_exit model=gpt-6.2-sol
+
+dl_run r2.tsv --question "$QB" --prefer A
+ok "紀錄 rc=2(缺安全聲明)"                 dl_row_is r2.tsv status=CONTRACT_ERROR rc=2 detail=no_safety_declaration model= question=q-nodecl.md
+dl_run r2b.tsv --question "$T/q.md"
+ok "紀錄 rc=2(缺 --prefer)"                dl_row_is r2b.tsv status=CONTRACT_ERROR rc=2 detail=args agree= verdict_kind=
+
+STUB_VERDICT=B dl_run r3.tsv "${BASE[@]}"
+ok "紀錄 rc=3(選項不同)"                   dl_row_is r3.tsv status=NO_CONSENSUS rc=3 detail=mismatch agree=0 verdict_kind=other_option
+# 裁定行只有空白 → 缺契約行(契約行被加粗而讀不到時就是這一類,觀察 gpt-6.2-sol 的主要目標)
+STUB_VERDICT=' ' dl_run r3b.tsv "${BASE[@]}"
+ok "紀錄 rc=3(缺契約行,detail 帶欄名)"     dl_row_is r3b.tsv status=NO_CONSENSUS rc=3 detail=missing_fields:裁定
+lf_item "$LF_ERR" -1 failed | lf_events
+dl_run r3c.tsv "${BASE[@]}"
+ok "紀錄 rc=3(shell 啟動失敗)"             dl_row_is r3c.tsv status=NO_CONSENSUS rc=3 detail=launch_fail
+lf_item "PROBE-OK" 0 completed | lf_events
+
+JSON_ERR="You've hit your usage limit. Upgrade to Pro" dl_run r4.tsv "${BASE[@]}"
+ok "紀錄 rc=4(RATE_LIMITED)"               dl_row_is r4.tsv status=RATE_LIMITED rc=4 detail=rate_limited
+
+STUB_VERDICT=停下 dl_run r5.tsv "${BASE[@]}"
+ok "紀錄 rc=5(停下)"                       dl_row_is r5.tsv status=STOP rc=5 detail=stop agree=0 verdict_kind=停下
+
+dl_run rh.tsv --help
+ok "紀錄 --help: detail=help(報表不計)"    dl_row_is rh.tsv status=OK rc=0 detail=help
+
+REJECT=gpt-6.2-sol dl_run rl.tsv "${BASE[@]}"
+ok "紀錄 退回舊模型: 記退路模型與旗標"      dl_row_is rl.tsv status=OK rc=0 used_legacy=1 model=gpt-6.1-sol effort=medium
+
+# 隱私: prefer 與 verdict 的原值不得進紀錄(只記 agree 與 verdict_kind;非代號形狀的裁定歸 <nonstd>)
+STUB_VERDICT='其他:客戶名稱ZQX9' dl_run rp.tsv --question "$T/q.md" --prefer '方案甲 含問題內容PQW7' --severity required
+ok "紀錄 自由文字: 只記類別 <nonstd>、不一致" dl_row_is rp.tsv agree=0 verdict_kind='<nonstd>' rc=3
+# 格式合法的代號也可能是姓名: 原值一律不寫,只寫類別與是否一致
+STUB_VERDICT=Bob_Jones9 dl_run rn.tsv --question "$T/q.md" --prefer Alice_Smith7 --severity required
+ok "紀錄 ASCII 姓名形狀的代號: 只記 other_option" dl_row_is rn.tsv agree=0 verdict_kind=other_option rc=3
+ok "紀錄 ASCII 姓名形狀的代號: 原值不出現"  bash -c '! grep -qE "Alice_Smith7|Bob_Jones9" "$1"' _ "$DL/rn.tsv"
+STUB_VERDICT=Alice_Smith7 dl_run rn2.tsv --question "$T/q.md" --prefer Alice_Smith7 --severity required
+ok "紀錄 一致時: 只記 same"                 dl_row_is rn2.tsv agree=1 verdict_kind=same rc=0
+ok "紀錄 一致時: 原值不出現"                bash -c '! grep -q Alice_Smith7 "$1"' _ "$DL/rn2.tsv"
+ok "紀錄 自由文字: 原文不出現在紀錄裡"     bash -c '! grep -qE "ZQX9|PQW7" "$1"' _ "$DL/rp.tsv"
+
+# 紀錄寫不進去(父路徑是一般檔案,mkdir 失敗)→ 離開碼、stdout、stderr 都與對照組逐位元組相同。
+# 分開收 stdout／stderr 用 cmp 比,不經 $( )(會吃掉結尾換行)
+printf 'x' > "$DL/blocker"
+mkdir -p "$DL/is-a-dir"
+dl_cmp() { # $1=案例名 $2=寫不進去的紀錄路徑 其餘=環境(VAR=val);比對可寫與不可寫兩次的 rc／stdout／stderr
+  local name="$1" bad="$2" rc_ok rc_bad; shift 2
+  ( cd "$T/repo" && env "$@" CODEX_DECIDE_LOG="$DL/ok-$name.tsv" EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" "${BASE[@]}" >"$DL/$name.ok.out" 2>"$DL/$name.ok.err" ); rc_ok=$?
+  ( cd "$T/repo" && env "$@" CODEX_DECIDE_LOG="$bad" EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" "${BASE[@]}" >"$DL/$name.bad.out" 2>"$DL/$name.bad.err" ); rc_bad=$?
+  ok "不可寫 $name: 對照組確實寫了紀錄"      test "$(dl_rows "ok-$name.tsv")" = 1
+  ok "不可寫 $name: 離開碼不變($rc_ok)"      test "$rc_ok" = "$rc_bad"
+  ok "不可寫 $name: stdout 逐位元組相同"     cmp -s "$DL/$name.ok.out" "$DL/$name.bad.out"
+  ok "不可寫 $name: stderr 逐位元組相同"     cmp -s "$DL/$name.ok.err" "$DL/$name.bad.err"
+}
+dl_cmp consensus "$DL/blocker/sub/log.tsv" IGNORE=1
+dl_cmp mismatch  "$DL/blocker/sub/log.tsv" STUB_VERDICT=B
+dl_cmp stop      "$DL/blocker/sub/log.tsv" STUB_VERDICT=停下
+# 紀錄路徑本身是目錄: mkdir 成功、append 失敗(另一條失敗路徑)
+dl_cmp dirpath   "$DL/is-a-dir" IGNORE=1
+ok "不可寫: 沒有在 blocker 底下建出任何東西" test -f "$DL/blocker"
+ok "不可寫: 目錄路徑仍是空目錄"             test -z "$(ls -A "$DL/is-a-dir")"
+
+# 沒有 HOME 也不得改變離開碼與輸出(紀錄路徑的預設值會用到 $HOME,set -u 下裸寫會讓腳本提早死掉)
+( cd "$T/repo" && env -u HOME -u CODEX_DECIDE_LOG bash "$SCRIPT" --help >"$DL/nohome.out" 2>"$DL/nohome.err" ); nh_rc=$?
+( cd "$T/repo" && bash "$SCRIPT" --help >"$DL/home.out" 2>"$DL/home.err" )
+ok "沒有 HOME: --help 仍 exit 0"             test "$nh_rc" -eq 0
+ok "沒有 HOME: stdout 與有 HOME 時相同"      cmp -s "$DL/nohome.out" "$DL/home.out"
+ok "沒有 HOME: stderr 是空的"                test ! -s "$DL/nohome.err"
+
+# 提早離開(還沒選定模型)時,不得記到環境繼承的同名變數
+MODEL=$'evil\tmodel' USED_LEGACY=$'1\tx' VERDICT=ZZ dl_run renv.tsv --question "$QB" --prefer A
+ok "紀錄 提早離開: 不記環境繼承的 MODEL／USED_LEGACY／VERDICT" dl_row_is renv.tsv model= used_legacy=0 agree= verdict_kind= rc=2
+ok "紀錄 提早離開: 仍是 19 欄"               test "$(awk -F'\t' 'NF!=19' "$DL/renv.tsv" | wc -l)" -eq 0
+
+# 被 SIGTERM 砍掉(背景逾時、TaskStop): signal 路徑上 EXIT trap 看到的 $? 是 0(Linux 與 Git Bash 都實測過),
+# 不得記成共識成立。stub 睡 6 秒後自然結束(留餘裕給輪詢與 kill,主機重載時才不會先跑完);TERM 要送給腳本本身——
+# 寫成 `cd … && bash … &` 的話 & 套在整個 and-list 上,$! 會是包住它的子殼。
+rm -f "$T/stub-started" "$DL/term.tsv" "$DL/term.pid"
+( cd "$T/repo" || exit 1
+  CODEX_DECIDE_LOG="$DL/term.tsv" EVENTS="$T/ev.jsonl" STUB_SLEEP=6 PATH="$T/bin:$PATH" \
+    bash "$SCRIPT" "${BASE[@]}" >/dev/null 2>&1 &
+  echo $! > "$DL/term.pid"; wait ) &
+term_outer=$!
+for _ in $(seq 1 150); do [ -s "$T/stub-started" ] && [ -s "$DL/term.pid" ] && break; sleep 0.1; done
+ok "SIGTERM: stub 確實在跑(否則下面沒意義)"  test -s "$T/stub-started"
+kill -TERM "$(cat "$DL/term.pid")" 2>/dev/null
+wait "$term_outer" 2>/dev/null
+kill "$(cat "$T/stub-started" 2>/dev/null)" 2>/dev/null
+ok "SIGTERM: 有寫紀錄"                       test "$(dl_rows term.tsv)" = 1
+ok "SIGTERM: 記成 INTERRUPTED、不是 OK"      test "$(dl_col term.tsv status)" = INTERRUPTED
+ok "SIGTERM: rc 不宣稱 0"                    test "$(dl_col term.tsv rc)" != 0
+
+# 兩個程序同時第一次寫同一個檔: 兩列資料都完整(19 欄)
+rm -f "$DL/conc.tsv"
+( cd "$T/repo" && CODEX_DECIDE_LOG="$DL/conc.tsv" EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" "${BASE[@]}" >/dev/null 2>&1 ) &
+( cd "$T/repo" && CODEX_DECIDE_LOG="$DL/conc.tsv" EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" STUB_VERDICT=B bash "$SCRIPT" "${BASE[@]}" >/dev/null 2>&1 ) &
+wait
+ok "併發首寫: 兩列資料都在"                 test "$(dl_rows conc.tsv)" = 2
+ok "併發首寫: 資料列都是 19 欄"             test "$(grep -v "^ts$(printf '\t')" "$DL/conc.tsv" | awk -F'\t' 'NF!=19' | wc -l)" -eq 0
+
+# 紀錄檔存在但是空的 → 仍先寫表頭(依欄名取值的讀法靠它)
+: > "$DL/empty.tsv"
+( cd "$T/repo" && CODEX_DECIDE_LOG="$DL/empty.tsv" EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" "${BASE[@]}" >/dev/null 2>&1 )
+ok "空檔: 第一行是表頭、第二行是資料"      test "$(head -1 "$DL/empty.tsv")" = "$DL_HEADER" -a "$(dl_rows empty.tsv)" = 1
+
+# 上一次留下沒有換行的半列(磁碟滿、被砍) → 這次的列不得接在後面;報表也不計半列與拼接列
+{ echo "$DL_HEADER"; printf '2026-11-28T00:00:00Z\trepo\tq.md\trequired\tgpt-6.2-sol'; } > "$DL/partial.tsv"
+( cd "$T/repo" && CODEX_DECIDE_LOG="$DL/partial.tsv" EVENTS="$T/ev.jsonl" PATH="$T/bin:$PATH" bash "$SCRIPT" "${BASE[@]}" >/dev/null 2>&1 )
+ok "半列之後: 新的一列獨立成行(19 欄、status=OK)" test "$(tail -1 "$DL/partial.tsv" | awk -F'\t' '{print NF, $17}')" = "19 OK"
+printf '%s\n%s\n' "$DL_HEADER" "$(tail -1 "$DL/partial.tsv")" > "$DL/glued.tsv"                 # 一列完整
+printf 'x\ty\t%s\n' "$(tail -1 "$DL/partial.tsv")" >> "$DL/glued.tsv"   # 拼接列: 殘列＋完整列
+p_out="$(bash "$ROOT/scripts/codex-usage.sh" --log "$DL/no-such-review.tsv" --decide-log "$DL/glued.tsv" 2>/dev/null)"
+ok "報表: 拼接列(多於 19 欄)不計"           bash -c 'printf "%s" "$1" | grep -q "呼叫 1 次  OK=1 "' _ "$p_out"
+
+# codex-usage.sh 讀得到: review log 不存在時仍印 codex-decide 區塊,計數正確,--help 不計
+USAGE="$ROOT/scripts/codex-usage.sh"
+{ echo "$DL_HEADER"; for f in r0 r1 r2 r3 r3b r4 r5 rh rl; do grep -v "^ts$(printf '\t')" "$DL/$f.tsv"; done; } > "$DL/all.tsv"
+u_out="$(bash "$USAGE" --log "$DL/no-such-review.tsv" --decide-log "$DL/all.tsv" 2>/dev/null)"; u_rc=$?
+ok "codex-usage: review log 不存在仍 exit 0"  test "$u_rc" -eq 0
+ok "codex-usage: 印出 codex-decide 區塊"      bash -c 'printf "%s" "$1" | grep -q "codex-decide(離開碼)"' _ "$u_out"
+ok "codex-usage: 計數(--help 不計,共 8 次)"   bash -c 'printf "%s" "$1" | grep -q "呼叫 8 次  OK=2  NO_CONSENSUS=2  FAILED=1  RATE_LIMITED=1  STOP=1  CONTRACT_ERROR=1  已退回舊模型=1"' _ "$u_out"
+ok "codex-usage: exit 3 的原因依模型分列"     bash -c 'printf "%s" "$1" | grep -qE "^  gpt-6\.2-sol/medium +.*missing_fields:裁定=1"' _ "$u_out"
+# 沒有 HOME、呼叫端只靠 CODEX_REVIEW_LOG／--decide-log 指定路徑: 不得在 set -u 下死掉
+u_rc=0; env -u HOME -u CODEX_DECIDE_LOG CODEX_REVIEW_LOG="$DL/no-such-review.tsv" bash "$USAGE" --help >/dev/null 2>&1 || u_rc=$?
+ok "codex-usage: 沒有 HOME 時 --help 仍 exit 0" test "$u_rc" -eq 0
+u_nohome="$(env -u HOME -u CODEX_DECIDE_LOG CODEX_REVIEW_LOG="$DL/no-such-review.tsv" bash "$USAGE" --decide-log "$DL/all.tsv" 2>/dev/null)"; u_rc=$?
+ok "codex-usage: 沒有 HOME 時 decide 區塊照常" test "$u_rc" -eq 0 -a "$(printf '%s' "$u_nohome" | grep -c '呼叫 8 次')" -eq 1
+# review 報表的 awk 失敗 → 整支的離開碼仍是它的(加入 decide 區塊前就是這樣),decide 有無都一樣。
+# 假 awk: 參數裡出現 review log 路徑就回 2,其他照轉真 awk
+REAL_AWK="$(command -v awk)"; mkdir -p "$T/binawk"
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = "%s" ] && exit 2; done\nexec "%s" "$@"\n' "$DL/review.tsv" "$REAL_AWK" > "$T/binawk/awk"; chmod +x "$T/binawk/awk"
+printf 'ts\n' > "$DL/review.tsv"
+u_rc=0; PATH="$T/binawk:$PATH" bash "$USAGE" --log "$DL/review.tsv" --decide-log "$DL/all.tsv" >/dev/null 2>&1 || u_rc=$?
+ok "codex-usage: review awk 失敗 → 離開碼不被 decide 區塊蓋掉" test "$u_rc" -eq 2
+u_rc=0; PATH="$T/binawk:$PATH" bash "$USAGE" --log "$DL/review.tsv" --decide-log "$DL/no-such-decide.tsv" >/dev/null 2>&1 || u_rc=$?
+ok "codex-usage: review awk 失敗、decide 紀錄不存在 → 仍是 2" test "$u_rc" -eq 2
+u_rc=0; bash "$USAGE" --log "$DL/review.tsv" --decide-log "$DL/all.tsv" >/dev/null 2>&1 || u_rc=$?
+ok "codex-usage: 對照 真 awk → exit 0"        test "$u_rc" -eq 0
+ok "codex-usage: 未送出的另列"                 bash -c 'printf "%s" "$1" | grep -q "(未送出) .* CONTRACT_ERROR=1"' _ "$u_out"
+u_out="$(bash "$USAGE" --log "$DL/no-such-review.tsv" --decide-log "$DL/all.tsv" --since 2999-01-01 2>/dev/null)"
+ok "codex-usage: --since 套用到 decide 區塊"  bash -c 'printf "%s" "$1" | grep -q "(範圍內沒有紀錄)"' _ "$u_out"
+# === DECIDE-LOG-END ===
 
 # 不得再出現已退出的 gpt-5.6(2026-10-08 使用者裁定最低 gpt-6)
 ok "映射不含 gpt-5.6" bash -c "! grep -qE 'MODEL=\"gpt-5\.6' '$SCRIPT'"
